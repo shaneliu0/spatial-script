@@ -3,6 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "dist/spatial-core.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --no-incremental-marking --test",
+    "sync": "bash scripts/sync-to-swift.sh"
+  },
   "dependencies": {
     "three": "0.186.0"
   },
