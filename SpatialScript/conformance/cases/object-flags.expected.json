@@ -1,0 +1,41 @@
+{
+  "backend": "three",
+  "platform": "web",
+  "warnings": [
+    "groundingShadow is unsupported on the three.js backend"
+  ],
+  "objects": [
+    {
+      "name": "flagged",
+      "opacity": 0.4,
+      "billboard": true,
+      "groundingShadow": true,
+      "hoverEffect": "highlight",
+      "manipulable": true,
+      "renderOrder": 3,
+      "castShadow": true,
+      "receiveShadow": true,
+      "visible": true
+    },
+    {
+      "name": "hidden",
+      "visible": false
+    },
+    {
+      "name": "plain",
+      "opacity": 1,
+      "billboard": false,
+      "groundingShadow": false,
+      "hoverEffect": null,
+      "manipulable": false,
+      "renderOrder": 0
+    },
+    {
+      "name": "copy",
+      "opacity": 0.4,
+      "billboard": true,
+      "manipulable": true,
+      "hoverEffect": "highlight"
+    }
+  ]
+}

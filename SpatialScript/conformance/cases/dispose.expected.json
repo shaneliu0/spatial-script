@@ -1,0 +1,16 @@
+{
+  "objectCount": 0,
+  "logs": [
+    "willRemove ran"
+  ],
+  "objects": [
+    {
+      "name": "box",
+      "absent": true
+    },
+    {
+      "name": "child",
+      "absent": true
+    }
+  ]
+}

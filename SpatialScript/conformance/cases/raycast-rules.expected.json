@@ -1,0 +1,23 @@
+{
+  "objects": [
+    {
+      "name": "probe",
+      "userData": {
+        "hits": [
+          "child",
+          "top"
+        ],
+        "distances": [
+          0.95,
+          1.95
+        ],
+        "direct": [
+          "top"
+        ],
+        "near": [
+          "child"
+        ]
+      }
+    }
+  ]
+}

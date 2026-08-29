@@ -1,0 +1,13 @@
+{
+  "objectCount": 1,
+  "objects": [
+    {
+      "name": "keep",
+      "parent": 0
+    },
+    {
+      "name": "temp",
+      "absent": true
+    }
+  ]
+}

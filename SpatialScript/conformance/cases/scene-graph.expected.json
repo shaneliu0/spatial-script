@@ -1,0 +1,39 @@
+{
+  "objectCount": 2,
+  "objects": [
+    {
+      "name": "root",
+      "type": "Group",
+      "parent": 0,
+      "position": [
+        0,
+        0.1,
+        0
+      ],
+      "userData": {
+        "found": true,
+        "byId": true,
+        "visited": 3
+      }
+    },
+    {
+      "name": "child",
+      "type": "Mesh",
+      "parent": 1,
+      "position": [
+        0.2,
+        0,
+        0
+      ],
+      "worldPosition": [
+        0.2,
+        0.1,
+        0
+      ]
+    },
+    {
+      "name": "orphan",
+      "absent": true
+    }
+  ]
+}

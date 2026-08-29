@@ -1,0 +1,28 @@
+{
+  "objectCount": 1,
+  "objects": [
+    {
+      "name": "keep",
+      "parent": 0,
+      "userData": {
+        "branchParent": "detached",
+        "foundAfterDestroy": true,
+        "reuseError": "SpatialUnsupportedError:destroyed-object",
+        "leafError": "SpatialUnsupportedError:destroyed-object",
+        "sceneError": "SpatialUnsupportedError:destroy-scene"
+      }
+    },
+    {
+      "name": "branch",
+      "absent": true
+    },
+    {
+      "name": "leafA",
+      "absent": true
+    },
+    {
+      "name": "leafB",
+      "absent": true
+    }
+  ]
+}
