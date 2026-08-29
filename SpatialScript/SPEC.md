@@ -683,3 +683,109 @@ exposes `nativeDump()` producing the same shape from RealityKit entities (transf
 component presence, material type and color). Conformance compares both.
 
 ---
+
+## 9. Conformance suite
+
+`conformance/cases/<name>.js` is a script. `conformance/cases/<name>.expected.json` is a subset
+of the dump that must match after `frames` ticks (default 3, at 1/60 s) plus any `inject` steps
+listed in an optional `<name>.steps.json` (`[{ "inject": "tap", "target": "cube" }, { "frames": 60 }]`).
+
+Matching rules: every key in expected must exist in actual with an equal value; numbers match
+within 1e-3; arrays match element-wise; objects in `objects` are matched by `name`. Keys absent
+from expected are unconstrained. `warnings` in expected must each appear as a substring of some
+actual warning.
+
+Runners:
+
+- `conformance/run-node.mjs`: runs the core in Node with a recording consumer (no rendering).
+  Fast structural check for the core itself.
+- `web/harness/run.mjs`: runs each case in headless Chromium through Playwright, compares the
+  dump, and writes a screenshot per case to `web/harness/out/<name>.png`.
+- Swift: `RealityKitScriptingPackageTests` loads every case from the repository path, runs it
+  through `JavaScriptScene`, ticks, compares both `dump()` and `nativeDump()` against expected.
+
+A case fails in any runner if it throws, if the dump does not match, or if `errors` is non-empty
+unless expected lists the error.
+
+---
+
+## 10. Repository layout
+
+```
+./
+  SpatialScript/
+    SPEC.md                       this document
+    package.json                  pnpm workspace root
+    pnpm-workspace.yaml
+    types/spatial.d.ts            TypeScript declarations for scripts (the agent-facing contract)
+    core/                         shared runtime, ESM sources, esbuild to dist/spatial-core.js
+      src/
+      dist/spatial-core.js        committed build artifact
+      test/                       node unit tests
+      scripts/sync-to-swift.sh    copies dist into the Swift package resources
+    web/                          three.js consumer, dev page, Playwright harness
+      src/
+      harness/
+    conformance/
+      cases/
+      run-node.mjs
+      match.mjs                   shared subset matcher used by node and web runners
+    examples/                     demo scripts used by the macOS host and by verification
+  Packages/RealityKitScripting/   Swift package: JavaScriptCore host and RealityKit consumer
+    Sources/RealityKitScripting/
+      Resources/spatial-core.js   copy of the core bundle
+    Tests/
+```
+
+---
+
+## 11. Dev transport (DEBUG builds only)
+
+The macOS host starts an HTTP server on `127.0.0.1:8787` inside `#if DEBUG`. Routes:
+
+- `POST /script` body is JavaScript; the app replaces the scene's script. Response is
+  `{ ok, error: { message, line, column } | null }`.
+- `GET /dump` returns `Spatial.dump()`; `GET /native-dump` returns the RealityKit dump.
+- `GET /logs` returns console and error lines since the last call.
+- `POST /inject` body `{ "type": "tap" | "drag" | "hover" | "key", ... }` mirrors `Spatial.inject`.
+- `GET /health`.
+- `GET /stats` returns the last 120 frames' core tick time, command apply time, command count,
+  frame interval, native entity count, the last push-to-first-frame time, and resource cache
+  counters.
+- `POST /parity` body `{ "source": "<script>", "dt": 0.0166, "steps": [ { "frames": N } |
+  { "inject": ... } ] }` (steps in the conformance format, section 9). The app loads the script,
+  then runs the plan deterministically: every tick uses exactly `dt`, one tick per display frame,
+  and each inject is applied at the exact frame the plan reaches it. When the plan completes the
+  app stops ticking and holds the final frame until the next `/script` or `/parity`, so a window
+  capture matches the returned state. Response: `{ ok, error, dump, nativeDump, console:
+  [{ level, message }], frames }`. This is the Mac side of the cross-backend parity gate in
+  `SpatialScript/parity`, whose web side is `web/harness/parity.mjs` with the same plan.
+
+`examples/push.sh <file.js>` posts a script. Screenshots are taken from outside the app with
+`screencapture -l <windowID>`. Release builds compile none of this.
+
+---
+
+## 12. Implementation rules
+
+- Swift 6 language mode, strict concurrency. Every RealityKit and JavaScriptCore access is
+  `@MainActor`. No `defer` in async functions. New Swift files carry the file header with
+  `Shane Liu` as author.
+- No tool or assistant attribution anywhere in code, comments, tests, sample data, or commit messages.
+- The three.js bundle in the core is built from the npm `three` package with esbuild, tree-shaken
+  to the exports in section 3. The LICENSE for three.js is reproduced in `core/THIRD_PARTY.md`.
+- The core must not reference `window`, `document`, `self`, `navigator`, `fetch`, or `Image` at
+  load time or during `tick`. A Node test asserts that the bundle evaluates in a bare VM context
+  with only `globalThis` and `__spatialNative` present.
+- Consumers must apply a `tick` of 2000 objects with transform changes within 8 ms on this
+  machine. A benchmark test in each consumer asserts this, and the benchmark must go through the
+  real engine boundary (JavaScriptCore values or the browser), not native arrays.
+- End-to-end targets on this machine for the RealityKit consumer, measured in the macOS host:
+  1500 independently moving meshes that share one geometry render at 60 frames per second or
+  better, a scene of 1500 meshes loads in under one second from script push to first frame, and
+  memory returns to within 10 percent of baseline after the scene is replaced. The macOS host's
+  DEBUG dev server exposes `GET /stats` with the last 120 frames' core tick time, command apply
+  time, command count, frame interval, and native entity count so these can be measured.
+- Unsupported behavior warns once per feature per scene through `console.warn` and appears in
+  `dump().warnings`. Nothing silently no-ops.
+- Every public behavior in sections 2, 3, 5, 6, 8 has at least one conformance case or unit test.
