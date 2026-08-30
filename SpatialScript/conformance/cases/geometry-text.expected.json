@@ -1,0 +1,22 @@
+{
+  "objects": [
+    {
+      "name": "label",
+      "geometry": {
+        "type": "TextGeometry",
+        "parameters": {
+          "text": "Hi",
+          "size": 0.1,
+          "depth": 0.02,
+          "font": "default"
+        }
+      },
+      "userData": {
+        "hasVertices": true,
+        "hasWidth": true,
+        "hasDepth": true,
+        "fontError": "SpatialUnsupportedError:TextGeometry.font"
+      }
+    }
+  ]
+}

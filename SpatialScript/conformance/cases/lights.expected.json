@@ -1,0 +1,75 @@
+{
+  "objects": [
+    {
+      "name": "ambient",
+      "type": "AmbientLight",
+      "light": {
+        "type": "ambient",
+        "color": [
+          0.051269,
+          0.051269,
+          0.051269
+        ],
+        "intensity": 0.5,
+        "direction": null
+      }
+    },
+    {
+      "name": "sun",
+      "type": "DirectionalLight",
+      "light": {
+        "type": "directional",
+        "color": [
+          1,
+          1,
+          1
+        ],
+        "intensity": 2,
+        "castShadow": false,
+        "direction": [
+          0,
+          -1,
+          0
+        ]
+      }
+    },
+    {
+      "name": "point",
+      "type": "PointLight",
+      "light": {
+        "type": "point",
+        "color": [
+          1,
+          0,
+          0
+        ],
+        "intensity": 5,
+        "distance": 3,
+        "decay": 2,
+        "direction": null
+      }
+    },
+    {
+      "name": "spot",
+      "type": "SpotLight",
+      "light": {
+        "type": "spot",
+        "color": [
+          0,
+          1,
+          0
+        ],
+        "intensity": 8,
+        "distance": 4,
+        "angle": 0.5235988,
+        "penumbra": 0.3,
+        "decay": 2,
+        "direction": [
+          0.7071068,
+          -0.7071068,
+          0
+        ]
+      }
+    }
+  ]
+}

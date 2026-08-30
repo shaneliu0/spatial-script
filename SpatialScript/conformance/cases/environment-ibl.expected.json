@@ -1,0 +1,15 @@
+{
+  "environment": {
+    "url": "asset://studio.exr",
+    "intensity": 1.5
+  },
+  "objects": [
+    {
+      "name": "marker",
+      "userData": {
+        "badEnvironment": "TypeError",
+        "sceneBackground": "SpatialUnsupportedError"
+      }
+    }
+  ]
+}

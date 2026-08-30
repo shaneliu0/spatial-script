@@ -1,0 +1,36 @@
+{
+  "warnings": [
+    "PointLight shadows are unsupported"
+  ],
+  "objects": [
+    {
+      "name": "floor",
+      "castShadow": false,
+      "receiveShadow": true
+    },
+    {
+      "name": "caster",
+      "castShadow": true,
+      "receiveShadow": false
+    },
+    {
+      "name": "sun",
+      "light": {
+        "castShadow": true
+      }
+    },
+    {
+      "name": "spot",
+      "light": {
+        "castShadow": true
+      }
+    },
+    {
+      "name": "lamp",
+      "light": {
+        "type": "point",
+        "castShadow": true
+      }
+    }
+  ]
+}

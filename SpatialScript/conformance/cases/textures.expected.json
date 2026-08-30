@@ -1,0 +1,25 @@
+{
+  "objects": [
+    {
+      "name": "panel",
+      "userData": {
+        "loaded": true,
+        "textureError": "not found on disk",
+        "hasMap": true,
+        "hasNormalMap": true,
+        "repeat": [
+          2,
+          3
+        ],
+        "offset": [
+          0.25,
+          0.5
+        ],
+        "wrapS": 1000,
+        "wrapT": 1002,
+        "flipY": false,
+        "brokenUrl": "asset://missing.png"
+      }
+    }
+  ]
+}

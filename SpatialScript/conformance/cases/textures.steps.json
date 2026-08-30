@@ -1,0 +1,23 @@
+[
+  {
+    "frames": 1
+  },
+  {
+    "dispatch": {
+      "type": "textureLoaded",
+      "texture": "asset://grid.png"
+    }
+  },
+  {
+    "dispatch": {
+      "type": "textureError",
+      "texture": "asset://missing.png",
+      "payload": {
+        "message": "not found on disk"
+      }
+    }
+  },
+  {
+    "frames": 2
+  }
+]

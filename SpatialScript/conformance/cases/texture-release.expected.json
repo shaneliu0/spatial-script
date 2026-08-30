@@ -1,0 +1,32 @@
+{
+  "objects": [
+    {
+      "name": "panel",
+      "material": {
+        "type": "MeshStandardMaterial",
+        "maps": {
+          "map": 1,
+          "normalMap": null,
+          "roughnessMap": null,
+          "metalnessMap": null,
+          "emissiveMap": null
+        }
+      },
+      "userData": {
+        "disposed": true,
+        "stillMapped": true
+      }
+    },
+    {
+      "name": "probe",
+      "material": {
+        "maps": {
+          "map": 4
+        }
+      },
+      "userData": {
+        "frame": 10
+      }
+    }
+  ]
+}

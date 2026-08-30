@@ -1,0 +1,35 @@
+{
+  "backend": "realitykit",
+  "warnings": [
+    "MeshStandardMaterial.wireframe is unsupported in RealityKit",
+    "AdditiveBlending is unsupported in RealityKit"
+  ],
+  "objects": [
+    {
+      "name": "styled",
+      "material": {
+        "type": "MeshStandardMaterial",
+        "color": [
+          0.215861,
+          0.215861,
+          0.215861
+        ],
+        "opacity": 0.5,
+        "transparent": true,
+        "side": 2,
+        "wireframe": true,
+        "metalness": 0.9,
+        "roughness": 0.1,
+        "emissive": [
+          0,
+          1,
+          0
+        ],
+        "emissiveIntensity": 2,
+        "depthWrite": false,
+        "depthTest": false,
+        "blending": 2
+      }
+    }
+  ]
+}

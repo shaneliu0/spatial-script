@@ -1,0 +1,103 @@
+{
+  "objectCount": 9,
+  "objects": [
+    {
+      "name": "box",
+      "geometry": {
+        "type": "BoxGeometry",
+        "parameters": {
+          "width": 0.2,
+          "height": 0.3,
+          "depth": 0.4
+        }
+      }
+    },
+    {
+      "name": "sphere",
+      "geometry": {
+        "type": "SphereGeometry",
+        "parameters": {
+          "radius": 0.15,
+          "widthSegments": 16,
+          "heightSegments": 12
+        }
+      }
+    },
+    {
+      "name": "plane",
+      "geometry": {
+        "type": "PlaneGeometry",
+        "parameters": {
+          "width": 0.5,
+          "height": 0.25
+        }
+      }
+    },
+    {
+      "name": "cylinder",
+      "geometry": {
+        "type": "CylinderGeometry",
+        "parameters": {
+          "radiusTop": 0.1,
+          "radiusBottom": 0.12,
+          "height": 0.3,
+          "radialSegments": 12
+        }
+      }
+    },
+    {
+      "name": "cone",
+      "geometry": {
+        "type": "ConeGeometry",
+        "parameters": {
+          "radius": 0.1,
+          "height": 0.3,
+          "radialSegments": 12
+        }
+      }
+    },
+    {
+      "name": "torus",
+      "geometry": {
+        "type": "TorusGeometry",
+        "parameters": {
+          "radius": 0.2,
+          "tube": 0.05,
+          "radialSegments": 8,
+          "tubularSegments": 24
+        }
+      }
+    },
+    {
+      "name": "capsule",
+      "geometry": {
+        "type": "CapsuleGeometry",
+        "parameters": {
+          "radius": 0.08,
+          "height": 0.2
+        }
+      }
+    },
+    {
+      "name": "circle",
+      "geometry": {
+        "type": "CircleGeometry",
+        "parameters": {
+          "radius": 0.15,
+          "segments": 20
+        }
+      }
+    },
+    {
+      "name": "ring",
+      "geometry": {
+        "type": "RingGeometry",
+        "parameters": {
+          "innerRadius": 0.08,
+          "outerRadius": 0.16,
+          "thetaSegments": 20
+        }
+      }
+    }
+  ]
+}

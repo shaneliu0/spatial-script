@@ -1,0 +1,53 @@
+{
+  "objects": [
+    {
+      "name": "basic",
+      "material": {
+        "type": "MeshBasicMaterial",
+        "color": [
+          0.033105,
+          0.132868,
+          1
+        ],
+        "opacity": 1,
+        "transparent": false,
+        "side": 0
+      },
+      "userData": {
+        "arrayError": "SpatialUnsupportedError"
+      }
+    },
+    {
+      "name": "standard",
+      "material": {
+        "type": "MeshStandardMaterial",
+        "color": [
+          1,
+          1,
+          1
+        ],
+        "metalness": 0.5,
+        "roughness": 0.25
+      }
+    },
+    {
+      "name": "physical",
+      "material": {
+        "type": "MeshPhysicalMaterial",
+        "color": [
+          0.033105,
+          0.132868,
+          1
+        ],
+        "clearcoat": 0.8,
+        "clearcoatRoughness": 0.1
+      }
+    },
+    {
+      "name": "occluder",
+      "material": {
+        "type": "OcclusionMaterial"
+      }
+    }
+  ]
+}

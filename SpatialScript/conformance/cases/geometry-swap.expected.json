@@ -1,0 +1,13 @@
+{
+  "objects": [
+    {
+      "name": "shape",
+      "geometry": {
+        "type": "SphereGeometry",
+        "parameters": {
+          "radius": 0.12
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "objects": [
+    {
+      "name": "quad",
+      "geometry": {
+        "type": "BufferGeometry",
+        "parameters": null
+      },
+      "material": {
+        "side": 2
+      },
+      "userData": {
+        "hasNormals": true,
+        "indexCount": 6,
+        "positionCount": 4,
+        "boundingBox": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0.2,
+            0.2,
+            0
+          ]
+        ],
+        "boundingSphereRadius": 0.1414214
+      }
+    },
+    {
+      "name": "clone",
+      "geometry": {
+        "type": "BufferGeometry"
+      }
+    }
+  ]
+}

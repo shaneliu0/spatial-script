@@ -1,0 +1,16 @@
+{
+  "objects": [
+    {
+      "name": "box",
+      "material": {
+        "type": "MeshPhysicalMaterial",
+        "color": [
+          1,
+          0,
+          0
+        ],
+        "roughness": 0.4
+      }
+    }
+  ]
+}
