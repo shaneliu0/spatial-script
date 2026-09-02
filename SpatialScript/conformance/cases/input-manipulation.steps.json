@@ -1,0 +1,38 @@
+[
+  {
+    "frames": 1
+  },
+  {
+    "dispatch": {
+      "type": "manipulationstart",
+      "target": "knob"
+    }
+  },
+  {
+    "dispatch": {
+      "type": "manipulation",
+      "target": "knob"
+    }
+  },
+  {
+    "dispatch": {
+      "type": "manipulationend",
+      "target": "knob"
+    }
+  },
+  {
+    "sync": [
+      {
+        "target": "knob",
+        "position": [
+          0.05,
+          0.02,
+          0
+        ]
+      }
+    ]
+  },
+  {
+    "frames": 1
+  }
+]

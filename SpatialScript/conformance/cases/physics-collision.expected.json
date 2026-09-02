@@ -1,0 +1,31 @@
+{
+  "objects": [
+    {
+      "name": "a",
+      "userData": {
+        "hits": 1,
+        "other": "b",
+        "impulse": 1.5,
+        "normal": [
+          0,
+          1,
+          0
+        ],
+        "point": [
+          0,
+          0.05,
+          0
+        ]
+      }
+    },
+    {
+      "name": "b",
+      "userData": {
+        "hits": 1,
+        "other": "a",
+        "target": "b",
+        "ended": true
+      }
+    }
+  ]
+}

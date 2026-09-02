@@ -1,0 +1,60 @@
+{
+  "joints": [
+    {
+      "type": "fixed",
+      "bodyA": 1,
+      "bodyB": 2
+    },
+    {
+      "type": "revolute",
+      "bodyA": 1,
+      "bodyB": 3,
+      "axis": [
+        0,
+        0,
+        1
+      ],
+      "anchorA": [
+        0,
+        0.1,
+        0
+      ],
+      "anchorB": [
+        0,
+        -0.1,
+        0
+      ],
+      "limits": [
+        -1,
+        1
+      ]
+    },
+    {
+      "type": "spherical",
+      "bodyA": 1,
+      "bodyB": 4
+    },
+    {
+      "type": "prismatic",
+      "bodyA": 1,
+      "bodyB": 5,
+      "axis": [
+        1,
+        0,
+        0
+      ],
+      "limits": [
+        0,
+        0.5
+      ]
+    }
+  ],
+  "objects": [
+    {
+      "name": "base",
+      "userData": {
+        "noBodyError": "SpatialUnsupportedError"
+      }
+    }
+  ]
+}

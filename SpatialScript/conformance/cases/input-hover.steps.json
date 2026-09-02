@@ -1,0 +1,21 @@
+[
+  {
+    "frames": 1
+  },
+  {
+    "inject": "hover",
+    "target": "box",
+    "entering": true
+  },
+  {
+    "frames": 1
+  },
+  {
+    "inject": "hover",
+    "target": "box",
+    "entering": false
+  },
+  {
+    "frames": 1
+  }
+]

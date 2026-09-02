@@ -1,0 +1,38 @@
+{
+  "objects": [
+    {
+      "name": "box",
+      "interactive": {
+        "tap": true,
+        "hover": false,
+        "drag": false
+      },
+      "material": {
+        "color": [
+          1,
+          0,
+          0
+        ]
+      },
+      "userData": {
+        "taps": 1,
+        "point": [
+          0.1,
+          0,
+          0
+        ],
+        "targetName": "box",
+        "eventType": "tap",
+        "hasListener": true
+      }
+    },
+    {
+      "name": "quiet",
+      "interactive": {
+        "tap": false,
+        "hover": false,
+        "drag": false
+      }
+    }
+  ]
+}

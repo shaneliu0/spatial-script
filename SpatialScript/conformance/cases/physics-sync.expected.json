@@ -1,0 +1,23 @@
+{
+  "objects": [
+    {
+      "name": "ball",
+      "position": [
+        0.3,
+        0.2,
+        0
+      ],
+      "worldPosition": [
+        0.4,
+        0.2,
+        0
+      ],
+      "velocity": [
+        0,
+        -1.25,
+        0
+      ],
+      "isSleeping": false
+    }
+  ]
+}

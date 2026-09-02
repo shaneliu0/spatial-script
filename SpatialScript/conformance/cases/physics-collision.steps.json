@@ -1,0 +1,40 @@
+[
+  {
+    "frames": 1
+  },
+  {
+    "dispatch": {
+      "type": "collisionstart",
+      "target": "a",
+      "payload": {
+        "other": "b",
+        "point": [
+          0,
+          0.05,
+          0
+        ],
+        "normal": [
+          0,
+          1,
+          0
+        ],
+        "impulse": 1.5
+      }
+    }
+  },
+  {
+    "frames": 1
+  },
+  {
+    "dispatch": {
+      "type": "collisionend",
+      "target": "b",
+      "payload": {
+        "other": "a"
+      }
+    }
+  },
+  {
+    "frames": 1
+  }
+]

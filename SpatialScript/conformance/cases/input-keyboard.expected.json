@@ -1,0 +1,38 @@
+{
+  "objects": [
+    {
+      "name": "mover",
+      "position": [
+        0,
+        0,
+        -0.15
+      ],
+      "userData": {
+        "pressedFrames": 1,
+        "space": false,
+        "mouse": [
+          120,
+          80
+        ],
+        "buttons": [
+          true,
+          false,
+          false
+        ],
+        "hands": [
+          true,
+          true
+        ],
+        "wDown": [
+          false,
+          true,
+          true,
+          true,
+          false,
+          false,
+          false
+        ]
+      }
+    }
+  ]
+}

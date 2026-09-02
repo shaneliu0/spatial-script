@@ -1,0 +1,55 @@
+{
+  "objects": [
+    {
+      "name": "floor",
+      "rigidBody": {
+        "type": "static",
+        "shape": "mesh",
+        "requestedShape": "mesh"
+      }
+    },
+    {
+      "name": "ball",
+      "rigidBody": {
+        "type": "dynamic",
+        "mass": 5,
+        "shape": "sphere",
+        "requestedShape": "auto",
+        "friction": 0.3,
+        "restitution": 0.6,
+        "linearDamping": 0.1,
+        "angularDamping": 0.2,
+        "isTrigger": false,
+        "gravity": true
+      }
+    },
+    {
+      "name": "pill",
+      "rigidBody": {
+        "type": "kinematic",
+        "shape": "capsule"
+      }
+    },
+    {
+      "name": "donut",
+      "rigidBody": {
+        "type": "dynamic",
+        "shape": "convex",
+        "isTrigger": true,
+        "gravity": false
+      }
+    },
+    {
+      "name": "crate",
+      "rigidBody": {
+        "type": "dynamic",
+        "shape": "box",
+        "mass": 1
+      }
+    },
+    {
+      "name": "plain",
+      "rigidBody": null
+    }
+  ]
+}

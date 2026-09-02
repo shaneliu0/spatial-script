@@ -1,0 +1,38 @@
+[
+  {
+    "frames": 1
+  },
+  {
+    "sync": [
+      {
+        "target": "ball",
+        "position": [
+          0.4,
+          0.2,
+          0
+        ]
+      }
+    ]
+  },
+  {
+    "syncBodies": [
+      {
+        "target": "ball",
+        "linear": [
+          0,
+          -1.25,
+          0
+        ],
+        "angular": [
+          0,
+          0,
+          0
+        ],
+        "sleeping": false
+      }
+    ]
+  },
+  {
+    "frames": 1
+  }
+]

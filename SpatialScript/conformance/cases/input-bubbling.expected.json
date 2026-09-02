@@ -1,0 +1,14 @@
+{
+  "objects": [
+    {
+      "name": "child",
+      "userData": {
+        "order": [
+          "child/child",
+          "group/child",
+          "scene/child"
+        ]
+      }
+    }
+  ]
+}

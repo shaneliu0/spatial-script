@@ -1,0 +1,18 @@
+[
+  {
+    "frames": 1
+  },
+  {
+    "inject": "drag",
+    "target": "box",
+    "translation": [
+      0.2,
+      0.1,
+      0
+    ],
+    "steps": 2
+  },
+  {
+    "frames": 1
+  }
+]

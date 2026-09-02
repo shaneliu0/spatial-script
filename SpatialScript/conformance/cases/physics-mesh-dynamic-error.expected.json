@@ -1,0 +1,12 @@
+{
+  "objects": [
+    {
+      "name": "bad",
+      "rigidBody": null,
+      "userData": {
+        "caught": "SpatialUnsupportedError:RigidBody.shape=mesh",
+        "typeError": "TypeError"
+      }
+    }
+  ]
+}

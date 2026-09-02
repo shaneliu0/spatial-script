@@ -1,0 +1,19 @@
+{
+  "objects": [
+    {
+      "name": "box",
+      "hoverEffect": null,
+      "interactive": {
+        "tap": false,
+        "hover": true,
+        "drag": false
+      },
+      "userData": {
+        "events": [
+          "enter",
+          "exit"
+        ]
+      }
+    }
+  ]
+}

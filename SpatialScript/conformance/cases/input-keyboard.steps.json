@@ -1,0 +1,51 @@
+[
+  {
+    "frames": 1
+  },
+  {
+    "inject": "key",
+    "code": "KeyW",
+    "down": true
+  },
+  {
+    "frames": 3
+  },
+  {
+    "inject": "key",
+    "code": "KeyW",
+    "down": false
+  },
+  {
+    "frames": 2
+  },
+  {
+    "setInput": {
+      "keyboard": {
+        "down": [],
+        "pressed": []
+      },
+      "mouse": {
+        "position": [
+          120,
+          80
+        ],
+        "buttons": [
+          true,
+          false,
+          false
+        ],
+        "delta": [
+          2,
+          -1
+        ]
+      },
+      "hands": {
+        "left": null,
+        "right": null
+      }
+    }
+  },
+  {
+    "frames": 1
+  }
+]

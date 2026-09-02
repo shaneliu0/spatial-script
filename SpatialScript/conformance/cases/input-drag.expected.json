@@ -1,0 +1,45 @@
+{
+  "objects": [
+    {
+      "name": "box",
+      "position": [
+        0.2,
+        0.1,
+        0
+      ],
+      "interactive": {
+        "tap": false,
+        "hover": false,
+        "drag": true
+      },
+      "userData": {
+        "events": [
+          "dragstart",
+          "drag",
+          "drag",
+          "dragend"
+        ],
+        "origin": [
+          0,
+          0,
+          0
+        ],
+        "startTranslation": [
+          0,
+          0,
+          0
+        ],
+        "total": [
+          0.2,
+          0.1,
+          0
+        ],
+        "endPoint": [
+          0.2,
+          0.1,
+          0
+        ]
+      }
+    }
+  ]
+}

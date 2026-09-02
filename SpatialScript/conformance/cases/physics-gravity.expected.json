@@ -1,0 +1,19 @@
+{
+  "gravity": [
+    0,
+    -3,
+    0.5
+  ],
+  "objects": [
+    {
+      "name": "marker",
+      "userData": {
+        "moon": [
+          0,
+          -1.62,
+          0
+        ]
+      }
+    }
+  ]
+}
