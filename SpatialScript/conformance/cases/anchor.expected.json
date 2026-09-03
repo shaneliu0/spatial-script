@@ -1,0 +1,54 @@
+{
+  "objects": [
+    {
+      "name": "head",
+      "type": "Anchor",
+      "anchor": {
+        "kind": "head"
+      },
+      "isAnchored": true,
+      "userData": {
+        "events": [
+          "anchored"
+        ],
+        "badAnchor": "TypeError"
+      }
+    },
+    {
+      "name": "table",
+      "anchor": {
+        "kind": "plane",
+        "plane": "horizontal",
+        "minimumBounds": [
+          0.3,
+          0.4
+        ]
+      }
+    },
+    {
+      "name": "palm",
+      "anchor": {
+        "kind": "hand",
+        "hand": "left",
+        "location": "palm"
+      }
+    },
+    {
+      "name": "poster",
+      "anchor": {
+        "kind": "image",
+        "image": "poster"
+      }
+    },
+    {
+      "name": "fixed",
+      "anchor": {
+        "kind": "world"
+      }
+    },
+    {
+      "name": "badge",
+      "parent": 1
+    }
+  ]
+}

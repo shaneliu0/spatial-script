@@ -1,0 +1,21 @@
+{
+  "frame": 3,
+  "objects": [
+    {
+      "name": "box",
+      "userData": {
+        "added": true,
+        "updates": 3,
+        "delta": 0.016666,
+        "order": [
+          "update",
+          "frame",
+          "update",
+          "frame",
+          "update",
+          "frame"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "frame": 3,
+  "elapsed": 0.05,
+  "objects": [
+    {
+      "name": "marker",
+      "userData": {
+        "count": 2,
+        "frame": 2,
+        "elapsed": 0.033333,
+        "delta": 0.016666
+      }
+    }
+  ]
+}

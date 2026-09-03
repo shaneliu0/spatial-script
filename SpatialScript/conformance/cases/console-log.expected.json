@@ -1,0 +1,14 @@
+{
+  "logs": [
+    "log: hello from the scene",
+    "warn: a warning line",
+    "info: info 42 {\"a\":1}",
+    "error: an error line",
+    "debug: frame two"
+  ],
+  "objects": [
+    {
+      "name": "marker"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "objectCount": 3,
+  "objects": [
+    {
+      "name": "before",
+      "parent": 0
+    },
+    {
+      "name": "after",
+      "parent": 0,
+      "position": [
+        0,
+        0.2,
+        0
+      ]
+    },
+    {
+      "name": "marker",
+      "userData": {
+        "stage": "resumed",
+        "frameWhenResumed": true
+      }
+    }
+  ]
+}

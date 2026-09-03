@@ -1,0 +1,17 @@
+{
+  "errors": [
+    "boom from onFrame",
+    "boom from a listener",
+    "boom from a timer"
+  ],
+  "objects": [
+    {
+      "name": "box",
+      "position": [
+        0.03,
+        0,
+        0
+      ]
+    }
+  ]
+}

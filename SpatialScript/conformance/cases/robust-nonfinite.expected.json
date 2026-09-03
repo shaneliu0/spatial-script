@@ -1,0 +1,29 @@
+{
+  "errors": [
+    "SpatialUnsupportedError: Transform on \"bad\" is not finite"
+  ],
+  "objects": [
+    {
+      "name": "good",
+      "position": [
+        0.07,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "bad",
+      "position": [
+        0.3,
+        0,
+        0
+      ],
+      "quaternion": [
+        0,
+        0,
+        0,
+        1
+      ]
+    }
+  ]
+}

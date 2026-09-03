@@ -1,0 +1,12 @@
+[
+  {
+    "frames": 2
+  },
+  {
+    "inject": "tap",
+    "target": "box"
+  },
+  {
+    "frames": 1
+  }
+]

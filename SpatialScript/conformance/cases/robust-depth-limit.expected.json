@@ -1,0 +1,27 @@
+{
+  "errors": [
+    "levels deep; the limit is 1024"
+  ],
+  "objectCount": 1025,
+  "objects": [
+    {
+      "name": "marker",
+      "parent": 0,
+      "userData": {
+        "frame": 3,
+        "built": 1024
+      }
+    },
+    {
+      "name": "level0",
+      "parent": 0
+    },
+    {
+      "name": "level1023"
+    },
+    {
+      "name": "level1024",
+      "absent": true
+    }
+  ]
+}

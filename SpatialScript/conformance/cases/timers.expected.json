@@ -1,0 +1,17 @@
+{
+  "objects": [
+    {
+      "name": "clock",
+      "userData": {
+        "timeout": true,
+        "cancelled": false,
+        "intervals": 3,
+        "frames": 1,
+        "args": [
+          "one",
+          2
+        ]
+      }
+    }
+  ]
+}

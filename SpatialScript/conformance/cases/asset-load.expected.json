@@ -1,0 +1,42 @@
+{
+  "objects": [
+    {
+      "name": "robot",
+      "type": "Asset",
+      "parent": 1,
+      "loaded": true,
+      "animations": [
+        "walk",
+        "idle"
+      ],
+      "asset": {
+        "usdz": "asset://robot.usdz",
+        "glb": "https://example.com/robot.glb",
+        "reality": null,
+        "gltf": null
+      }
+    },
+    {
+      "name": "holder",
+      "userData": {
+        "animations": [
+          "walk",
+          "idle"
+        ],
+        "bounds": [
+          [
+            -0.1,
+            0,
+            -0.1
+          ],
+          [
+            0.1,
+            0.4,
+            0.1
+          ]
+        ],
+        "loaded": true
+      }
+    }
+  ]
+}

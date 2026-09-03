@@ -1,0 +1,33 @@
+{
+  "objects": [
+    {
+      "name": "innerWorld",
+      "type": "Group",
+      "world": true,
+      "parent": 0
+    },
+    {
+      "name": "inner",
+      "parent": 1,
+      "world": false
+    },
+    {
+      "name": "doorway",
+      "type": "Portal",
+      "world": false,
+      "geometry": {
+        "type": "PlaneGeometry",
+        "parameters": {
+          "width": 0.4,
+          "height": 0.6
+        }
+      },
+      "portal": {
+        "worldId": 1,
+        "width": 0.4,
+        "height": 0.6,
+        "crossing": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "warnings": [
+    "auto-mounting the single Scene"
+  ],
+  "objects": [
+    {
+      "name": "ball",
+      "parent": 0
+    }
+  ]
+}

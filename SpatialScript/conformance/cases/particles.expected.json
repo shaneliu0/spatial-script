@@ -1,0 +1,62 @@
+{
+  "objects": [
+    {
+      "name": "sparks",
+      "type": "ParticleEmitter",
+      "position": [
+        0,
+        0.1,
+        0
+      ],
+      "particles": {
+        "preset": null,
+        "shape": "cone",
+        "shapeSize": [
+          0.1,
+          0.2,
+          0.1
+        ],
+        "birthRate": 250,
+        "lifetime": 1.5,
+        "lifetimeVariation": 0.2,
+        "speed": 0.8,
+        "speedVariation": 0.1,
+        "size": 0.02,
+        "sizeVariation": 0.005,
+        "color": [
+          1,
+          0.246201,
+          0
+        ],
+        "colorEnd": [
+          0,
+          0,
+          1
+        ],
+        "opacity": 1,
+        "opacityEnd": 0,
+        "spreadAngle": 0.5,
+        "acceleration": [
+          0,
+          -0.5,
+          0
+        ],
+        "isEmitting": false,
+        "burstCount": 40,
+        "loops": true,
+        "texture": null
+      }
+    },
+    {
+      "name": "rain",
+      "particles": {
+        "preset": "rain",
+        "shape": "point",
+        "isEmitting": true
+      },
+      "userData": {
+        "presetError": "TypeError"
+      }
+    }
+  ]
+}

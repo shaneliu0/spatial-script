@@ -1,0 +1,12 @@
+{
+  "backend": "realitykit",
+  "objects": [
+    {
+      "name": "holder",
+      "userData": {
+        "rejected": "SpatialUnsupportedError",
+        "feature": "loadAsset"
+      }
+    }
+  ]
+}

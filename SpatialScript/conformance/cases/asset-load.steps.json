@@ -1,0 +1,28 @@
+[
+  {
+    "frames": 1
+  },
+  {
+    "dispatch": {
+      "type": "assetLoaded",
+      "asset": "asset://robot.usdz",
+      "payload": {
+        "animations": [
+          "walk",
+          "idle"
+        ],
+        "boundingBox": [
+          -0.1,
+          0,
+          -0.1,
+          0.1,
+          0.4,
+          0.1
+        ]
+      }
+    }
+  },
+  {
+    "frames": 2
+  }
+]

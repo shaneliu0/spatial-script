@@ -1,0 +1,14 @@
+[
+  {
+    "frames": 1
+  },
+  {
+    "dispatch": {
+      "type": "anchored",
+      "target": "head"
+    }
+  },
+  {
+    "frames": 1
+  }
+]

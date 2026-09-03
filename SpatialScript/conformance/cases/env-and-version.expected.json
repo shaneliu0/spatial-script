@@ -1,0 +1,26 @@
+{
+  "backend": "realitykit",
+  "platform": "macos",
+  "objects": [
+    {
+      "name": "marker",
+      "userData": {
+        "backend": "realitykit",
+        "platform": "macos",
+        "capabilities": [
+          "anchors",
+          "hands",
+          "hoverEffect",
+          "manipulation",
+          "particles",
+          "portals",
+          "shadows"
+        ],
+        "hasVersion": true,
+        "found": true,
+        "mounted": true,
+        "badRequire": "Error"
+      }
+    }
+  ]
+}

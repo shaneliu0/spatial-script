@@ -1,0 +1,68 @@
+{
+  "warnings": [
+    "was created without a geometry",
+    "was created without a material",
+    "BoxGeometry arguments were normalized",
+    "SphereGeometry arguments were normalized",
+    "PointLight properties were clamped",
+    "MeshStandardMaterial properties were clamped",
+    "Object3D.add was called with null"
+  ],
+  "objects": [
+    {
+      "name": "bare",
+      "geometry": {
+        "type": "BufferGeometry"
+      },
+      "material": {
+        "type": "MeshStandardMaterial"
+      },
+      "userData": {
+        "results": {
+          "addPlainObject": "TypeError",
+          "addNull": "ok",
+          "removeString": "TypeError"
+        }
+      }
+    },
+    {
+      "name": "squashed",
+      "geometry": {
+        "type": "BoxGeometry",
+        "parameters": {
+          "width": 0.2,
+          "height": 0.001,
+          "depth": 1
+        }
+      }
+    },
+    {
+      "name": "ball",
+      "geometry": {
+        "type": "SphereGeometry",
+        "parameters": {
+          "radius": 0.1,
+          "widthSegments": 3,
+          "heightSegments": 2
+        }
+      },
+      "material": {
+        "opacity": 1
+      },
+      "rigidBody": {
+        "mass": 0,
+        "friction": 0,
+        "restitution": 0
+      }
+    },
+    {
+      "name": "lamp",
+      "light": {
+        "type": "point",
+        "intensity": 0,
+        "distance": 0,
+        "decay": 0
+      }
+    }
+  ]
+}
