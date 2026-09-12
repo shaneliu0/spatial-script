@@ -20,5 +20,9 @@ let package = Package(
             // execution watchdog would be compiled out of the app.
             swiftSettings: [.define("DEBUG", .when(configuration: .debug))]
         ),
+        .testTarget(
+            name: "RealityKitScriptingTests",
+            dependencies: ["RealityKitScripting"]
+        ),
     ]
 )
