@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpatialScript — three.js consumer</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: grid; grid-template-columns: 1fr 380px;
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #0d0f12; color: #d7dbe0;
+  }
+  #stage { position: relative; display: grid; place-items: center; overflow: hidden; }
+  canvas { width: 100%; height: 100%; display: block; background: #15171b; }
+  #panel { border-left: 1px solid #23262c; display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
+  /* `?ui=off` gives the canvas the whole viewport so a capture is exactly the
+     requested size and the camera aspect matches it. */
+  body.no-ui { grid-template-columns: 1fr; }
+  body.no-ui #panel { display: none; }
+  #panel header { padding: 10px 12px; border-bottom: 1px solid #23262c; font-weight: 600; letter-spacing: .02em; }
+  #editor {
+    width: 100%; height: 100%; resize: none; border: 0; padding: 12px;
+    background: #101317; color: #d7dbe0; font: inherit; outline: none;
+  }
+  #controls { display: flex; gap: 8px; align-items: center; padding: 10px 12px; border-top: 1px solid #23262c; }
+  button {
+    background: #2c6cf6; color: #fff; border: 0; border-radius: 5px;
+    padding: 6px 14px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:hover { background: #4a83f8; }
+  #status { flex: 1; color: #8b939e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #status.ok { color: #55c27e; }
+  #status.bad { color: #f2777a; }
+</style>
+</head>
+<body>
+  <div id="stage"><canvas id="view" width="800" height="600"></canvas></div>
+  <div id="panel">
+    <header>script</header>
+    <textarea id="editor" spellcheck="false" placeholder="const Spatial = require(&quot;spatial&quot;);"></textarea>
+    <div id="controls">
+      <button id="run" type="button">Run</button>
+      <span id="status">idle</span>
+    </div>
+  </div>
+  <script>
+    // The core replaces globalThis.console when it loads a script (SPEC 3.13).
+    // The page bundle is built against this copy instead, so three.js's own
+    // warnings never travel into the core as script log lines.
+    window.__spatialConsole = ['log', 'warn', 'error', 'info', 'debug']
+      .reduce((out, level) => { out[level] = console[level].bind(console); return out; }, {});
+  </script>
+  <script src="/web/dist/page.js"></script>
+</body>
+</html>
