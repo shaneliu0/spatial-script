@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "test": "node --test \"test/**/*.test.js\""
+    "build": "node harness/build.mjs",
+    "test": "node --test \"test/**/*.test.js\"",
+    "harness": "node harness/run.mjs",
+    "screenshot": "node harness/screenshot.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.14.0",
