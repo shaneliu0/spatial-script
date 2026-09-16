@@ -1,0 +1,36 @@
+const Spatial = require("spatial");
+const { Scene, Group, Mesh, BoxGeometry, TextGeometry, MeshStandardMaterial, MeshBasicMaterial,
+        DirectionalLight, SpotLight, PointLight, AmbientLight, RigidBody, Joint,
+        ParticleEmitter, Anchor, Portal, ImageBasedLight, TextureLoader, Vector3, Vector2 } = Spatial;
+const scene = new Scene();
+const g = new Group(); g.name = "g"; g.position.set(0, 0.1, 0); scene.add(g);
+const tex = new TextureLoader().load("asset://checker.png");
+tex.repeat.set(2, 2);
+const m = new Mesh(new BoxGeometry(0.2, 0.2, 0.2), new MeshStandardMaterial({ color: 0x3366ff, map: tex, metalness: 0.3, roughness: 0.4 }));
+m.name = "cube"; m.castShadow = true; m.opacity = 0.8; m.billboard = true; m.renderOrder = 2;
+m.groundingShadow = true; m.hoverEffect = "highlight"; m.manipulable = true;
+m.rigidBody = new RigidBody({ type: "dynamic", mass: 2, shape: "box" });
+m.addEventListener("tap", () => {}); m.addEventListener("drag", () => {});
+g.add(m);
+const anchorMesh = new Mesh(new BoxGeometry(0.05,0.05,0.05), new MeshBasicMaterial({ color: 0xff0000 }));
+anchorMesh.name = "static"; anchorMesh.position.set(0, -0.3, 0);
+anchorMesh.rigidBody = new RigidBody({ type: "static", shape: "box" });
+scene.add(anchorMesh);
+const joint = new Joint({ type: "revolute", bodyA: m, bodyB: anchorMesh, anchorA: new Vector3(0,0,0), anchorB: new Vector3(0,0.2,0), axis: new Vector3(0,1,0), limits: [-1, 1] });
+Spatial.physics.add(joint);
+const txt = new Mesh(new TextGeometry("hi", { size: 0.08, depth: 0.01 }), new MeshStandardMaterial({ color: 0xffffff }));
+txt.name = "label"; txt.position.set(0, 0.3, 0); scene.add(txt);
+const fx = new ParticleEmitter({ preset: "sparks", isEmitting: true }); fx.name = "fx"; scene.add(fx); fx.burst();
+const anchor = new Anchor("head"); anchor.name = "headAnchor"; scene.add(anchor);
+const world = new Group(); world.name = "world"; scene.add(world);
+const portal = new Portal({ width: 0.4, height: 0.4, world }); portal.name = "portal"; portal.position.set(0.5, 0, 0); scene.add(portal);
+const inner = new Mesh(new BoxGeometry(0.15,0.15,0.15), new MeshStandardMaterial({ color: 0x44ddaa }));
+inner.name = "inner"; inner.position.set(0.5, 0, -0.4); world.add(inner);
+const sun = new DirectionalLight(0xffffff, 3); sun.position.set(1,2,1); sun.castShadow = true; scene.add(sun);
+const spot = new SpotLight(0xffcc88, 5, 4, 0.5, 0.3, 2); spot.position.set(0,1,0); scene.add(spot);
+scene.add(new PointLight(0xff0000, 2, 3, 2));
+scene.add(new AmbientLight(0xffffff, 0.4));
+Spatial.environment = new ImageBasedLight("asset://studio-env.png", 1.2);
+Spatial.physics.gravity.set(0, -5, 0);
+console.warn("a script warning");
+Spatial.mount(scene);
