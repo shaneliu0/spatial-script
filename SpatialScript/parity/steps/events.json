@@ -1,0 +1,1 @@
+[{"frames":30},{"inject":"hover","target":"child","entering":true},{"frames":5},{"inject":"tap","target":"grandchild"},{"frames":5},{"inject":"tap","target":"stopper"},{"frames":5},{"inject":"tap","target":"base"},{"frames":5},{"inject":"hover","target":"child","entering":false},{"frames":5},{"inject":"drag","target":"child","translation":[0.1,0.15,0]},{"frames":30}]
