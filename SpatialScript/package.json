@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "packageManager": "pnpm@11.21.0",
   "scripts": {
-    "build": "pnpm --filter ./core build",
-    "test": "pnpm --filter ./core test"
+    "build": "pnpm -r --filter ./core --filter ./web build",
+    "test": "pnpm -r test",
+    "conformance:node": "node conformance/run-node.mjs",
+    "conformance:web": "node web/harness/run.mjs"
   }
 }
