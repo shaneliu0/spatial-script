@@ -468,6 +468,13 @@ declare namespace Spatial {
     manipulable: boolean;
     /** Attaching a body makes the object participate in physics. */
     rigidBody: RigidBody | null;
+    /**
+     * Attaching a controller makes the object native-driven (14.4): the
+     * consumer resolves its movement and reports the result.
+     */
+    characterController: CharacterController | null;
+    /** RealityKit AccessibilityComponent; the web mirrors it onto ARIA (14.11). */
+    accessibility: Accessibility | null;
 
     add(...objects: Object3D[]): this;
     remove(...objects: Object3D[]): this;
@@ -535,14 +542,14 @@ declare namespace Spatial {
   }
 
   class Mesh extends Object3D {
-    constructor(geometry?: BufferGeometry, material?: Material);
+    constructor(geometry?: BufferGeometry, material?: Material | Material[]);
     geometry: BufferGeometry;
     /**
-     * Exactly one material; assigning an array throws. `null` and `undefined`
-     * are replaced with a MeshStandardMaterial and warned about, so this only
-     * reads as null on a mesh whose material was cleared by the runtime.
+     * One material, or one per `geometry.groups` entry (14.12). `null` and
+     * `undefined` are replaced with a MeshStandardMaterial and warned about,
+     * so this only reads as null on a mesh whose material was cleared.
      */
-    material: Material | null;
+    material: Material | Material[] | null;
     readonly isMesh: true;
   }
 
@@ -963,7 +970,10 @@ declare namespace Spatial {
   }
 
   interface RaycastHit {
-    object: Object3D;
+    /** null for a hit on the real-world mesh (14.7). */
+    object: Object3D | null;
+    /** True when this hit is the real-world mesh rather than an object. */
+    sceneUnderstanding: boolean;
     point: Vector3;
     normal: Vector3;
     distance: number;
@@ -1016,13 +1026,78 @@ declare namespace Spatial {
     isDown(code: string): boolean;
     /** True for the single frame the key went down. */
     wasPressed(code: string): boolean;
+    readonly connected: boolean;
+  }
+
+  /** One button for a frame: level, both edges, and a click count (14.9). */
+  interface ButtonState {
+    readonly down: boolean;
+    /** True for the single frame the button went down. */
+    readonly pressed: boolean;
+    /** True for the single frame it came up. */
+    readonly released: boolean;
+    /** 0..1; a trigger reports its travel, a plain button 0 or 1. */
+    readonly value: number;
+    /** Presses inside 400 ms of each other: 2 is a double click. */
+    readonly pressCount: number;
   }
 
   interface Mouse {
     /** View pixels, or null when the pointer is absent. */
     readonly position: Vector2 | null;
+    /**
+     * The world point under the pointer on the first hit mesh, or on the plane
+     * through the origin facing the camera when nothing is hit; null when the
+     * consumer reports none (14.3).
+     */
+    readonly scenePosition: Vector3 | null;
     readonly buttons: { left: boolean; right: boolean; middle: boolean };
     readonly delta: Vector2;
+    /** Wheel or trackpad movement for this frame only. */
+    readonly scroll: Vector2;
+    readonly connected: boolean;
+    readonly left: ButtonState;
+    readonly right: ButtonState;
+    readonly middle: ButtonState;
+  }
+
+  /** A game controller (14.8). Every button is a ButtonState. */
+  interface Controller {
+    readonly id: string;
+    readonly name: string;
+    readonly leftThumbstick: Vector2;
+    readonly rightThumbstick: Vector2;
+    /** 0..1. */
+    readonly leftTrigger: number;
+    readonly rightTrigger: number;
+    readonly a: ButtonState;
+    readonly b: ButtonState;
+    readonly x: ButtonState;
+    readonly y: ButtonState;
+    readonly leftShoulder: ButtonState;
+    readonly rightShoulder: ButtonState;
+    readonly dpadUp: ButtonState;
+    readonly dpadDown: ButtonState;
+    readonly dpadLeft: ButtonState;
+    readonly dpadRight: ButtonState;
+    readonly menu: ButtonState;
+    readonly options: ButtonState;
+    /**
+     * Always reaches the consumer as a `controllerRumble` command; where the
+     * consumer has no haptics the script is warned once that it has no effect.
+     */
+    rumble(intensity: number, duration: number): this;
+  }
+
+  interface ControllerSet {
+    readonly all: Controller[];
+    /**
+     * The controller whose input changed most recently, or null. Connecting
+     * alone does not make a controller current (14.8).
+     */
+    readonly current: Controller | null;
+    readonly connected: number;
+    get(id: string): Controller | null;
   }
 
   interface InputState {
@@ -1030,6 +1105,7 @@ declare namespace Spatial {
     readonly mouse: Mouse;
     /** null on macOS and the web. */
     readonly hands: { left: Hand | null; right: Hand | null };
+    readonly controllers: ControllerSet;
   }
 
   /** Synthesises the events a consumer would produce, for verification. */
@@ -1038,6 +1114,30 @@ declare namespace Spatial {
     drag(objectOrName: Object3D | string, translation: Vector3, options?: { steps?: number }): void;
     hover(objectOrName: Object3D | string, entering: boolean): void;
     key(code: string, down: boolean): void;
+    /**
+     * Controller state for the coming frame, in the `setInput.controllers`
+     * shape. Every field is optional; what is missing reads as zero (14.8).
+     */
+    controller(state: ControllerStateJSON | ControllerStateJSON[] | null): void;
+  }
+
+  /** What a consumer (or `inject.controller`) reports for one controller. */
+  interface ControllerStateJSON {
+    id?: string;
+    name?: string;
+    leftThumbstick?: [number, number];
+    rightThumbstick?: [number, number];
+    leftTrigger?: number;
+    rightTrigger?: number;
+    buttons?: Partial<Record<
+      | "a" | "b" | "x" | "y"
+      | "leftShoulder" | "rightShoulder"
+      | "dpadUp" | "dpadDown" | "dpadLeft" | "dpadRight"
+      | "menu" | "options",
+      boolean | number
+    >>;
+    /** Marks this one as the most recently used. */
+    current?: boolean;
   }
 
   // -------------------------------------------------------- 3.9 animation
@@ -1213,9 +1313,386 @@ declare namespace Spatial {
     /** Reported by the consumer after load. */
     readonly boundingBox: Box3;
     readonly loaded: boolean;
+    /** null unless the consumer reported a rig for this asset (14.5). */
+    readonly skeleton: Skeleton | null;
+    /** null unless the consumer reported blend shapes (14.5). */
+    readonly blendShapes: BlendShapes | null;
     playAnimation(name: string, options?: { loop?: boolean; speed?: number }): this;
     stopAnimation(): this;
   }
+
+  /**
+   * A loaded asset's rig (14.5). Script poses are overridden by a native
+   * animation while it plays, which is what `track(true)` is for: it asks the
+   * consumer to report the real joint transforms back.
+   */
+  interface Skeleton {
+    readonly joints: string[];
+    readonly tracking: boolean;
+    /** What the consumer last reported, else the script's own pose. */
+    getJointTransform(name: string): { position: Vector3; quaternion: Quaternion } | null;
+    setJointRotation(name: string, quaternion: Quaternion): this;
+    setJointPosition(name: string, position: Vector3): this;
+    /** Drops every script pose. */
+    reset(): this;
+    track(enabled: boolean): this;
+  }
+
+  interface BlendShapes {
+    readonly names: string[];
+    get(name: string): number;
+    /** Weight is clamped to 0..1; an unknown name warns and is ignored. */
+    set(name: string, weight: number): this;
+  }
+
+
+  // ============================================================ 14. phase 2
+
+  // ------------------------------------------------------------- 14.1 audio
+
+  /** An opaque, url-backed handle; the consumer loads the file. */
+  class AudioBuffer {
+    readonly url: string | null;
+    /** The error, when the url was refused. */
+    readonly error: string | null;
+    /** Filled in from the object that plays it, through `syncAudio`. */
+    readonly duration: number;
+  }
+
+  class AudioLoader {
+    setPath(path: string): this;
+    /**
+     * Returns the handle immediately; `onLoad` runs on the next microtask. A
+     * url the containment of 3.5 refuses never becomes a playable buffer.
+     */
+    load(
+      url: string,
+      onLoad?: (buffer: AudioBuffer) => void,
+      onProgress?: (event: { loaded: number; total: number }) => void,
+      onError?: (error: Error) => void,
+    ): AudioBuffer;
+    loadAsync(url: string): Promise<AudioBuffer>;
+  }
+
+  /** The listener and mixer, `Spatial.audio`. */
+  interface AudioMixer {
+    /** 0..1. */
+    masterVolume: number;
+    setGroupVolume(name: string, volume: number): this;
+    /** The group names that have a volume set. */
+    readonly groups: string[];
+    /** Web audio starts suspended until a gesture; the harness resumes it. */
+    readonly state: "running" | "suspended";
+    resume(): this;
+  }
+
+  type DistanceModel = "inverse" | "linear" | "exponential";
+
+  /**
+   * Non-spatial audio (14.1). Playing a sound that is not in the graph adopts
+   * it as an extra root so it still reaches the consumer. Playback state is
+   * native-driven: the consumer owns `isPlaying`, `currentTime` and
+   * `duration` and reports them through `syncAudio`.
+   */
+  class Audio extends Object3D {
+    setBuffer(buffer: AudioBuffer | null): this;
+    setLoop(loop: boolean): this;
+    setVolume(volume: number): this;
+    getVolume(): number;
+    setPlaybackRate(rate: number): this;
+    play(): this;
+    pause(): this;
+    stop(): this;
+    readonly buffer: AudioBuffer | null;
+    readonly isPlaying: boolean;
+    /** Assigning seeks. */
+    currentTime: number;
+    readonly duration: number;
+    loop: boolean;
+    volume: number;
+    playbackRate: number;
+    /** The mix group this sound belongs to; "master" by default. */
+    group: string;
+    /** Called when the consumer reports the sound finished. */
+    onEnded: (() => void) | null;
+    /**
+     * Stops the sound, releases it on the consumer (`audio id null`) and frees
+     * the object (14.1). The same as `Spatial.destroy(sound)`; a playback call
+     * afterwards is dropped with a warning and never brings it back.
+     */
+    dispose(): this;
+  }
+
+  class PositionalAudio extends Audio {
+    setRefDistance(distance: number): this;
+    getRefDistance(): number;
+    setRolloffFactor(factor: number): this;
+    getRolloffFactor(): number;
+    setDistanceModel(model: DistanceModel): this;
+    getDistanceModel(): DistanceModel;
+    /** Angles in degrees, gain 0..1. */
+    setDirectionalCone(innerAngle: number, outerAngle: number, outerGain: number): this;
+    /** dB; RealityKit's SpatialAudioComponent.reverbLevel. */
+    reverbLevel: number;
+  }
+
+  /** Sound arriving from every direction at the object's position. */
+  class AmbientAudio extends Audio {}
+
+  // ------------------------------------------------------------- 14.2 video
+
+  /** Alternative encodings of one video (14.2). */
+  interface VideoSources {
+    mp4?: string;
+    hls?: string;
+    webm?: string;
+  }
+
+  interface VideoScreenOptions {
+    /**
+     * One url, or one per encoding. Each goes through the containment of 3.5;
+     * a refused key is dropped with a warning, and a screen left with no
+     * source reports `url: null` and dispatches `error`.
+     */
+    url?: string | VideoSources;
+    /** Metres. With only one given, the other follows the video's aspect. */
+    width?: number;
+    height?: number;
+    loop?: boolean;
+    muted?: boolean;
+    autoplay?: boolean;
+    /** visionOS only: adds a DockingRegionComponent. */
+    docking?: boolean;
+  }
+
+  /**
+   * A video on a plane (14.2). It is a mesh, so raycast and hit testing treat
+   * it like any other mesh. Playback state comes from the consumer through
+   * `syncVideo`; `loaded`, `ended` and `error` events are dispatched on it.
+   */
+  class VideoScreen extends Mesh {
+    constructor(options?: VideoScreenOptions);
+    /** What the consumer was given: the string, the surviving sources, or null. */
+    readonly url: string | VideoSources | null;
+    readonly width: number;
+    readonly height: number;
+    readonly docking: boolean;
+    play(): this;
+    pause(): this;
+    readonly isPlaying: boolean;
+    currentTime: number;
+    readonly duration: number;
+    volume: number;
+    muted: boolean;
+    loop: boolean;
+    playbackRate: number;
+    /** The message from an `error` event, else null. */
+    readonly error: string | null;
+  }
+
+  // ----------------------------------------------------------- 14.3 cameras
+
+  class Camera extends Object3D {
+    near: number;
+    far: number;
+    readonly isCamera: true;
+    updateProjectionMatrix(): void;
+  }
+
+  class PerspectiveCamera extends Camera {
+    constructor(fov?: number, aspect?: number, near?: number, far?: number);
+    fov: number;
+    /**
+     * Managed by the consumer from the viewport. A value the script sets — in
+     * the constructor or later — is kept for three's own projection matrix but
+     * reported as ignored.
+     */
+    aspect: number;
+    readonly isPerspectiveCamera: true;
+  }
+
+  class OrthographicCamera extends Camera {
+    constructor(left?: number, right?: number, top?: number, bottom?: number, near?: number, far?: number);
+    left: number;
+    right: number;
+    top: number;
+    bottom: number;
+    readonly isOrthographicCamera: true;
+  }
+
+  interface Ray3 {
+    origin: Vector3;
+    direction: Vector3;
+  }
+
+  // -------------------------------------- 14.4 character and force effects
+
+  interface CharacterControllerOptions {
+    /** Metres. */
+    radius?: number;
+    height?: number;
+    /** Radians; the steepest slope the character climbs. */
+    slopeLimit?: number;
+    stepLimit?: number;
+    gravity?: boolean;
+  }
+
+  /**
+   * Assign to `object.characterController`. The object becomes native-driven
+   * like a dynamic body: the consumer resolves each `move` against the world
+   * and reports the result through `syncCharacter`.
+   */
+  class CharacterController {
+    constructor(options?: CharacterControllerOptions);
+    readonly radius: number;
+    readonly height: number;
+    readonly slopeLimit: number;
+    readonly stepLimit: number;
+    readonly gravity: boolean;
+    /** The object this controller is attached to, or null. */
+    readonly object: Object3D | null;
+    readonly isOnGround: boolean;
+    /** Read-only: the consumer owns it. */
+    readonly velocity: Vector3;
+    /**
+     * Applied next frame, sliding along obstacles. A move made before the
+     * consumer has seen the object waits for the frame after its `create`.
+     */
+    move(displacement: Vector3): this;
+    /** Unconditional placement, ignoring collision. */
+    teleport(position: Vector3): this;
+  }
+
+  type ForceFalloff = "none" | "linear" | "inverseSquare";
+
+  /** Acts on dynamic bodies within `radius` of its world position. */
+  class ForceField extends Object3D {
+    enabled: boolean;
+    radius: number;
+    /** A collision mask, forwarded to the consumer unchanged. */
+    mask: number;
+    readonly isForceField: true;
+    readonly kind: string;
+  }
+
+  class ConstantForceField extends ForceField {
+    constructor(options?: { force?: Vector3; radius?: number; mask?: number; enabled?: boolean });
+    readonly force: Vector3;
+  }
+
+  class RadialForceField extends ForceField {
+    constructor(options?: {
+      strength?: number;
+      minimumDistance?: number;
+      falloff?: ForceFalloff;
+      radius?: number;
+      mask?: number;
+      enabled?: boolean;
+    });
+    strength: number;
+    minimumDistance: number;
+    falloff: ForceFalloff;
+  }
+
+  class VortexForceField extends ForceField {
+    constructor(options?: { strength?: number; axis?: Vector3; radius?: number; mask?: number; enabled?: boolean });
+    strength: number;
+    readonly axis: Vector3;
+  }
+
+  class DragForceField extends ForceField {
+    constructor(options?: { coefficient?: number; radius?: number; mask?: number; enabled?: boolean });
+    coefficient: number;
+  }
+
+  class TurbulenceForceField extends ForceField {
+    constructor(options?: {
+      strength?: number;
+      noiseScale?: number;
+      radius?: number;
+      mask?: number;
+      enabled?: boolean;
+    });
+    strength: number;
+    noiseScale: number;
+  }
+
+  // ------------------------------------------- 14.6 shader graph materials
+
+  type ShaderParameterValue = number | boolean | string | Vector2 | Vector3 | Vector4 | Color | Texture;
+
+  /**
+   * A pre-authored RealityKit shader graph, with the fallback every other
+   * consumer renders. `fallback` is required.
+   */
+  class ShaderGraphMaterial extends Material {
+    constructor(options: {
+      source?: string;
+      name?: string;
+      parameters?: Record<string, ShaderParameterValue>;
+      fallback: Material;
+    });
+    /** The USD file, after url containment. */
+    readonly source: string | null;
+    /** The graph's name inside that file (`name` is three's Material.name). */
+    readonly graphName: string;
+    readonly fallback: Material;
+    readonly parameters: Record<string, ShaderParameterValue>;
+    /** Bumps on every setParameter, so consumers can order edits. */
+    readonly generation: number;
+    /**
+     * Also updates a same-named property of the fallback where that property
+     * is one the fallback owns. A value the command stream cannot carry — a
+     * NaN, an object, an array of other than two to four finite numbers — is
+     * refused with a warning rather than sent as null.
+     */
+    setParameter(name: string, value: ShaderParameterValue): this;
+    getParameter(name: string): ShaderParameterValue | undefined;
+  }
+
+  // ------------------------------------------------ 14.7 scene understanding
+
+  interface SceneUnderstanding {
+    collision: boolean;
+    occlusion: boolean;
+    physics: boolean;
+    shadows: boolean;
+  }
+
+  // ------------------------------------------------------ 14.10 host channel
+
+  interface HostChannel {
+    /** The `Module.function` names the app registered. */
+    readonly functions: string[];
+    on(name: string, handler: (payload: any) => void): (payload: any) => void;
+    off(name: string, handler?: (payload: any) => void): void;
+    /** Script to host. The payload is copied to JSON before it leaves. */
+    send(name: string, payload?: any): this;
+    /**
+     * Script to host, with an answer. An unregistered name rejects
+     * immediately with a SpatialUnsupportedError of feature "host-function".
+     */
+    call(name: string, args?: any): Promise<any>;
+  }
+
+  // ----------------------------------------------------- 14.11 small parts
+
+  interface Accessibility {
+    label?: string;
+    value?: string;
+    hint?: string;
+    isButton?: boolean;
+  }
+
+  type DebugModelView =
+    | null
+    | "normal"
+    | "uv"
+    | "baseColor"
+    | "roughness"
+    | "metallic"
+    | "occlusion"
+    | "emissive";
 
   // --------------------------------------------------------- 3.13 runtime
 
@@ -1230,6 +1707,19 @@ declare namespace Spatial {
     manipulation: boolean;
     hoverEffect: boolean;
     shadows: boolean;
+    // 14.14: true only where the consumer implements the feature with effect.
+    audio: boolean;
+    video: boolean;
+    camera: boolean;
+    characterController: boolean;
+    forceFields: boolean;
+    skeleton: boolean;
+    blendShapes: boolean;
+    shaderGraph: boolean;
+    sceneUnderstanding: boolean;
+    controllers: boolean;
+    hostFunctions: boolean;
+    accessibility: boolean;
   }
 
   interface Env {
@@ -1258,7 +1748,7 @@ declare namespace Spatial {
     scale: [number, number, number];
     worldPosition: [number, number, number];
     geometry: { type: string; uuid: string; parameters: Record<string, any> | null } | null;
-    material: Record<string, any> | null;
+    material: Record<string, any> | Array<Record<string, any> | null> | null;
     light: Record<string, any> | null;
     rigidBody: Record<string, any> | null;
     opacity: number;
@@ -1280,6 +1770,15 @@ declare namespace Spatial {
     /** Present only on objects with a rigid body, from the last syncBodies. */
     velocity?: [number, number, number];
     isSleeping?: boolean;
+    // Phase 2 (SPEC 14), present only on the objects that carry the feature.
+    audio?: Record<string, any>;
+    video?: Record<string, any>;
+    characterController?: Record<string, any>;
+    isOnGround?: boolean;
+    forceField?: Record<string, any>;
+    accessibility?: Accessibility | null;
+    skeleton?: { joints: Record<string, number[]>; track: boolean } | null;
+    blendShapes?: Record<string, number> | null;
     userData: Record<string, any>;
     [key: string]: any;
   }
@@ -1300,6 +1799,21 @@ declare namespace Spatial {
     joints: Array<Record<string, any>>;
     gravity: [number, number, number];
     environment: { url: string; intensity: number } | null;
+    // Phase 2 scene-level state (SPEC 14).
+    isActive: boolean;
+    audioMixer: { masterVolume: number; groups: Record<string, number>; state: string };
+    /**
+     * The live camera's parameters, or null for the consumer's built-in
+     * camera. The pose is not in it: the camera is an Object3D, so it appears
+     * in `objects` and its transform travels with every other object's.
+     */
+    camera: Record<string, any> | null;
+    sceneUnderstanding: SceneUnderstanding;
+    render: { adaptiveResolution: boolean };
+    environmentLighting: { intensityExponent: number };
+    debug: { modelView: DebugModelView };
+    hostFunctions: string[];
+    controllers: Array<Record<string, any>>;
     warnings: string[];
     /** The most recent errors; older ones are dropped once the cap is reached. */
     errors: string[];
@@ -1369,6 +1883,39 @@ declare namespace Spatial {
   }
 
   function dump(options?: DumpOptions): Dump;
+
+  // ---------------------------------------------------------------- 14 API
+
+  /** The listener and mixer (14.1). */
+  const audio: AudioMixer;
+  /**
+   * The active camera (14.3). null means the consumer's built-in camera. The
+   * `camera` command names the camera object's own id, so a camera that was
+   * never added to the scene becomes an extra root: it is created and its
+   * transform is flushed like any other object's. On visionOS the user is the
+   * camera: an assignment is kept and reported, and warns once.
+   */
+  let camera: Camera | null;
+  /**
+   * A world-space ray for a view pixel (14.3). null on visionOS, and null
+   * without the consumer's `rayFromPoint` hook.
+   */
+  function rayFromPoint(x: number, y: number): Ray3 | null;
+  /** visionOS only; the state is kept and reported elsewhere (14.7). */
+  let sceneUnderstanding: SceneUnderstanding;
+  /** The bidirectional channel with the embedding app (14.10). */
+  const host: HostChannel;
+  /** False between `willDeactivate` and `didActivate`; ticks pause (14.10). */
+  const isActive: boolean;
+  /** visionOS only (14.11). */
+  const render: { adaptiveResolution: boolean };
+  /** Scales the environment lighting (14.11). */
+  const environmentLighting: { intensityExponent: number };
+  /** Substitutes a debug material where the consumer has one (14.11). */
+  const debug: { modelView: DebugModelView };
+  /** The consumer performs the request; url rules of 3.5 apply (14.11). */
+  function fetchText(url: string): Promise<string>;
+  function fetchJSON(url: string): Promise<any>;
   /** Runs teardown and returns the final command array (the destroys). */
   function dispose(): Command[];
   const version: string;
@@ -1391,10 +1938,23 @@ declare const console: {
   debug(...args: any[]): void;
 };
 
-/** Legacy lifecycle members a script may set on `this`. */
+/** Lifecycle members a script may set on `this`. */
 interface SpatialScriptThis {
   didAdd?(): void;
   update?(deltaTime: number): void;
   willRemove?(): void;
+  /** The view appeared or went away (14.10); ticks pause while inactive. */
+  didActivate?(): void;
+  willDeactivate?(): void;
+  /**
+   * A hot reload that preserved state hands the previous script's `this.state`
+   * here, after load and before the first frame (14.10). Not called at all
+   * without a preserved state.
+   */
+  scriptChanged?(previousState: any): void;
+  /** JSON-serialisable state a reload can carry across (14.10). */
+  state?: any;
+  /** Alias for `Spatial.host.on`. */
+  on?(name: string, handler: (payload: any) => void): (payload: any) => void;
   [key: string]: any;
 }

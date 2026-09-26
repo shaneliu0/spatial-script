@@ -245,8 +245,10 @@ RealityKit consumer renders it as transparent and warns once.
 resolves asynchronously. `TextureLoader().loadAsync(url)` returns a Promise.
 
 `url` forms: `https://...`, `file:///...`, a path relative to the script's asset root, or
-`asset://name` for an asset bundled with the app. Both consumers resolve `asset://` against their
-own bundle. On failure the consumer emits an `error` event on the texture and logs. The same
+`asset://name` for an asset bundled with the app. The shared asset root is
+`SpatialScript/assets/`: the web consumer serves `asset://` from it, and the Mac and visionOS host
+targets bundle its contents so the same `asset://name` resolves on every backend (examples and
+conformance cases reference only names that exist there). On failure the consumer emits an `error` event on the texture and logs. The same
 rules apply to `loadAsset` and `ImageBasedLight` URLs: the core normalizes every URL before it
 reaches a consumer (`.` and `..` segments collapsed, a path that escapes the asset root refused,
 schemes limited to http, https, file, data, blob, and asset, userinfo stripped), each refusal
@@ -534,15 +536,16 @@ unique message is reported at most once per second to avoid floods.
 
 ---
 
-## 4. Not in scope (phase 1)
+## 4. Scope by phase
 
-Cameras and camera control, ShaderMaterial and custom shaders, post-processing, HemisphereLight,
-RectAreaLight, sprites, lines and points as primitives, skinned mesh authoring, morph targets,
-audio, video, character controller, force effects, scene understanding, game controllers,
-multiple materials per mesh, `Scene.background`, `Scene.fog`, texture compression formats.
+Phase 1 (sections 2 and 3) is complete. Phase 2 (section 14) brings SpatialScript to parity with
+every capability Apple's RealityKitScripting exposes, with honest per-backend behavior.
 
-Names for these are not exported. A script that references them gets a normal JavaScript
-`TypeError` for an undefined export; nothing pretends to work.
+Permanently out of scope, on every backend: custom GLSL or Metal shaders (RealityKit only accepts
+pre-authored shader graphs; see 14.6), post-processing, animation graphs and compute graphs,
+synchronization (multi-user), reference components, `Scene.background`, `Scene.fog`, texture
+compression formats. Names for these are not exported; a script that references them gets a
+normal JavaScript `TypeError` for an undefined export.
 
 ---
 
@@ -789,3 +792,256 @@ The macOS host starts an HTTP server on `127.0.0.1:8787` inside `#if DEBUG`. Rou
 - Unsupported behavior warns once per feature per scene through `console.warn` and appears in
   `dump().warnings`. Nothing silently no-ops.
 - Every public behavior in sections 2, 3, 5, 6, 8 has at least one conformance case or unit test.
+
+---
+
+## 14. Phase 2: parity with Apple RealityKitScripting
+
+Every item below is part of the contract on both backends. "RealityKit only" means the web
+consumer accepts the API, keeps the state in the dump, and warns once that it has no visual or
+audible effect; "visionOS only" means the same for RealityKit on macOS. Nothing here is silent.
+
+### 14.1 Audio (ours, three.js-shaped)
+
+- `Spatial.audio` is the listener and mixer: `masterVolume` (0..1), `setGroupVolume(name,
+  volume)`, `groups` (read-only names), `resume()` (web needs a user gesture to start audio; the
+  harness calls it), `state: "running" | "suspended"`. `state` starts `"suspended"` on every
+  backend; `resume()` sets it to `"running"` optimistically and the consumer's `audioState`
+  dispatch is authoritative afterwards.
+- `AudioLoader().load(url, onLoad?, onProgress?, onError?)` and `loadAsync(url)` return an
+  `AudioBuffer` handle (opaque, URL-backed; consumers load the file). URL rules of 3.5 apply.
+- `Audio` (non-spatial, three.js name): `setBuffer(buffer)`, `play()`, `pause()`, `stop()`,
+  `setLoop(bool)`, `setVolume(0..1)`, `setPlaybackRate(rate)`, `isPlaying`, `currentTime`,
+  `duration` (after load), `group` (mix group name, default `"master"`), `onEnded` callback and an
+  `ended` event. RealityKit: `ChannelAudioComponent` with an `AudioPlaybackController`.
+- `PositionalAudio` extends `Audio` and is an `Object3D`: `setRefDistance(m)`,
+  `setRolloffFactor(f)`, `setDistanceModel("inverse" | "linear" | "exponential")`,
+  `setDirectionalCone(innerAngle, outerAngle, outerGain)`, `reverbLevel` (dB, RealityKit
+  `SpatialAudioComponent.reverbLevel`; web maps to a convolver send level). RealityKit:
+  `SpatialAudioComponent` on the object's entity, gain from volume in dB, directivity from the
+  cone.
+- `AmbientAudio` (ours): an `Object3D` whose sound comes from every direction at its position
+  (RealityKit `AmbientAudioComponent`; web: a non-spatial `Audio` scaled by distance).
+- Playback state is native-driven: consumers sync `isPlaying`, `currentTime`, and `duration`
+  through a `syncAudio` channel (section 14.13) and dispatch `ended`. Consumers dispatch
+  `audioState` with `"running"` once their engine has started (RealityKit on the first play).
+- Release: `audio.dispose()` (or `Spatial.destroy(audio)`) stops the sound, emits `audio id null`,
+  and frees the object; a playback call on a destroyed sound is dropped with a warning and never
+  resurrects it. `setRefDistance` maps to RealityKit's rolloff distance where the engine has one and
+  is otherwise dump-only with a one-time warning.
+- Dump: each audio object reports `audio: { url, playing, loop, volume, rate, currentTime,
+  duration, group, spatial, refDistance, rolloff, cone, reverbLevel }`.
+
+### 14.2 Video (ours)
+
+`VideoScreen({ url, width, height, loop = false, muted = false, autoplay = false, docking =
+false })` is an `Object3D` that renders the video on a plane of the given size. `url` is a string
+or `{ mp4, hls, webm }`: the core forwards every key that survives URL containment and the
+consumer picks what it can play (RealityKit `mp4` then `hls`; the web `webm` then `mp4` where the
+browser has the codec). The core dispatches `error` when no url was given or none survived
+containment; the consumer dispatches `error` when none of the surviving keys is playable (if only one of
+width and height is given, the other follows the video's aspect once known). Members: `play()`,
+`pause()`, `currentTime` (settable), `duration`, `isPlaying`, `volume`, `muted`, `loop`,
+`playbackRate`; events `loaded`, `ended`, `error`. RealityKit: `VideoPlayerComponent` with an
+`AVPlayer`; `docking: true` adds `DockingRegionComponent` (visionOS only). Web: a `VideoTexture`
+on a plane. Playback state is native-driven through `syncVideo`. URL rules of 3.5 apply. A
+`VideoScreen` is a mesh for hit testing and raycast.
+
+### 14.3 Cameras (three, non-visionOS)
+
+`PerspectiveCamera(fov, aspect, near, far)` and `OrthographicCamera(left, right, top, bottom,
+near, far)` are the three.js classes. `Spatial.camera` (settable) selects the active camera; it is
+an `Object3D` the script can move, parent, and `lookAt` with. Default: the consumer's built-in
+camera (the Mac RealityView virtual camera at (0, 0.25, 1.4) looking at the origin with a 60
+degree vertical field of view; the web preset that mirrors it). On visionOS the user is the
+camera: assigning `Spatial.camera` is accepted, kept in the dump, and warns once. `aspect` is
+managed by the consumer from the viewport; a script-set value is ignored with a warning. For an
+`OrthographicCamera` the visible height is `top - bottom` and the visible width follows the
+viewport aspect on both backends (RealityKit's orthographic camera takes only a height); `left`
+and `right` are honored when they match that width and otherwise warn once. Images never
+stretch anisotropically.
+Consumers emit `camera` commands with the camera's kind, parameters, and world transform.
+
+Pointer queries: `Spatial.input.mouse.scenePosition` is the world point under the pointer on the
+first hit mesh (or on the plane through the origin facing the camera when nothing is hit), or
+null; `Spatial.rayFromPoint(x, y)` returns `{ origin, direction }` in world space for a view pixel
+(null on visionOS).
+
+### 14.4 Character controller and force effects (ours)
+
+- `object.characterController = new CharacterController({ radius = 0.2, height = 1, slopeLimit =
+  0.785, stepLimit = 0.3, gravity = true })`. Members: `move(displacement: Vector3)` (applied next
+  frame, sliding along obstacles), `teleport(position)`, `isOnGround` (native-driven),
+  `velocity` (read-only). The object becomes native-driven like a dynamic body. RealityKit:
+  `CharacterControllerComponent` and `moveCharacter`; web: Rapier's kinematic character
+  controller.
+- Force effects are `Object3D`s: `ConstantForceField({ force: Vector3, mask })`,
+  `RadialForceField({ strength, minimumDistance, falloff: "none" | "linear" | "inverseSquare",
+  radius })`, `VortexForceField({ strength, axis, radius })`, `DragForceField({ coefficient,
+  radius })`, `TurbulenceForceField({ strength, noiseScale, radius })`. They act on dynamic
+  bodies within `radius` of the effect's world position (RealityKit `ForceEffectComponent` with
+  the matching effect; web: a per-frame force loop in the physics step). `enabled` toggles.
+
+### 14.5 Skeletons and blend shapes on loaded assets (ours)
+
+After `loadAsset` resolves, `asset.skeleton` is `{ joints: string[], getJointTransform(name):
+{ position, quaternion } | null, setJointRotation(name, quaternion), setJointPosition(name,
+position), reset() }` (RealityKit `SkeletalPosesComponent`; web: the SkinnedMesh bones) and
+`asset.blendShapes` is `{ names: string[], get(name), set(name, weight 0..1) }` (RealityKit
+`BlendShapeWeightsComponent`; web: `morphTargetInfluences`). Both are null when the asset has no
+skeleton or blend shapes. Joint edits are script-driven and emitted as `skeleton` and
+`blendShapes` commands; playing a native animation on the asset overrides script poses while it
+runs, and the consumer reports joint transforms through `syncSkeleton` when requested with
+`asset.skeleton.track(true)`.
+
+### 14.6 Shader graph materials (RealityKit, with a web fallback)
+
+`ShaderGraphMaterial({ source: "asset://materials.usda", name: "Glow", parameters: { ... },
+fallback: new MeshStandardMaterial({ ... }) })`. RealityKit loads the named material from the
+bundled USD file and exposes `setParameter(name, value)` for numbers, vectors, colors, and
+textures. Web renders `fallback` (required) and warns once; `setParameter` updates the fallback
+where a same-named property exists. The dump reports `material.type: "ShaderGraphMaterial"` with
+`source`, `name`, and the parameters.
+
+### 14.7 Scene understanding (visionOS only)
+
+`Spatial.sceneUnderstanding = { collision: false, occlusion: false, physics: false, shadows:
+false }`. Setting any flag adds `SceneUnderstandingComponent` with those options to the root on
+visionOS; macOS and web keep the state and warn once. Raycasts against the real-world mesh report
+`object === null` with `sceneUnderstanding: true` on the hit.
+
+### 14.8 Game controllers (ours, Apple-shaped)
+
+`Spatial.input.controllers`: `all` (array), `current` (the most recently used, by latest input
+change, or null), `connected` (count), events `controllerconnected` and `controllerdisconnected`
+on the scene with `{ controller }` in the payload.
+Each controller: `id`, `name`, `leftThumbstick: Vector2`, `rightThumbstick: Vector2`,
+`leftTrigger`, `rightTrigger` (0..1), `leftShoulder`, `rightShoulder`, `a`, `b`, `x`, `y`,
+`dpadUp`, `dpadDown`, `dpadLeft`, `dpadRight`, `menu`, `options` each `{ down, pressed,
+released, value }`, and `rumble(intensity, duration)` where supported. RealityKit:
+GameController framework on macOS and visionOS; web: the Gamepad API. Consumers push state
+through `setInput` under `controllers`. `ScriptingRuntime.setup(inputOptions:)` is honored:
+omitting `.gamepad` or `.ar` skips that provider and the corresponding capability is false.
+
+### 14.9 Input completeness
+
+`Spatial.input.keyboard.connected`, `mouse.connected`, per-button edges `mouse.left.pressed`,
+`mouse.left.released`, `mouse.left.down`, `mouse.left.pressCount` (clicks within 400 ms), and the
+same for `right` and `middle`; `mouse.scroll: Vector2` per frame. Existing fields stay.
+
+### 14.10 Lifecycle and host events
+
+- `this.didActivate()` and `this.willDeactivate()` run when the consumer activates or deactivates
+  the scene: the view appears or disappears, the window is hidden or miniaturized, or the
+  immersive space closes. Losing frontmost status alone never deactivates (development tooling
+  drives the app from other processes). `Spatial.isActive` reflects it and ticks pause while
+  inactive (timers do not advance). While inactive, consumer queues (dispatch and every sync
+  channel) are bounded: the latest sync record per object is kept and events beyond 1000 are
+  dropped with a recorded warning.
+- Hot reload with state: `POST /script` accepts `{ "source": ..., "preserveState": true }` (or the
+  raw body as before). Before the old script is disposed the consumer reads
+  `this.state` (a JSON-serializable object the script maintains); the new script receives it in
+  `this.scriptChanged(previousState)` after load and before its first frame. Without
+  `preserveState` the hook is not called.
+- Host events. `Spatial.host.on(name, handler)`, `off`, and `Spatial.host.send(name, payload)`
+  form a bidirectional channel with the embedding app: the Swift host exposes
+  `JavaScriptScene.send(name:payload:)` and `onHostEvent` (and `ScriptingRuntime.on(name)` at
+  the runtime level); the web page exposes `window.spatialHost.send(name, payload)` and
+  `window.spatialHost.on(name, handler)`. Payloads are JSON. `this.on(name, handler)` is an alias
+  for `Spatial.host.on`. The dev server exposes `POST /event` `{ name, payload }` and `GET /events`
+  (drains script-sent events) so an agent can drive and observe the channel.
+- Host functions. Apps register native functions: Swift `ScriptingRuntime.register(module:
+  "MyApp", function: "save") { args in ... }` (sync or async, JSON in and out); web
+  `window.spatialHost.register("MyApp", "save", fn)`. Scripts call
+  `await Spatial.host.call("MyApp.save", args)`; an unknown function rejects with
+  `SpatialUnsupportedError` (feature "host-function"). `Spatial.host.functions` lists what is
+  registered and is read at call time, so functions registered after load are callable. A host
+  error result rejects with a `SpatialUnsupportedError` whose message is
+  `Module.function: <message>`. This is the equivalent of Apple's module functions and type
+  schemas.
+
+### 14.11 Small components
+
+- `object.accessibility = { label, value, hint, isButton }`: RealityKit `AccessibilityComponent`;
+  web mirrors it onto an offscreen DOM element per object with `aria-label`. Dump reports it.
+- `Spatial.render.adaptiveResolution: boolean` (visionOS only, warns elsewhere).
+- `Spatial.environmentLighting.intensityExponent: number` (visionOS
+  `EnvironmentLightingConfigurationComponent`; macOS and web scale the ambient environment).
+- `Spatial.debug.modelView: null | "normal" | "uv" | "baseColor" | "roughness" | "metallic" |
+  "occlusion" | "emissive"` (RealityKit `ModelDebugOptionsComponent`; web substitutes a debug
+  material where three.js has one, normal and uv, and warns for the rest).
+- `Spatial.fetchText(url)` and `Spatial.fetchJSON(url)` return promises (URL rules of 3.5; the
+  consumer performs the fetch and rejects on failure). This covers what Apple's `Foundation`
+  module is used for in scripts.
+
+### 14.12 Multiple materials per mesh (three)
+
+`Mesh(geometry, materials[])` with `geometry.groups` selects a material per index range, as in
+three.js. RealityKit receives one `ModelComponent` with a material per mesh part; the core emits
+`material` with an array payload when a mesh carries several. `mesh.material` remains a single
+material for the common case. Fewer materials than the groups ask for is a one-time warning and
+the last material repeats; more materials than groups warns and the extras are ignored.
+
+### 14.13 Protocol additions
+
+New opcodes, all following the section 5 conventions:
+
+| Opcode | Arguments |
+|---|---|
+| `audio` | id, { url, spatial, ambient, loop, volume, rate, group, refDistance, rolloff, distanceModel, cone:[inner, outer, gain] or null, reverbLevel } or null |
+| `audioControl` | id, "play" \| "pause" \| "stop" \| "seek", value or null |
+| `audioMixer` | 0, { masterVolume, groups: { name: volume }, state: "running" \| "suspended" } | The consumer reports the real engine state with `dispatch("audioState", 0, { state })`. |
+| `video` | id, { url: string \| { mp4?, hls?, webm? } \| null, width, height, loop, muted, autoplay, docking, volume, rate } or null | Consumers pick the encoding they can play; a null url means every source was refused and the core has already dispatched `error`. |
+| `videoControl` | id, "play" \| "pause" \| "seek", value or null |
+| `camera` | cameraId, { kind: "perspective" \| "orthographic" \| null, fov, near, far, left, right, top, bottom } | `cameraId` is the camera object's id (it is an `Object3D` in the graph, or an extra root when not added), so its transform arrives through `transforms` like any object and the consumer attaches the camera component to that entity. `["camera", 0, { kind: null }]` restores the consumer's built-in camera. |
+| `characterController` | id, { radius, height, slopeLimit, stepLimit, gravity } or null |
+| `characterMove` | id, dx, dy, dz |
+| `characterTeleport` | id, x, y, z |
+| `forceField` | id, { kind, enabled, radius, mask, ...per kind } or null | `kind` is the class name; per-kind fields are `force`, or `strength` with `minimumDistance` and `falloff`, or `strength` with `axis`, or `coefficient`, or `strength` with `noiseScale`. |
+| `skeleton` | id, { joints: { name: [px, py, pz, qx, qy, qz, qw] } , track } | Retraction is the empty payload `{ joints: {}, track: false }`. |
+| `blendShapes` | id, { name: weight } | Retraction is `{}`. |
+| `shaderParameter` | id, name, value, materialIndex | `materialIndex` is 0 for a single material and the array index for a shader graph inside a material array. |
+| `sceneUnderstanding` | 0, { collision, occlusion, physics, shadows } |
+| `accessibility` | id, JSON or null | Clearing the last phase 2 feature on an object always emits its retraction (`null` for audio, video, characterController, forceField, accessibility). |
+| `renderOptions` | 0, { adaptiveResolution, environmentIntensityExponent, debugModelView } |
+| `hostEvent` | 0, name, payloadJSON | script to host |
+| `hostCall` | callId, name, argsJSON | script to host; the host answers with `dispatch("hostResult", callId, { value } or { error })` |
+| `fetch` | requestId, { url, kind: "text" \| "json" } | the host answers with `dispatch("fetchResult", requestId, { text } or { json } or { error })` |
+| `controllerRumble` | 0, controllerId, intensity, duration | second element is not an object id, like `hostEvent`, `hostCall`, and `fetch` |
+
+Payload details fixed by the core: a shader graph `material` payload is `{ type: "ShaderGraphMaterial", uuid, source, name, parameters, fallback, generation }` where `generation` increments on every `setParameter`; `shaderParameter` values are numbers, booleans, short strings, arrays of two to four floats, or texture ids. The `geometry` descriptor gains `groups: [{ start, count, materialIndex }] | null`. `setInput.controllers` is an array of `{ id?, name?, leftThumbstick?: [x, y], rightThumbstick?: [x, y], leftTrigger?, rightTrigger?, buttons?: { a, b, x, y, leftShoulder, rightShoulder, dpadUp, dpadDown, dpadLeft, dpadRight, menu, options: boolean | number }, current? }` with every field optional (a missing id defaults to `controller-<slot>`); the core computes pressed and released edges. `setInput.mouse` gains `scenePosition: [x, y, z] | null`, `scroll: [dx, dy]`, `connected`; `setInput.keyboard` gains `connected`. Event payloads: video `loaded` is `{ width, height, duration }`, video `error` is `{ message }`, `hostResult` is `{ value } | { error }`, `assetLoaded` gains `joints: string[]` and `blendShapes: string[]`. A raycast record with id 0 is the real-world mesh and yields `{ object: null, sceneUnderstanding: true }`; every hit carries a `sceneUnderstanding` boolean. `Spatial.camera` is null until a script assigns one, meaning the consumer's built-in camera, and no `camera` command is emitted until then. `Audio` objects are Object3Ds created with kind `group`; their dump `type` is the class name. Extra roots (an `Audio`, camera, or asset group the script never added to the scene) are parented to the native root (`parent id 0`) so consumers can attach components to a live entity. Imperative commands (impulses, forces, character moves, bursts, asset animation) issued before the object's first flush are deferred to the frame after its creation, not dropped.
+
+Dump additions: top-level `isActive`, `audioMixer`, `camera`, `sceneUnderstanding`, `render`, `environmentLighting`, `debug`, `hostFunctions`, `controllers`; per object `audio`, `video`, `characterController` with `isOnGround`, `forceField`, `accessibility`, `skeleton`, `blendShapes`.
+
+New consumer-to-core entry points: `syncAudio(records)` `[id, playing, currentTime, duration]`,
+`syncVideo(records)` the same shape, `syncSkeleton(id, joints)`, `syncCharacter(records)` `[id,
+px, py, pz, isOnGround, vx, vy, vz]`, `setActive(bool)`, `hostEvent(name, payload)`, and the
+`controllers` member of `setInput`. The `material` command may carry an array payload (14.12).
+`dispatch` accepts the new event types `ended`, `loaded`, `controllerconnected`,
+`controllerdisconnected`, `hostResult`, `fetchResult`, `audioState`. Additional entry points:
+`setHostFunctions(names)` (also accepted as a `hostFunctions` load option and preserved across a
+reload) and `captureState()`; `load(source, env, { previousState })` delivers state to
+`scriptChanged`. Conformance step kinds: `syncAudio`, `syncVideo`, `syncCharacter`,
+`syncSkeleton`, `setActive`, `hostEvent`, `hostFunctions`, `inject: "controller"`, and `dispatch`
+by `call` or `fetch` id or with no target.
+
+### 14.13a Parity plans and live input
+
+While a `POST /parity` plan runs, the Mac consumer feeds the core only injected input; live
+keyboard, mouse, and controller state are excluded so a plan is deterministic. Release builds do
+not bundle the examples, scenarios, or conformance cases; only `SpatialScript/assets` ships.
+
+### 14.14 Capabilities and verification
+
+`Spatial.env.capabilities` gains `audio`, `video`, `camera`, `characterController`,
+`forceFields`, `skeleton`, `blendShapes`, `shaderGraph`, `sceneUnderstanding`, `controllers`,
+`hostFunctions`, `accessibility`. Each is true only where the consumer implements the feature
+with effect.
+
+Verification on macOS: audio and video are verified through the native dump and the sync
+channels (an `AudioComponent` present, `isPlaying` true, `currentTime` advancing), through the
+macOS host's window capture for video frames on the plane, and through the browser harness where
+Chromium runs with a fake audio device. Controllers are verified with injected controller state
+(`Spatial.inject.controller(state)`) since no hardware is attached. Cameras are verified by
+projecting a known point on both backends. Everything else follows the phase 1 gates:
+conformance cases for every member above, the parity gate, and the three adversarial reviews.
