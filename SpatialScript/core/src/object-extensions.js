@@ -30,7 +30,11 @@ export const DIRTY_LISTENERS = 32;
 export const DIRTY_RIGIDBODY = 64;
 export const DIRTY_MATERIAL = 128;
 export const DIRTY_LIGHT = 256;
-export const DIRTY_ALL = 511;
+// Phase 2 per-object state: audio, video, character controller, force field,
+// accessibility and shader parameters all raise this one bit, so an object
+// with none of them costs the same integer read it did before (SPEC 14).
+export const DIRTY_FEATURE = 512;
+export const DIRTY_ALL = 1023;
 
 /**
  * Defines an own-property-backed accessor on a prototype that raises `bit`
@@ -86,6 +90,12 @@ const SPATIAL_EVENT_TYPES = new Set([
   "unanchored",
   "assetLoaded",
   "assetError",
+  // phase 2 (SPEC 14)
+  "ended",
+  "loaded",
+  "error",
+  "controllerconnected",
+  "controllerdisconnected",
 ]);
 
 let installed = false;
@@ -118,6 +128,10 @@ export function installObjectExtensions(Light) {
   trackedProperty(proto, "hoverEffect", DIRTY_FLAGS, null, HOVER_EFFECTS);
   trackedProperty(proto, "manipulable", DIRTY_FLAGS, false);
   trackedProperty(proto, "renderOrder", DIRTY_FLAGS, 0);
+  // 14.11 accessibility and 14.4 character controller: both are plain state
+  // the diff re-reads only when written.
+  trackedProperty(proto, "accessibility", DIRTY_FEATURE, null);
+  trackedProperty(proto, "characterController", DIRTY_FEATURE, null);
   trackedProperty(proto, "name", DIRTY_NAME, "");
   trackedProperty(proto, "visible", DIRTY_VISIBLE, true);
   trackedProperty(proto, "castShadow", DIRTY_SHADOW | DIRTY_LIGHT, false);

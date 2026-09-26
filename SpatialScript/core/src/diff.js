@@ -18,7 +18,17 @@ export function installGeometryTracking(BufferGeometry) {
   geometryTrackingInstalled = true;
   const proto = BufferGeometry.prototype;
   proto[GEOMETRY_REVISION] = 0;
-  for (const name of ["setAttribute", "deleteAttribute", "setIndex", "computeVertexNormals", "applyMatrix4"]) {
+  for (const name of [
+    "setAttribute",
+    "deleteAttribute",
+    "setIndex",
+    "computeVertexNormals",
+    "applyMatrix4",
+    // Groups select a material each (SPEC 14.12), so they are part of the
+    // descriptor and an edit has to re-emit it.
+    "addGroup",
+    "clearGroups",
+  ]) {
     const base = proto[name];
     if (typeof base !== "function") continue;
     proto[name] = function tracked(...args) {
@@ -63,6 +73,23 @@ export function createSnapshot(id, slot, kind, isLight) {
     normalVersion: NaN,
     uvVersion: NaN,
     indexVersion: NaN,
+    // Phase 2 per-object state (SPEC 14). `features` is a bitmask of what this
+    // object actually has, so an object with none of it costs one compare.
+    features: 0,
+    // What is currently on the wire, so a feature that goes away can still be
+    // retracted after the mask has dropped to zero (P2-B-02).
+    emittedFeatures: 0,
+    // features | emittedFeatures, so the hot path reads one field.
+    featureGate: 0,
+    audio: null,
+    video: null,
+    character: null,
+    forceField: null,
+    accessibility: null,
+    shaderGeneration: -1,
+    shaderGenerations: null,
+    skeletonGeneration: -1,
+    blendGeneration: -1,
     hasBody: false,
     materialObject: null,
     material: null,
@@ -258,6 +285,23 @@ export function geometryRevisionOf(geometry) {
   return geometryPayloadKey(geometry);
 }
 
+/** `[{ start, count, materialIndex }]`, or null when there are no groups. */
+function geometryGroups(geometry) {
+  const groups = geometry.groups;
+  if (!Array.isArray(groups) || groups.length === 0) return null;
+  const out = [];
+  for (let i = 0; i < groups.length; i += 1) {
+    const group = groups[i];
+    if (!group) continue;
+    push(out, {
+      start: finite(group.start, 0),
+      count: finite(group.count, 0),
+      materialIndex: finite(group.materialIndex, 0),
+    });
+  }
+  return out.length === 0 ? null : out;
+}
+
 function buildGeometryPayload(geometry, dropped) {
   const attributes = geometry.attributes || {};
   // Copies, never the live arrays: a consumer is entitled to hold the payload,
@@ -279,6 +323,9 @@ function buildGeometryPayload(geometry, dropped) {
       // "the same geometry again" from "the same geometry, changed".
       revision: geometryRevisionOf(geometry),
       parameters: sanitizeParameters(geometry.parameters, dropped),
+      // Index ranges that select a material each, when a mesh carries several
+      // (SPEC 14.12). Absent (null) for the single-material case.
+      groups: geometryGroups(geometry),
     },
     position,
     normal,

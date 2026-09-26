@@ -37,4 +37,31 @@ export const MAX_PARAMETER_ARRAY = 64;
 export const MAX_PARAMETER_KEYS = 64;
 
 /** Url schemes a texture or asset may use. */
-export const ALLOWED_URL_SCHEMES = ["https:", "http:", "file:", "asset:", "data:"];
+export const ALLOWED_URL_SCHEMES = ["https:", "http:", "file:", "asset:", "data:", "blob:"];
+
+/** Host-channel and fetch payloads: depth, total nodes, and pending calls. */
+export const MAX_JSON_DEPTH = 8;
+export const MAX_JSON_NODES = 10000;
+export const MAX_PENDING_HOST_CALLS = 1000;
+
+/** Live game controllers a consumer may report in one setInput. */
+export const MAX_CONTROLLERS = 8;
+
+/** Joints and blend shapes the core will carry for one asset. */
+export const MAX_SKELETON_JOINTS = 512;
+export const MAX_BLEND_SHAPES = 256;
+
+/** Events kept while the scene is inactive; the rest are dropped (14.10). */
+export const MAX_INACTIVE_EVENTS = 1000;
+
+/** Objects whose latest sync record is kept while the scene is inactive. */
+export const MAX_INACTIVE_SYNC_OBJECTS = 10000;
+
+/** Bytes of JSON `this.state` may carry across a hot reload. */
+export const MAX_STATE_BYTES = 1024 * 1024;
+
+/** Imperative commands that may wait for their object's first flush. */
+export const MAX_DEFERRED_COMMANDS = 10000;
+
+/** Frames a deferred command waits for a flush before it is dropped. */
+export const MAX_DEFERRED_FRAMES = 2;

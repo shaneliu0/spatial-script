@@ -47,7 +47,9 @@ export function resolveUrl(raw, assetRoot) {
       };
     }
 
-    if (scheme === "data:") return { url: raw, warning: null };
+    // `data:` and `blob:` carry their own opaque body; normalising it would
+    // corrupt it (a blob url embeds another url after the scheme).
+    if (scheme === "data:" || scheme === "blob:") return { url: raw, warning: null };
 
     const rest = raw.slice(scheme.length);
     if (!rest.startsWith("//")) {

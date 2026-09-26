@@ -41,6 +41,9 @@ import {
   MeshBasicMaterial,
   MeshStandardMaterial,
   MeshPhysicalMaterial,
+  // 14.3 cameras
+  PerspectiveCamera,
+  OrthographicCamera,
   // 3.6 lights
   Light,
   AmbientLight,
@@ -115,6 +118,8 @@ export {
   MeshBasicMaterial,
   MeshStandardMaterial,
   MeshPhysicalMaterial,
+  PerspectiveCamera,
+  OrthographicCamera,
   Light,
   AmbientLight,
   DirectionalLight,
