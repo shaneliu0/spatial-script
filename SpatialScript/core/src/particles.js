@@ -50,7 +50,7 @@ export class ParticleEmitter extends Object3D {
   burst() {
     const runtime = host();
     if (runtime && runtime.canCommand(this, "ParticleEmitter.burst")) {
-      runtime.queueCommand(["particlesBurst", runtime.idForObject(this)]);
+      runtime.queueCommand(["particlesBurst", runtime.idForObject(this)], this);
     }
     return this;
   }

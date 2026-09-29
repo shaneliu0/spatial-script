@@ -12,6 +12,7 @@ import {
   DoubleSide,
 } from "./three-exports.js";
 import { finite, clamp, atLeast, colorArray } from "./sanitize.js";
+import { shaderGraphSnapshot } from "./shader-graph.js";
 
 // Raised whenever a tracked material property is written, so the diff can skip
 // re-reading a material that nobody touched. Colors are compared separately:
@@ -114,6 +115,12 @@ export { MATERIAL_MAP_SLOTS };
  * ColorManagement is enabled.
  */
 export function materialSnapshot(material, textureIdFor, warn) {
+  // A shader graph carries its own shape, with the fallback's full material
+  // JSON inside it (SPEC 14.6).
+  if (material.isShaderGraphMaterial === true) {
+    return shaderGraphSnapshot(material, textureIdFor, materialSnapshot);
+  }
+
   const maps = {};
   for (const slot of MATERIAL_MAP_SLOTS) {
     const texture = material[slot];
@@ -174,6 +181,16 @@ export function materialSnapshot(material, textureIdFor, warn) {
 export function materialSnapshotEquals(a, b) {
   if (a === b) return true;
   if (!a || !b) return false;
+  if (a.type === "ShaderGraphMaterial" || b.type === "ShaderGraphMaterial") {
+    return (
+      a.type === b.type &&
+      a.uuid === b.uuid &&
+      a.source === b.source &&
+      a.name === b.name &&
+      a.generation === b.generation &&
+      materialSnapshotEquals(a.fallback, b.fallback)
+    );
+  }
   if (
     a.type !== b.type ||
     a.uuid !== b.uuid ||

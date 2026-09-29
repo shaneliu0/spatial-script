@@ -4,7 +4,7 @@
 
 import { push } from "./builtins.js";
 import { ThreeScene, ThreeMesh, BufferGeometry, MeshStandardMaterial } from "./three-exports.js";
-import { DIRTY, DIRTY_GEOMETRY, DIRTY_MATERIAL } from "./object-extensions.js";
+import { DIRTY, DIRTY_GEOMETRY, DIRTY_MATERIAL, DIRTY_FEATURE } from "./object-extensions.js";
 import { SpatialUnsupportedError } from "./errors.js";
 
 // Marks a geometry or material the core supplied because the script passed
@@ -74,7 +74,7 @@ function substituteMaterial(material) {
 
 export class Mesh extends ThreeMesh {
   constructor(geometry, material) {
-    super(substituteGeometry(geometry), substituteMaterial(material));
+    super(substituteGeometry(geometry), Array.isArray(material) ? material : substituteMaterial(material));
   }
 }
 
@@ -96,14 +96,9 @@ Object.defineProperty(Mesh.prototype, "material", {
     return this[MATERIAL] === undefined ? null : this[MATERIAL];
   },
   set(material) {
-    if (Array.isArray(material)) {
-      throw new SpatialUnsupportedError(
-        "Multiple materials per mesh are not in scope (SPEC section 4)",
-        "Mesh.material[]",
-        this,
-      );
-    }
+    // An array selects a material per geometry group, as in three.js
+    // (SPEC 14.12); the diff emits an array payload for it.
     this[MATERIAL] = material === undefined ? null : material;
-    this[DIRTY] = (this[DIRTY] | 0) | DIRTY_MATERIAL;
+    this[DIRTY] = (this[DIRTY] | 0) | DIRTY_MATERIAL | DIRTY_FEATURE;
   },
 });

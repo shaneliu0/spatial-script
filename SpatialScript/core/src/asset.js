@@ -15,6 +15,9 @@ export class AssetGroup extends Group {
       gltf: urls.gltf === undefined ? null : urls.gltf,
     };
     this.animations = [];
+    // Filled in when the consumer reports what the asset has (SPEC 14.5).
+    this.skeleton = null;
+    this.blendShapes = null;
     this.boundingBox = new Box3();
     this.loaded = false;
     this._resolve = null;
@@ -28,7 +31,7 @@ export class AssetGroup extends Group {
     const speed = options.speed === undefined ? 1 : options.speed;
     this._currentAnimation = { name, loop, speed };
     if (runtime && runtime.canCommand(this, "AssetGroup.playAnimation")) {
-      runtime.queueCommand(["assetAnimation", runtime.idForObject(this), name, loop, speed]);
+      runtime.queueCommand(["assetAnimation", runtime.idForObject(this), name, loop, speed], this);
     }
     return this;
   }
@@ -37,7 +40,7 @@ export class AssetGroup extends Group {
     const runtime = host();
     this._currentAnimation = null;
     if (runtime && runtime.canCommand(this, "AssetGroup.stopAnimation")) {
-      runtime.queueCommand(["assetAnimation", runtime.idForObject(this), null, false, 1]);
+      runtime.queueCommand(["assetAnimation", runtime.idForObject(this), null, false, 1], this);
     }
     return this;
   }
