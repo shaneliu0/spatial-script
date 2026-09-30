@@ -96,21 +96,21 @@ export class RigidBody {
       point ? point.x : null,
       point ? point.y : null,
       point ? point.z : null,
-    ]);
+    ], this.object);
     return this;
   }
 
   applyForce(vector) {
     const runtime = host();
     if (!runtime || !runtime.canCommand(this.object, "RigidBody.applyForce")) return this;
-    runtime.queueCommand(["bodyForce", runtime.idForObject(this.object), vector.x, vector.y, vector.z]);
+    runtime.queueCommand(["bodyForce", runtime.idForObject(this.object), vector.x, vector.y, vector.z], this.object);
     return this;
   }
 
   applyTorque(vector) {
     const runtime = host();
     if (!runtime || !runtime.canCommand(this.object, "RigidBody.applyTorque")) return this;
-    runtime.queueCommand(["bodyTorque", runtime.idForObject(this.object), vector.x, vector.y, vector.z]);
+    runtime.queueCommand(["bodyTorque", runtime.idForObject(this.object), vector.x, vector.y, vector.z], this.object);
     return this;
   }
 
@@ -138,7 +138,7 @@ export class RigidBody {
       angular ? angular.x : null,
       angular ? angular.y : null,
       angular ? angular.z : null,
-    ]);
+    ], this.object);
   }
 
   toJSON() {
