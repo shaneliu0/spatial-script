@@ -56,5 +56,17 @@ export function createInject(runtime) {
     key(code, down) {
       push(runtime.injectedKeys, { code: String(code), down: down === true });
     },
+
+    /**
+     * Controller state for the coming frame (SPEC 14.14 verification). Takes
+     * one record or an array of them, in the `setInput.controllers` shape.
+     */
+    controller(state) {
+      if (state === null || state === undefined) {
+        runtime.input._injectedControllers = [];
+        return;
+      }
+      runtime.input._injectedControllers = Array.isArray(state) ? state : [state];
+    },
   };
 }
