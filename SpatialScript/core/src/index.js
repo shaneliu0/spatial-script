@@ -29,9 +29,15 @@ const api = {
     installGlobals(runtime, namespace);
   },
 
-  load(source, options) {
+  /**
+   * `load(source, options)`; a hot reload that preserves state passes it as
+   * `options.previousState` or as a third argument (SPEC 14.10).
+   */
+  load(source, options, extra) {
     installGlobals(runtime, namespace);
-    return runtime.load(source, options);
+    const merged =
+      extra === undefined || extra === null ? options : { ...(options || {}), ...extra };
+    return runtime.load(source, merged);
   },
 
   /**
@@ -61,6 +67,44 @@ const api = {
 
   setInput(state) {
     runtime.setInput(state);
+  },
+
+  // ---------------------------------------------------------------- phase 2
+
+  syncAudio(records) {
+    runtime.syncAudio(records);
+  },
+
+  syncVideo(records) {
+    runtime.syncVideo(records);
+  },
+
+  syncCharacter(records) {
+    runtime.syncCharacter(records);
+  },
+
+  syncSkeleton(id, joints) {
+    runtime.syncSkeleton(id, joints);
+  },
+
+  /** The view appeared or went away; ticks pause while inactive. */
+  setActive(active) {
+    runtime.setActive(active);
+  },
+
+  /** Host to script: delivers to `Spatial.host.on(name)` handlers. */
+  hostEvent(name, payload) {
+    runtime.hostEvent(name, payload);
+  },
+
+  /** The functions the app registered, as `Module.function` names. */
+  setHostFunctions(names) {
+    runtime.hostChannel.setFunctions(names);
+  },
+
+  /** `this.state` as JSON, for a reload that preserves it. */
+  captureState() {
+    return runtime.captureState();
   },
 
   dump(options) {

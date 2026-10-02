@@ -5,7 +5,7 @@
 // recycled and the space below 2^24 is guarded rather than overflowed.
 
 import { SpatialUnsupportedError } from "../errors.js";
-import { MAX_ID } from "../limits.js";
+import { MAX_ID, MAX_DEPTH } from "../limits.js";
 import { isDestroyed } from "../object-extensions.js";
 import { labelFor } from "../sanitize.js";
 import { textureSnapshot, textureSnapshotEquals } from "../diff.js";
@@ -60,7 +60,7 @@ export function idForObject(runtime, object) {
    */
 export function canCommand(runtime, object, feature) {
     if (!object) return false;
-    if (isDestroyed(object) || object[SNAPSHOT] === undefined) {
+    if (isDestroyed(object)) {
       const label = object.name ? `"${object.name}"` : object.type;
       runtime.warnOnce(
         `uncreated:${feature}`,
@@ -68,7 +68,35 @@ export function canCommand(runtime, object, feature) {
       );
       return false;
     }
-    return true;
+    // An object the consumer has already seen can be commanded straight away.
+    if (object[SNAPSHOT] !== undefined) return true;
+    // One that is in the graph but has not been flushed yet is not an error:
+    // its command waits for the frame after its `create` (SPEC 5 ordering).
+    if (isAttached(runtime, object)) return true;
+    const label = object.name ? `"${object.name}"` : object.type;
+    runtime.warnOnce(
+      `uncreated:${feature}`,
+      `${feature} on ${label} was dropped: the object is not in the mounted scene`,
+    );
+    return false;
+  }
+
+  /**
+   * True when `object` hangs off the mounted scene, off a tracked root, or off
+   * a Scene that is about to be mounted: a script that builds its scene, acts
+   * on it, and calls `mount` last is the normal shape.
+   */
+export function isAttached(runtime, object) {
+    let node = object;
+    let depth = 0;
+    while (node !== null && node !== undefined && depth <= MAX_DEPTH) {
+      if (node === runtime.scene) return true;
+      if (runtime.extraRoots.has(node)) return true;
+      if (node.parent === null || node.parent === undefined) return node.isScene === true;
+      node = node.parent;
+      depth += 1;
+    }
+    return false;
   }
 
 export function objectForId(runtime, id) {

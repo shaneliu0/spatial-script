@@ -18,6 +18,7 @@ import {
   DIRTY_RIGIDBODY,
   DIRTY_MATERIAL,
   DIRTY_LIGHT,
+  DIRTY_FEATURE,
 } from "../object-extensions.js";
 import { createSnapshot, lightSnapshot, lightSnapshotEquals, geometryPayload } from "../diff.js";
 import { kindFor, entryForKind } from "../kinds.js";
@@ -28,6 +29,7 @@ import { MATERIAL_FRAME, MATERIAL_PAYLOAD } from "../materials.js";
 import { labelFor } from "../sanitize.js";
 import { push } from "../builtins.js";
 import { SNAPSHOT, TRANSFORM_RECORD } from "./state.js";
+import { featuresFor, diffFeatures } from "./features.js";
 import { shallowJSONEquals, copyLightSnapshot } from "./payloads.js";
 
 /**
@@ -367,7 +369,35 @@ export function diffObject(runtime, object, parentId, parentDirty, frame, out) {
         snapshot.materialObject = object.material;
       }
       const material = snapshot.materialObject;
-      if (material !== undefined && material !== null) {
+      if (Array.isArray(material)) {
+        // One material per geometry group (SPEC 14.12). The payload is an
+        // array; each element is the same per-material payload a single
+        // material would produce, so consumers share native materials the
+        // same way. A group whose materialIndex has no material would be a
+        // per-consumer guess, so the array is padded to cover every index and
+        // the mismatch is reported once (P2-B-17).
+        const wanted = materialSlotsWanted(runtime, object, material);
+        const previous = snapshot.material;
+        let changed = !Array.isArray(previous) || previous.length !== wanted;
+        const next = [];
+        for (let i = 0; i < wanted; i += 1) {
+          const entry = material[i < material.length ? i : material.length - 1];
+          if (entry === null || entry === undefined) {
+            next[i] = null;
+          } else {
+            next[i] =
+              entry[MATERIAL_FRAME] === frame
+                ? entry[MATERIAL_PAYLOAD]
+                : runtime.materialPayload(entry, frame);
+            runtime.warnMaterial(entry);
+          }
+          if (!changed && previous[i] !== next[i]) changed = true;
+        }
+        if (changed) {
+          snapshot.material = next;
+          push(out.object, ["material", id, next]);
+        }
+      } else if (material !== undefined && material !== null) {
         const next =
           material[MATERIAL_FRAME] === frame
             ? material[MATERIAL_PAYLOAD]
@@ -536,6 +566,18 @@ export function diffObject(runtime, object, parentId, parentDirty, frame, out) {
       }
     }
 
+    // ---- phase 2 state ------------------------------------------------------
+
+    // One gate for every feature of SPEC 14, holding what the object has and
+    // what is still on the wire, so a retraction survives the last feature
+    // being cleared (P2-B-02) and an object with none of them pays a single
+    // field read.
+    if (snapshot.featureGate !== 0 || (dirty & (DIRTY_FEATURE | DIRTY_MATERIAL)) !== 0) {
+      snapshot.features = featuresFor(object);
+      snapshot.featureGate = snapshot.features | snapshot.emittedFeatures;
+      if (snapshot.featureGate !== 0) diffFeatures(runtime, object, snapshot, id, out);
+    }
+
     // A body's own properties can be reassigned without a setter, so a body
     // that exists is compared every frame; an object that has never had one
     // costs a single snapshot field read.
@@ -559,3 +601,37 @@ export function diffObject(runtime, object, parentId, parentDirty, frame, out) {
    * True when `object.matrix` differs from the one recorded at the last flush,
    * which means a script wrote it directly rather than through TRS.
    */
+
+/**
+ * How many material slots the emitted array needs: one per material, extended
+ * to cover the highest `materialIndex` the geometry's groups ask for. The
+ * mismatch is warned about once per mesh, naming both counts, so every
+ * consumer draws the same thing instead of inventing a fallback (P2-B-17).
+ */
+function materialSlotsWanted(runtime, object, materials) {
+  const geometry = object.geometry;
+  const groups = geometry === null || geometry === undefined ? null : geometry.groups;
+  if (!Array.isArray(groups) || groups.length === 0) return materials.length;
+
+  let highest = -1;
+  for (let i = 0; i < groups.length; i += 1) {
+    const index = groups[i] === null || groups[i] === undefined ? 0 : groups[i].materialIndex | 0;
+    if (index > highest) highest = index;
+  }
+  if (highest < materials.length) return materials.length;
+
+  if (materials.length === 0) {
+    runtime.warnOnce(
+      `material-groups:${object.uuid}`,
+      `${labelFor(object)} has ${groups.length} geometry groups and no materials; ` +
+        "nothing can be drawn for them",
+    );
+    return 0;
+  }
+  runtime.warnOnce(
+    `material-groups:${object.uuid}`,
+    `${labelFor(object)} has geometry groups asking for ${highest + 1} materials but carries ` +
+      `${materials.length}; the last material was repeated for the rest`,
+  );
+  return highest + 1;
+}

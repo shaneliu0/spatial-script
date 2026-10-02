@@ -15,12 +15,15 @@ add("standard", new S.MeshStandardMaterial({ color: 0xffffff, metalness: 0.5, ro
 add("physical", new S.MeshPhysicalMaterial({ color: 0x3366ff, clearcoat: 0.8, clearcoatRoughness: 0.1 }));
 add("occluder", new S.OcclusionMaterial());
 
-let arrayError = null;
-try {
-  add("bad", new S.MeshBasicMaterial()).material = [new S.MeshBasicMaterial()];
-} catch (error) {
-  arrayError = error.name;
-}
-scene.getObjectByName("basic").userData.arrayError = arrayError;
+// SPEC 14.12: a mesh may carry one material per geometry group.
+const multi = add("multi", new S.MeshBasicMaterial({ color: 0xff0000 }));
+multi.geometry.clearGroups();
+multi.geometry.addGroup(0, 18, 0);
+multi.geometry.addGroup(18, 18, 1);
+multi.material = [
+  new S.MeshBasicMaterial({ color: 0xff0000 }),
+  new S.MeshStandardMaterial({ color: 0x00ff00 }),
+];
+scene.getObjectByName("basic").userData.materialCount = multi.material.length;
 
 S.mount(scene);

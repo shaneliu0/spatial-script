@@ -14,7 +14,7 @@
         "side": 0
       },
       "userData": {
-        "arrayError": "SpatialUnsupportedError"
+        "materialCount": 2
       }
     },
     {
@@ -48,6 +48,17 @@
       "material": {
         "type": "OcclusionMaterial"
       }
+    },
+    {
+      "name": "multi",
+      "material": [
+        {
+          "type": "MeshBasicMaterial"
+        },
+        {
+          "type": "MeshStandardMaterial"
+        }
+      ]
     }
   ]
 }

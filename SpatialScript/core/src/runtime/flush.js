@@ -10,8 +10,12 @@ import { push } from "../builtins.js";
 import { SNAPSHOT, TRANSFORM_RECORD, createBatch, BATCH_ORDER } from "./state.js";
 import { diffObject } from "./diff-object.js";
 import { diffTextures, diffTextureReleases, diffWorlds, diffPortals, diffJoints } from "./resources.js";
+import { diffSceneState } from "./scene-state.js";
 import { labelFor } from "../sanitize.js";
 import { safeString } from "../builtins.js";
+
+// Imperative commands that do not address an object id (SPEC 14.13).
+const SCENE_LEVEL_OPCODES = new Set(["hostEvent", "hostCall", "fetch", "controllerRumble"]);
 
 /** One lost frame rather than a dead scene: the batch built so far is returned. */
 export function flush(runtime) {
@@ -116,6 +120,9 @@ export function flushInner(runtime) {
       }
     }
 
+    // 7. Phase 2 scene-level state: mixer, camera, understanding, render.
+    diffSceneState(runtime, out.global);
+
     // An imperative command queued before a destroy in the same frame would
     // name an id this very batch has torn down (SPEC 5 ordering).
     let imperative = runtime.pendingCommands;
@@ -124,6 +131,9 @@ export function flushInner(runtime) {
       const destroyed = new Set();
       for (let i = 0; i < out.destroy.length; i += 1) destroyed.add(out.destroy[i][1]);
       imperative = imperative.filter((command) => {
+        // Only opcodes whose second element is an object id take part: a host
+        // call id or a fetch request id is its own number space.
+        if (SCENE_LEVEL_OPCODES.has(command[0])) return true;
         if (!destroyed.has(command[1])) return true;
         runtime.warnOnce(
           `imperative-destroyed:${command[0]}`,
@@ -231,9 +241,9 @@ export function walk(runtime, frame, out) {
       if (top > highWater) highWater = top;
     }
 
-    // Detached roots (an awaited asset, for example) are drained one at a time
-    // after the scene, so one that has meanwhile been added to the scene is
-    // not visited twice.
+    // Adopted roots (an awaited asset, a played Audio, an unparented camera)
+    // are drained one at a time after the scene, so one that has meanwhile
+    // been added to the scene is not visited twice.
     const extras = runtime.extraRoots.size > 0 ? Array.from(runtime.extraRoots) : null;
     let extraIndex = 0;
 
@@ -284,7 +294,11 @@ export function walk(runtime, frame, out) {
           dirtyFlags = runtime.walkDirty;
         }
         stack[top] = root;
-        parents[top] = -1;
+        // An adopted root is parented to the native root, not left detached:
+        // a consumer cannot use an entity with no parent, and its dump would
+        // not contain it (SPEC 14.13). Adding it to the scene later re-parents
+        // it; releasing it detaches it with parent -1 in step 2.
+        parents[top] = 0;
         dirtyFlags[top] = 0;
         top += 1;
         if (top > highWater) highWater = top;

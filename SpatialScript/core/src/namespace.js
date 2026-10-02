@@ -48,6 +48,8 @@ import {
   LoopOnce,
   LoopRepeat,
   LoopPingPong,
+  PerspectiveCamera,
+  OrthographicCamera,
 } from "./three-exports.js";
 import { Scene, Mesh } from "./scene-classes.js";
 import {
@@ -69,6 +71,17 @@ import { ParticleEmitter } from "./particles.js";
 import { Anchor } from "./anchor.js";
 import { Portal } from "./portal.js";
 import { ImageBasedLight } from "./asset.js";
+import { AudioLoader, AudioBuffer, Audio, PositionalAudio, AmbientAudio } from "./audio.js";
+import { VideoScreen } from "./video.js";
+import { CharacterController } from "./character.js";
+import {
+  ConstantForceField,
+  RadialForceField,
+  VortexForceField,
+  DragForceField,
+  TurbulenceForceField,
+} from "./force-fields.js";
+import { ShaderGraphMaterial } from "./shader-graph.js";
 import { SpatialUnsupportedError } from "./errors.js";
 import { createInject } from "./inject.js";
 import {
@@ -176,6 +189,31 @@ export function createNamespace(runtime) {
     Anchor,
     Portal,
 
+    // 14.1 audio
+    AudioLoader,
+    AudioBuffer,
+    Audio,
+    PositionalAudio,
+    AmbientAudio,
+
+    // 14.2 video
+    VideoScreen,
+
+    // 14.3 cameras
+    PerspectiveCamera,
+    OrthographicCamera,
+
+    // 14.4 character controller and force effects
+    CharacterController,
+    ConstantForceField,
+    RadialForceField,
+    VortexForceField,
+    DragForceField,
+    TurbulenceForceField,
+
+    // 14.6 shader graph materials
+    ShaderGraphMaterial,
+
     // constants
     FrontSide,
     BackSide,
@@ -226,6 +264,19 @@ export function createNamespace(runtime) {
       return runtime.dispose();
     },
 
+    // 14.3 pointer queries
+    rayFromPoint(x, y) {
+      return runtime.rayFromPoint(x, y);
+    },
+
+    // 14.11 consumer-performed requests
+    fetchText(url) {
+      return runtime.fetchText(url);
+    },
+    fetchJSON(url) {
+      return runtime.fetchJSON(url);
+    },
+
     inject: createInject(runtime),
   };
 
@@ -235,6 +286,44 @@ export function createNamespace(runtime) {
   readOnly("env", () => runtime.env);
   readOnly("physics", () => runtime.physics);
   readOnly("input", () => runtime.input);
+  readOnly("audio", () => runtime.audio);
+  readOnly("host", () => runtime.hostChannel);
+  readOnly("isActive", () => runtime.active);
+  readOnly("render", () => runtime.render);
+  readOnly("environmentLighting", () => runtime.environmentLighting);
+  readOnly("debug", () => runtime.debug);
+
+  Object.defineProperty(namespace, "camera", {
+    enumerable: true,
+    get() {
+      return runtime.camera;
+    },
+    set(value) {
+      runtime.setCamera(value);
+    },
+  });
+
+  Object.defineProperty(namespace, "sceneUnderstanding", {
+    enumerable: true,
+    get() {
+      return runtime.sceneUnderstanding;
+    },
+    set(value) {
+      if (value === null || value === undefined) {
+        runtime.sceneUnderstanding = { collision: false, occlusion: false, physics: false, shadows: false };
+        return;
+      }
+      if (typeof value !== "object") {
+        throw new TypeError("Spatial.sceneUnderstanding expects an object or null");
+      }
+      runtime.sceneUnderstanding = {
+        collision: value.collision === true,
+        occlusion: value.occlusion === true,
+        physics: value.physics === true,
+        shadows: value.shadows === true,
+      };
+    },
+  });
 
   Object.defineProperty(namespace, "environment", {
     enumerable: true,

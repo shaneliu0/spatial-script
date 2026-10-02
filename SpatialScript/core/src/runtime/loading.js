@@ -16,11 +16,30 @@ import { SNAPSHOT } from "./state.js";
 // SPEC 3.13: capabilities are honest per platform when the host supplies none.
 export const DEFAULT_CAPABILITIES = {
   realitykit: {
-    macos: { hands: false, anchors: false, portals: true, particles: true, manipulation: false, hoverEffect: false, shadows: true },
-    visionos: { hands: true, anchors: true, portals: true, particles: true, manipulation: true, hoverEffect: true, shadows: true },
+    macos: {
+      hands: false, anchors: false, portals: true, particles: true, manipulation: false,
+      hoverEffect: false, shadows: true,
+      // 14.14: true only where the consumer implements the feature with effect.
+      audio: true, video: true, camera: true, characterController: true, forceFields: true,
+      skeleton: true, blendShapes: true, shaderGraph: true, sceneUnderstanding: false,
+      controllers: true, hostFunctions: true, accessibility: true,
+    },
+    visionos: {
+      hands: true, anchors: true, portals: true, particles: true, manipulation: true,
+      hoverEffect: true, shadows: true,
+      audio: true, video: true, camera: false, characterController: true, forceFields: true,
+      skeleton: true, blendShapes: true, shaderGraph: true, sceneUnderstanding: true,
+      controllers: true, hostFunctions: true, accessibility: true,
+    },
   },
   three: {
-    web: { hands: false, anchors: false, portals: true, particles: true, manipulation: true, hoverEffect: false, shadows: true },
+    web: {
+      hands: false, anchors: false, portals: true, particles: true, manipulation: true,
+      hoverEffect: false, shadows: true,
+      audio: true, video: true, camera: true, characterController: true, forceFields: true,
+      skeleton: true, blendShapes: true, shaderGraph: false, sceneUnderstanding: false,
+      controllers: true, hostFunctions: true, accessibility: true,
+    },
   },
 };
 
@@ -44,10 +63,16 @@ export function load(runtime, source, options = {}) {
       capabilities: { ...defaults, ...(options.capabilities || {}) },
     };
     runtime.assetRoot = options.assetRoot === undefined ? "" : String(options.assetRoot);
+    if (options.hostFunctions !== undefined) runtime.hostChannel.setFunctions(options.hostFunctions);
+    // A hot reload that preserves state hands the old script's `this.state` to
+    // the new one through scriptChanged (SPEC 14.10).
+    runtime.previousState = options.previousState === undefined ? undefined : options.previousState;
 
     const namespace = runtime.namespace;
     const moduleObject = { exports: {} };
     const scriptThis = {};
+    // `this.on(...)` is the alias for the host channel (SPEC 14.10).
+    scriptThis.on = (name, handler) => runtime.hostChannel.on(name, handler);
     runtime.script = scriptThis;
 
     const requireFn = (name) => {
@@ -157,6 +182,18 @@ export function finishLoad(runtime, lineOffset) {
       }
     }
 
+    // After load and before the first frame, with the state the previous
+    // script held. Not called at all without a preserved state.
+    if (runtime.previousState !== undefined && typeof runtime.script.scriptChanged === "function") {
+      const previousState = runtime.previousState;
+      runtime.previousState = undefined;
+      try {
+        runtime.script.scriptChanged(previousState);
+      } catch (error) {
+        throw toLoadError(runtime, error, lineOffset);
+      }
+    }
+
     runtime.loaded = true;
   }
 
@@ -231,8 +268,11 @@ export function destroy(runtime, object) {
       const node = subtree[i];
       const id = runtime.objectIds.get(node);
       const snapshot = node[SNAPSHOT];
-      // Only objects the consumer has seen need a destroy command.
+      // Only objects the consumer has seen need a destroy command. A sound
+      // releases its audio first, so a consumer that keeps the entity around
+      // for its own reasons still stops playing (SPEC 14.1).
       if (id !== undefined && snapshot !== undefined) {
+        if (node.isAudio === true) push(runtime.pendingDestroys, ["audio", id, null]);
         push(runtime.pendingDestroys, ["destroy", id]);
       }
       if (id !== undefined) {
@@ -242,6 +282,7 @@ export function destroy(runtime, object) {
       if (snapshot !== undefined) runtime.releaseSnapshot(node, snapshot);
       if (id !== undefined) runtime.releaseId(id);
       runtime.extraRoots.delete(node);
+      runtime.audioObjects.delete(node);
       runtime.worldFlagged.delete(node);
       runtime.shearedObjects.delete(node);
       runtime.invalidTransforms.delete(node);

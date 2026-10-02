@@ -105,8 +105,6 @@ const RUNTIME_MEMBERS = [
 
 // Section 4: names for out-of-scope features must not exist.
 const OUT_OF_SCOPE = [
-  "PerspectiveCamera",
-  "OrthographicCamera",
   "ShaderMaterial",
   "RawShaderMaterial",
   "HemisphereLight",
@@ -115,7 +113,6 @@ const OUT_OF_SCOPE = [
   "Line",
   "Points",
   "SkinnedMesh",
-  "Audio",
   "WebGLRenderer",
   "Fog",
   "EffectComposer",

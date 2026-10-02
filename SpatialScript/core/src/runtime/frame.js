@@ -4,7 +4,11 @@
 import { push } from "../builtins.js";
 import { Vector3, Quaternion, Matrix4 } from "../three-exports.js";
 import { SpatialUnsupportedError } from "../errors.js";
-import { dispatchBubbling, worldToLocalMatrix } from "../object-extensions.js";
+import { dispatchBubbling, worldToLocalMatrix, isDestroyed, DIRTY, DIRTY_FEATURE } from "../object-extensions.js";
+import { isAttached } from "./resources.js";
+import { Controller } from "../input.js";
+import { MAX_DEFERRED_FRAMES } from "../limits.js";
+import { Skeleton, BlendShapes } from "../skeleton.js";
 import { Anchor } from "../anchor.js";
 import { AssetGroup } from "../asset.js";
 import { trsIsValid, labelFor } from "../sanitize.js";
@@ -19,12 +23,16 @@ const syncScratch = new Float64Array(10);
 
 export function tick(runtime, deltaTime) {
     if (runtime.disposed) return [];
+    // Inactive: the view is gone, so nothing advances (SPEC 14.10).
+    if (runtime.active === false) return [];
     const dt = Number.isFinite(deltaTime) ? deltaTime : 0;
     runtime.time.delta = dt;
     runtime.time.elapsed += dt;
     runtime.time.frame += 1;
 
+    promoteDeferredCommands(runtime);
     applySync(runtime);
+    applyMediaSync(runtime);
     applyInputAndEvents(runtime);
     runtime.timers.run(runtime.time.elapsed, (error) => runtime.reportError(error));
     runCallbacks(runtime, dt);
@@ -34,6 +42,49 @@ export function tick(runtime, deltaTime) {
     // updateMatrixWorld is not called here: it would undo the deferred leaf
     // matrices, overwrite a direct `matrix` write, and recurse per level.
     return runtime.flush();
+  }
+
+/**
+ * Imperative commands issued before their object had ever been flushed go out
+ * now, in the order they were made: the object's `create` reached the consumer
+ * in an earlier frame, so naming its id is safe. One whose object left the
+ * graph or was destroyed in between is dropped with the same warning it would
+ * have had at the call (SPEC 5 ordering).
+ */
+export function promoteDeferredCommands(runtime) {
+    const deferred = runtime.deferredCommands;
+    if (deferred.length === 0) return;
+    const frame = runtime.time.frame;
+    const kept = [];
+    for (let i = 0; i < deferred.length; i += 1) {
+      const entry = deferred[i];
+      const object = entry.object;
+      const snapshot = object[SNAPSHOT];
+      if (isDestroyed(object) || (snapshot === undefined && !isAttached(runtime, object))) {
+        runtime.warnOnce(
+          `uncreated:${entry.command[0]}`,
+          `A ${entry.command[0]} command was dropped: the object is not in the mounted scene`,
+        );
+        continue;
+      }
+      // Still waiting for its first flush. An object that is never actually
+      // walked (its Scene was never mounted) gets a couple of frames of grace
+      // and is then dropped with the same warning.
+      if (snapshot === undefined || snapshot.liveFrame >= frame) {
+        entry.waited = (entry.waited | 0) + 1;
+        if (entry.waited > MAX_DEFERRED_FRAMES) {
+          runtime.warnOnce(
+            `uncreated:${entry.command[0]}`,
+            `A ${entry.command[0]} command was dropped: the object is not in the mounted scene`,
+          );
+          continue;
+        }
+        push(kept, entry);
+        continue;
+      }
+      push(runtime.pendingCommands, entry.command);
+    }
+    runtime.deferredCommands = kept;
   }
 
 export function applySync(runtime) {
@@ -132,6 +183,63 @@ export function applySync(runtime) {
     runtime.pendingBodySync.length = 0;
   }
 
+/**
+ * Playback and character state the consumer owns (SPEC 14.13): audio, video
+ * and character controllers. Each record names an object the core tracks; an
+ * unknown id or a malformed record is dropped like any other sync.
+ */
+export function applyMediaSync(runtime) {
+    for (const records of runtime.pendingAudioSync) {
+      for (let i = 0; i + 4 <= records.length; i += 4) {
+        const object = runtime.idObjects.get(records[i]);
+        if (object === undefined || object.isAudio !== true) continue;
+        const currentTime = records[i + 2];
+        const duration = records[i + 3];
+        if (!Number.isFinite(currentTime) || !Number.isFinite(duration)) {
+          reportSync(runtime, object, "carried a non-finite playback time");
+          continue;
+        }
+        object._sync(records[i + 1] !== 0, currentTime, duration);
+      }
+    }
+    runtime.pendingAudioSync.length = 0;
+
+    for (const records of runtime.pendingVideoSync) {
+      for (let i = 0; i + 4 <= records.length; i += 4) {
+        const object = runtime.idObjects.get(records[i]);
+        if (object === undefined || object.isVideoScreen !== true) continue;
+        const currentTime = records[i + 2];
+        const duration = records[i + 3];
+        if (!Number.isFinite(currentTime) || !Number.isFinite(duration)) {
+          reportSync(runtime, object, "carried a non-finite playback time");
+          continue;
+        }
+        object._sync(records[i + 1] !== 0, currentTime, duration);
+      }
+    }
+    runtime.pendingVideoSync.length = 0;
+
+    for (const records of runtime.pendingCharacterSync) {
+      for (let i = 0; i + 8 <= records.length; i += 8) {
+        const object = runtime.idObjects.get(records[i]);
+        const controller = object === undefined ? null : object.characterController;
+        if (!controller || object[SNAPSHOT] === undefined) continue;
+        let valid = true;
+        for (let k = 1; k <= 3; k += 1) if (!Number.isFinite(records[i + k])) valid = false;
+        for (let k = 5; k <= 7; k += 1) if (!Number.isFinite(records[i + k])) valid = false;
+        if (!valid) {
+          reportSync(runtime, object, "carried a non-finite character state");
+          continue;
+        }
+        controller._sync(records[i + 4] !== 0, records[i + 5], records[i + 6], records[i + 7]);
+        // The position is world space, like `sync`, and lands on the object.
+        syncPosition.set(records[i + 1], records[i + 2], records[i + 3]);
+        runtime.applyWorldPosition(object, syncPosition);
+      }
+    }
+    runtime.pendingCharacterSync.length = 0;
+  }
+
   /** One error per object until that object syncs cleanly again. */
 export function reportSync(runtime, object, detail) {
     if (runtime.syncedObjects.has(object)) return;
@@ -147,9 +255,28 @@ export function reportSync(runtime, object, detail) {
   }
 
 export function applyInputAndEvents(runtime) {
-    runtime.input.beginFrame(runtime.pendingInput, runtime.injectedKeys);
+    runtime.input.beginFrame(runtime.pendingInput, runtime.injectedKeys, runtime.time.elapsed);
     runtime.pendingInput = null;
     runtime.injectedKeys.length = 0;
+
+    // Controllers coming and going are scene events (SPEC 14.8).
+    const connections = runtime.input.connectionEvents;
+    if (connections.length > 0) {
+      for (let i = 0; i < connections.length; i += 1) {
+        const entry = connections[i];
+        if (runtime.scene === null) continue;
+        try {
+          dispatchBubbling(runtime.scene, {
+            type: entry.type,
+            target: runtime.scene,
+            controller: entry.controller,
+          });
+        } catch (error) {
+          runtime.reportError(error);
+        }
+      }
+      connections.length = 0;
+    }
 
     const queue = runtime.eventQueue;
     runtime.eventQueue = [];
@@ -185,9 +312,82 @@ export function deliverEvent(runtime, entry) {
       return;
     }
 
-    const object = runtime.idObjects.get(id);
+    // Answers to script-initiated requests: the id is a call or request id in
+    // its own number space, not an object id (SPEC 14.13).
+    if (type === "hostResult") {
+      runtime.hostChannel.settle(id, entry.payload);
+      return;
+    }
+    if (type === "fetchResult") {
+      runtime.fetchChannel.settle(id, entry.payload);
+      return;
+    }
+    // The consumer reports whether the audio engine is actually running; on
+    // the web that only becomes true after a user gesture (SPEC 14.1).
+    if (type === "audioState") {
+      const state = entry.payload ? entry.payload.state : undefined;
+      if (state === "running" || state === "suspended") runtime.audio._state = state;
+      return;
+    }
+
+    // Controller connection events are about the scene, not an object.
+    const object = id === 0 ? runtime.scene : runtime.idObjects.get(id);
     if (!object) return;
     const payload = hydratePayload(runtime, entry.payload);
+
+    // A consumer that reports connections through `dispatch` rather than
+    // through setInput still owes the listener a controller (P2-C-12).
+    if (type === "controllerconnected" || type === "controllerdisconnected") {
+      const controllers = runtime.input.controllers;
+      const controllerId =
+        typeof payload.id === "string" && payload.id.length > 0 ? payload.id : "controller-0";
+      let controller = controllers.get(controllerId);
+      if (type === "controllerconnected") {
+        if (controller === null) {
+          controller = new Controller(controllerId);
+          if (typeof payload.name === "string") controller.name = payload.name;
+          controllers._byId.set(controllerId, controller);
+          const all = [];
+          for (const entryController of controllers._byId.values()) push(all, entryController);
+          controllers.all = all;
+        }
+      } else if (controller !== null) {
+        controllers._byId.delete(controllerId);
+        const all = [];
+        for (const entryController of controllers._byId.values()) push(all, entryController);
+        controllers.all = all;
+        if (controllers.current === controller) controllers.current = null;
+      }
+      if (controller !== null) payload.controller = controller;
+    }
+
+    if (type === "ended" && object.isAudio === true) {
+      object._playing = false;
+      if (typeof object.onEnded === "function") {
+        try {
+          object.onEnded();
+        } catch (error) {
+          runtime.reportError(error);
+        }
+      }
+    }
+
+    if (object.isVideoScreen === true) {
+      if (type === "loaded") {
+        const width = entry.payload ? entry.payload.width : undefined;
+        const height = entry.payload ? entry.payload.height : undefined;
+        if (Number.isFinite(width) && Number.isFinite(height) && height !== 0) {
+          object._applyAspect(width / height);
+        }
+        if (Number.isFinite(entry.payload && entry.payload.duration)) {
+          object._duration = entry.payload.duration;
+        }
+      } else if (type === "ended") {
+        object._playing = false;
+      } else if (type === "error") {
+        object.error = (entry.payload && entry.payload.message) || "the video failed to load";
+      }
+    }
 
     if (type === "anchored" || type === "unanchored") {
       if (object instanceof Anchor) object.isAnchored = type === "anchored";
@@ -196,6 +396,18 @@ export function deliverEvent(runtime, entry) {
     if (type === "assetLoaded" && object instanceof AssetGroup) {
       object.loaded = true;
       object.animations = Array.isArray(payload.animations) ? payload.animations.slice() : [];
+      // The rig the asset actually has (SPEC 14.5). Absent or empty means the
+      // asset has none, and `asset.skeleton` stays null.
+      const joints = entry.payload ? entry.payload.joints : undefined;
+      if (Array.isArray(joints) && joints.length > 0) {
+        object.skeleton = new Skeleton(object, joints);
+        object[DIRTY] = (object[DIRTY] | 0) | DIRTY_FEATURE;
+      }
+      const shapes = entry.payload ? entry.payload.blendShapes : undefined;
+      if (Array.isArray(shapes) && shapes.length > 0) {
+        object.blendShapes = new BlendShapes(object, shapes);
+        object[DIRTY] = (object[DIRTY] | 0) | DIRTY_FEATURE;
+      }
       if (Array.isArray(entry.payload.boundingBox) && entry.payload.boundingBox.length >= 6) {
         const b = entry.payload.boundingBox;
         object.boundingBox.min.set(b[0], b[1], b[2]);

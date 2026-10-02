@@ -4,15 +4,12 @@
 import {
   BufferGeometry,
   Light,
-  Vector3,
-  Quaternion,
-  Matrix4,
   Raycaster,
   AdditiveBlending,
+  PerspectiveCamera,
 } from "./three-exports.js";
 import {
   SpatialLoadError,
-  SpatialUnsupportedError,
   cleanMessage,
   extractLocation,
   probeLineOffset,
@@ -36,7 +33,6 @@ import {
   DIRTY_RIGIDBODY,
   DIRTY_MATERIAL,
   DIRTY_LIGHT,
-  refreshWorldMatrices,
 } from "./object-extensions.js";
 import { constructedScenes, resetConstructedScenes } from "./scene-classes.js";
 import {
@@ -52,12 +48,8 @@ import {
 import { PhysicsWorld, rigidBodyJSONEquals, jointJSONEquals } from "./physics.js";
 import { Anchor, anchorJSONEquals } from "./anchor.js";
 import { portalJSONEquals } from "./portal.js";
-import { AssetGroup, environmentJSONEquals } from "./asset.js";
-
-/** The asset url keys SPEC 3.12 defines, in the order loadAsset reports them. */
-const ASSET_KEYS = ["usdz", "reality", "glb", "gltf"];
 import { SUBSTITUTED } from "./scene-classes.js";
-import { vector3Array, trsIsValid, cappedName, labelFor } from "./sanitize.js";
+import { vector3Array, trsIsValid, cappedName, labelFor, jsonSafe } from "./sanitize.js";
 import {
   MAX_NAME_LENGTH,
   MAX_LOG_MESSAGE,
@@ -65,10 +57,17 @@ import {
   MAX_RECORDED_WARNINGS,
   MAX_RECORDED_ERRORS,
   MAX_ID,
+  MAX_DEFERRED_COMMANDS,
+  MAX_INACTIVE_EVENTS,
+  MAX_INACTIVE_SYNC_OBJECTS,
 } from "./limits.js";
 import { push, slice, safeString, safeStringify, cut } from "./builtins.js";
-import { resolveUrl as containUrl } from "./urls.js";
 import { InputState } from "./input.js";
+import { AudioMixer, Audio } from "./audio.js";
+import { VideoScreen } from "./video.js";
+import { HostChannel, FetchChannel } from "./host-channel.js";
+import { createCameraScratch, installCameraTracking, isCamera } from "./camera.js";
+import { installCharacterController } from "./character.js";
 import { TimerQueue } from "./timers.js";
 import {
   createSnapshot,
@@ -79,7 +78,6 @@ import {
   textureSnapshot,
   textureSnapshotEquals,
   geometryPayload,
-  worldNormal,
 } from "./diff.js";
 import { buildDump } from "./dump.js";
 import { kindFor } from "./kinds.js";
@@ -108,6 +106,17 @@ import {
   diffJoints,
 } from "./runtime/resources.js";
 import { flush, walk, skipObject } from "./runtime/flush.js";
+import { resolveUrl, environmentPayload, raycast, loadAsset } from "./runtime/queries.js";
+import { acceptSync, drainInactiveSync } from "./runtime/inactive.js";
+import {
+  registerAudio,
+  setCamera,
+  rayFromPoint,
+  applyWorldPosition,
+  syncSkeleton,
+  setActive,
+  captureState,
+} from "./runtime/phase2.js";
 
 // `Spatial` and `console` are installed as globals rather than passed as
 // parameters: a script is free to write `const Spatial = require("spatial")`
@@ -122,19 +131,14 @@ const AsyncFunction = Object.getPrototypeOf(async function asyncProbe() {}).cons
 
 
 
-const trsScratch = new Float64Array(10);
-const syncMatrix = new Matrix4();
-const syncLocal = new Matrix4();
-const syncPosition = new Vector3();
-const syncQuaternion = new Quaternion();
-const syncScale = new Vector3();
-const syncScratch = new Float64Array(10);
 
 export class Runtime {
   constructor() {
     installObjectExtensions(Light);
     installMaterialTracking();
     installGeometryTracking(BufferGeometry);
+    installCameraTracking(PerspectiveCamera);
+    installCharacterController();
     this.version = "0.1.0";
     this.reset();
   }
@@ -195,6 +199,8 @@ export class Runtime {
     this.eventQueue = [];
 
     this.pendingCommands = [];
+    // Imperative commands waiting for their object's first flush.
+    this.deferredCommands = [];
     this.logQueue = [];
     this.suppressedLogs = 0;
     this.warnings = [];
@@ -207,6 +213,42 @@ export class Runtime {
     this.gravitySnapshot = null;
     this.environment = null;
     this.environmentSnapshot = null;
+
+    // ---- phase 2 (SPEC 14) -------------------------------------------------
+    this.audio = new AudioMixer();
+    // The mixer's defaults are the consumer's defaults, so nothing is emitted
+    // until a script actually changes one.
+    this.audioRevision = 0;
+    this.camera = null;
+    this.cameraScratch = createCameraScratch();
+    this.cameraSnapshot = null;
+    this.cameraId = 0;
+    // Set when the core adopted the camera as an extra root, so clearing it
+    // does not leave a phantom root behind.
+    this.cameraAdopted = null;
+    this.sceneUnderstanding = { collision: false, occlusion: false, physics: false, shadows: false };
+    this.sceneUnderstandingSnapshot = null;
+    this.render = { adaptiveResolution: false };
+    this.environmentLighting = { intensityExponent: 1 };
+    this.debug = { modelView: null };
+    this.renderOptionsSnapshot = null;
+    // The host channel outlives a script reload: the functions the app
+    // registered are the app's, not the script's (SPEC 14.10).
+    if (this.hostChannel === undefined) {
+      this.hostChannel = new HostChannel(this);
+      this.fetchChannel = new FetchChannel(this);
+    } else {
+      this.hostChannel.reset();
+      this.fetchChannel.reset();
+    }
+    this.active = true;
+    this.previousState = undefined;
+    this.pendingAudioSync = [];
+    this.pendingVideoSync = [];
+    this.pendingCharacterSync = [];
+    // channel -> the latest record per object, while inactive.
+    this.inactiveSync = new Map();
+    this.audioObjects = new Set();
 
     this.input = new InputState();
     this.timers = new TimerQueue((key, message) => this.warnOnce(key, message));
@@ -301,7 +343,25 @@ export class Runtime {
     return jointIdFor(this, joint);
   }
 
-  queueCommand(command) {
+  /**
+   * An imperative command for `object`. One issued before the object's first
+   * flush waits for the frame after its `create`, in order, rather than being
+   * dropped: a script that acts on an object it just built is normal, and the
+   * consumer must not be told about an id it has never seen (SPEC 5).
+   */
+  queueCommand(command, object) {
+    if (object !== undefined && object !== null && object[SNAPSHOT] === undefined) {
+      if (this.deferredCommands.length >= MAX_DEFERRED_COMMANDS) {
+        this.warnOnce(
+          "deferred-commands",
+          `More than ${MAX_DEFERRED_COMMANDS} commands are waiting for an object's first flush; ` +
+            `the ${command[0]} command was dropped`,
+        );
+        return;
+      }
+      push(this.deferredCommands, { object, command });
+      return;
+    }
     push(this.pendingCommands, command);
   }
 
@@ -365,11 +425,19 @@ export class Runtime {
   // ------------------------------------------------------------- consumer in
 
   sync(records) {
-    if (records && records.length) push(this.pendingSync, records);
+    this.acceptSync("sync", this.pendingSync, records, 11);
   }
 
   syncBodies(records) {
-    if (records && records.length) push(this.pendingBodySync, records);
+    this.acceptSync("syncBodies", this.pendingBodySync, records, 8);
+  }
+
+  acceptSync(channel, pending, records, stride) {
+    acceptSync(this, channel, pending, records, stride);
+  }
+
+  drainInactiveSync() {
+    drainInactiveSync(this);
   }
 
   setInput(state) {
@@ -377,6 +445,17 @@ export class Runtime {
   }
 
   dispatch(type, id, payload) {
+    // Nothing drains the queue while the scene is inactive, so the backlog is
+    // capped and the overflow is reported rather than delivered in one frame
+    // once the view comes back (SPEC 14.10, P2-B-05).
+    if (this.active === false && this.eventQueue.length >= MAX_INACTIVE_EVENTS) {
+      this.warnOnce(
+        "inactive-events",
+        `More than ${MAX_INACTIVE_EVENTS} events arrived while the scene was inactive; ` +
+          "the rest were dropped",
+      );
+      return;
+    }
     push(this.eventQueue, { type, id, payload: payload === undefined ? {} : payload });
   }
 
@@ -529,137 +608,73 @@ export class Runtime {
   }
 
   resolveUrl(url) {
-    const result = containUrl(url, this.assetRoot);
-    if (result.warning !== null) this.warnOnce(`url:${url}`, result.warning);
-    return result.url;
+    return resolveUrl(this, url);
   }
 
-  /**
-   * The environment payload the command stream carries, with its url contained
-   * the same way a texture url is. A refused url means no environment at all
-   * rather than one the consumer would resolve against its own file system.
-   */
   environmentPayload() {
-    const environment = this.environment;
-    if (!environment || typeof environment.toJSON !== "function") return null;
-    const json = environment.toJSON();
-    if (json === null || json === undefined) return null;
-    const url = this.resolveUrl(json.url);
-    if (url === null) {
-      this.warnOnce(
-        `environment-url:${json.url}`,
-        "Spatial.environment was dropped because its url was refused",
-      );
-      return null;
-    }
-    if (url === json.url) return json;
-    json.url = url;
-    return json;
+    return environmentPayload(this);
   }
 
-  raycast(origin, direction, options = {}) {
-    const maxDistance = options.maxDistance === undefined ? Infinity : options.maxDistance;
-    const recursive = options.recursive !== false;
-    const native = globalThis.__spatialNative;
-
-    if (native && typeof native.raycast === "function") {
-      const flat = native.raycast(
-        origin.x,
-        origin.y,
-        origin.z,
-        direction.x,
-        direction.y,
-        direction.z,
-        Number.isFinite(maxDistance) ? maxDistance : -1,
-        recursive,
-      );
-      const hits = [];
-      if (flat && flat.length) {
-        for (let i = 0; i + 8 <= flat.length; i += 8) {
-          const object = this.objectForId(flat[i]);
-          if (!object) continue;
-          push(hits, {
-            object,
-            point: new Vector3(flat[i + 1], flat[i + 2], flat[i + 3]),
-            normal: new Vector3(flat[i + 4], flat[i + 5], flat[i + 6]),
-            distance: flat[i + 7],
-          });
-        }
-      }
-      hits.sort((a, b) => a.distance - b.distance);
-      return hits;
-    }
-
-    if (!this.scene) return [];
-    // Leaf objects defer their world matrix, so refresh before hit testing.
-    refreshWorldMatrices(this.scene, (object, error) => this.skipObject(object, error));
-    this.raycaster.set(origin, direction.clone().normalize());
-    this.raycaster.near = 0;
-    this.raycaster.far = Number.isFinite(maxDistance) ? maxDistance : Infinity;
-
-    // SPEC 3.7: visible meshes only, at most one hit per object, sorted by
-    // distance. `recursive: false` limits hits to direct children of the scene.
-    const targets = [];
-    if (recursive) {
-      this.scene.traverseVisible((object) => {
-        if (object.isMesh === true) push(targets, object);
-      });
-    } else {
-      const children = this.scene.children;
-      for (let i = 0; i < children.length; i += 1) {
-        if (children[i].isMesh === true && children[i].visible !== false) push(targets, children[i]);
-      }
-    }
-
-    const intersections = this.raycaster.intersectObjects(targets, false);
-    const results = [];
-    const seen = new Set();
-    for (const hit of intersections) {
-      if (seen.has(hit.object)) continue;
-      seen.add(hit.object);
-      const normal = new Vector3(0, 0, 1);
-      if (hit.normal) normal.copy(hit.normal);
-      else if (hit.face) worldNormal(hit.object, hit.face.normal, normal);
-      push(results, { object: hit.object, point: hit.point.clone(), normal, distance: hit.distance });
-    }
-    results.sort((a, b) => a.distance - b.distance);
-    return results;
+  raycast(origin, direction, options) {
+    return raycast(this, origin, direction, options);
   }
 
-  loadAsset(urls = {}) {
-    // Every asset url is contained the same way a texture url is: the file
-    // system on the other side of the command stream is reached through one
-    // gate, not four (SPEC 3.5 url forms).
-    const contained = {};
-    const refused = [];
-    for (let i = 0; i < ASSET_KEYS.length; i += 1) {
-      const key = ASSET_KEYS[i];
-      const raw = urls[key];
-      if (raw === undefined || raw === null || raw === "") continue;
-      const url = this.resolveUrl(raw);
-      if (url === null) push(refused, key);
-      else contained[key] = url;
-    }
+  loadAsset(urls) {
+    return loadAsset(this, urls);
+  }
 
-    const group = new AssetGroup(contained);
-    const backend = this.env.backend;
-    const needed = backend === "realitykit" ? ["usdz", "reality"] : ["glb", "gltf"];
-    if (!needed.some((key) => group.urls[key])) {
-      // A refused url is a load failure, not a silent asset with no source.
-      const reason =
-        refused.length > 0
-          ? `loadAsset refused ${refused.join(" and ")}: the url leaves the asset root or uses a scheme ` +
-            "that is not allowed"
-          : `loadAsset needs one of ${needed.join(" or ")} for the ${backend} backend`;
-      return Promise.reject(new SpatialUnsupportedError(reason, "loadAsset", group));
-    }
-    this.extraRoots.add(group);
-    const promise = new Promise((resolve, reject) => {
-      group._resolve = resolve;
-      group._reject = reject;
-    });
-    group.promise = promise;
-    return promise;
+  // -------------------------------------------------------------- phase 2
+
+  registerAudio(audio) {
+    registerAudio(this, audio);
+  }
+
+  setCamera(value) {
+    return setCamera(this, value);
+  }
+
+  rayFromPoint(x, y) {
+    return rayFromPoint(this, x, y);
+  }
+
+  applyWorldPosition(object, world) {
+    applyWorldPosition(this, object, world);
+  }
+
+  fetchText(url) {
+    return this.fetchChannel.request(url, "text");
+  }
+
+  fetchJSON(url) {
+    return this.fetchChannel.request(url, "json");
+  }
+
+  syncAudio(records) {
+    this.acceptSync("syncAudio", this.pendingAudioSync, records, 4);
+  }
+
+  syncVideo(records) {
+    this.acceptSync("syncVideo", this.pendingVideoSync, records, 4);
+  }
+
+  syncCharacter(records) {
+    this.acceptSync("syncCharacter", this.pendingCharacterSync, records, 8);
+  }
+
+  syncSkeleton(id, joints) {
+    syncSkeleton(this, id, joints);
+  }
+
+  setActive(value) {
+    setActive(this, value);
+  }
+
+  hostEvent(name, payload) {
+    this.hostChannel.deliver(name, payload);
+  }
+
+  captureState() {
+    return captureState(this);
   }
 
   dump(options) {
@@ -668,6 +683,8 @@ export class Runtime {
 
   dispose() {
     if (this.disposed) return [];
+    this.hostChannel.clearPending("the scene was disposed");
+    this.fetchChannel.clearPending("the scene was disposed");
     const script = this.script;
     if (script && typeof script.willRemove === "function") {
       try {
@@ -679,6 +696,17 @@ export class Runtime {
 
     const commands = this.logQueue;
     this.logQueue = [];
+
+    // Scene-level state the consumer would otherwise keep into the next
+    // script: only what this script actually set is reset.
+    if (this.cameraSnapshot !== null) push(commands, ["camera", 0, { kind: null, fov: null, near: null, far: null, left: null, right: null, top: null, bottom: null }]);
+    if (this.audioRevision !== 0) push(commands, ["audioMixer", 0, { masterVolume: 1, groups: {}, state: "suspended" }]);
+    if (this.sceneUnderstandingSnapshot !== null) {
+      push(commands, ["sceneUnderstanding", 0, { collision: false, occlusion: false, physics: false, shadows: false }]);
+    }
+    if (this.renderOptionsSnapshot !== null) {
+      push(commands, ["renderOptions", 0, { adaptiveResolution: false, environmentIntensityExponent: 1, debugModelView: null }]);
+    }
 
     // Joints first: a consumer must drop them before the entities they pin.
     for (const joint of this.jointSnapshots.keys()) {

@@ -21692,7 +21692,18 @@
   var MAX_PARAMETER_STRING = 256;
   var MAX_PARAMETER_ARRAY = 64;
   var MAX_PARAMETER_KEYS = 64;
-  var ALLOWED_URL_SCHEMES = ["https:", "http:", "file:", "asset:", "data:"];
+  var ALLOWED_URL_SCHEMES = ["https:", "http:", "file:", "asset:", "data:", "blob:"];
+  var MAX_JSON_DEPTH = 8;
+  var MAX_JSON_NODES = 1e4;
+  var MAX_PENDING_HOST_CALLS = 1e3;
+  var MAX_CONTROLLERS = 8;
+  var MAX_SKELETON_JOINTS = 512;
+  var MAX_BLEND_SHAPES = 256;
+  var MAX_INACTIVE_EVENTS = 1e3;
+  var MAX_INACTIVE_SYNC_OBJECTS = 1e4;
+  var MAX_STATE_BYTES = 1024 * 1024;
+  var MAX_DEFERRED_COMMANDS = 1e4;
+  var MAX_DEFERRED_FRAMES = 2;
 
   // src/builtins.js
   var arrayPush = Array.prototype.push;
@@ -21835,6 +21846,98 @@
     const qw = trs[6];
     return qx * qx + qy * qy + qz * qz + qw * qw > 1e-12;
   }
+  function jsonSafe(value, report2) {
+    const budget = { nodes: MAX_JSON_NODES, report: report2 === void 0 ? null : report2 };
+    return jsonSafeInner(value, 0, budget, /* @__PURE__ */ new Set(), "state");
+  }
+  function note(budget, path, reason) {
+    const report2 = budget.report;
+    if (report2 === null) return;
+    if (report2.length >= 32) return;
+    for (let i = 0; i < report2.length; i += 1) if (report2[i].path === path) return;
+    push(report2, { path, reason });
+  }
+  function jsonSafeInner(value, depth, budget, seen, path) {
+    if (value === null) return null;
+    const type = typeof value;
+    if (type === "boolean" || type === "string") return value;
+    if (type === "number") {
+      if (Number.isFinite(value)) return value;
+      note(budget, path, "a non-finite number became null");
+      return null;
+    }
+    if (type !== "object") {
+      note(budget, path, `a ${type} is not JSON and became null`);
+      return null;
+    }
+    if (depth >= MAX_JSON_DEPTH) {
+      note(budget, path, `nesting deeper than ${MAX_JSON_DEPTH} became null`);
+      return null;
+    }
+    if (budget.nodes <= 0) {
+      note(budget, path, `more than ${MAX_JSON_NODES} values became null`);
+      return null;
+    }
+    if (seen.has(value)) {
+      note(budget, path, "a cycle became null");
+      return null;
+    }
+    budget.nodes -= 1;
+    seen.add(value);
+    try {
+      if (Array.isArray(value)) {
+        const out2 = [];
+        for (let i = 0; i < value.length; i += 1) {
+          if (budget.nodes <= 0) {
+            note(budget, path, `more than ${MAX_JSON_NODES} values were dropped`);
+            break;
+          }
+          out2[i] = jsonSafeInner(value[i], depth + 1, budget, seen, `${path}[${i}]`);
+        }
+        return out2;
+      }
+      if (typeof value.toJSON === "function") {
+        let produced;
+        try {
+          produced = value.toJSON();
+        } catch (error2) {
+          note(budget, path, "toJSON threw and the value became null");
+          return null;
+        }
+        if (produced === value) return null;
+        return jsonSafeInner(produced, depth, budget, seen, path);
+      }
+      const out = {};
+      const keys = objectKeys(value);
+      if (keys.length === 0 && !isPlainObject(value)) {
+        note(budget, path, `a ${constructorName(value)} has no JSON form and became {}`);
+      }
+      for (let i = 0; i < keys.length; i += 1) {
+        if (budget.nodes <= 0) {
+          note(budget, path, `more than ${MAX_JSON_NODES} values were dropped`);
+          break;
+        }
+        const key = keys[i];
+        const entry = jsonSafeInner(value[key], depth + 1, budget, seen, `${path}.${key}`);
+        if (entry !== void 0) out[key] = entry;
+      }
+      return out;
+    } finally {
+      seen.delete(value);
+    }
+  }
+  function isPlainObject(value) {
+    const proto = Object.getPrototypeOf(value);
+    return proto === Object.prototype || proto === null;
+  }
+  function constructorName(value) {
+    try {
+      const name = value.constructor && value.constructor.name;
+      return typeof name === "string" && name.length > 0 ? name : "value";
+    } catch (error2) {
+      return "value";
+    }
+  }
 
   // src/host.js
   var state = { current: null };
@@ -21860,7 +21963,8 @@
   var DIRTY_RIGIDBODY = 64;
   var DIRTY_MATERIAL = 128;
   var DIRTY_LIGHT = 256;
-  var DIRTY_ALL = 511;
+  var DIRTY_FEATURE = 512;
+  var DIRTY_ALL = 1023;
   function trackedProperty(proto, name, bit, initial, allowed) {
     const backing = Symbol(`spatial.${name}`);
     Object.defineProperty(proto, name, {
@@ -21902,7 +22006,13 @@
     "anchored",
     "unanchored",
     "assetLoaded",
-    "assetError"
+    "assetError",
+    // phase 2 (SPEC 14)
+    "ended",
+    "loaded",
+    "error",
+    "controllerconnected",
+    "controllerdisconnected"
   ]);
   var installed = false;
   function installObjectExtensions(Light2) {
@@ -21923,6 +22033,8 @@
     trackedProperty(proto, "hoverEffect", DIRTY_FLAGS, null, HOVER_EFFECTS);
     trackedProperty(proto, "manipulable", DIRTY_FLAGS, false);
     trackedProperty(proto, "renderOrder", DIRTY_FLAGS, 0);
+    trackedProperty(proto, "accessibility", DIRTY_FEATURE, null);
+    trackedProperty(proto, "characterController", DIRTY_FEATURE, null);
     trackedProperty(proto, "name", DIRTY_NAME, "");
     trackedProperty(proto, "visible", DIRTY_VISIBLE, true);
     trackedProperty(proto, "castShadow", DIRTY_SHADOW | DIRTY_LIGHT, false);
@@ -22303,13 +22415,13 @@
       }
     }
   }
-  function worldToLocalMatrix(object, worldMatrix, out) {
+  function worldToLocalMatrix(object, worldMatrix2, out) {
     if (object.parent) {
       object.parent.updateWorldMatrix(true, false);
       tmpMatrix.copy(object.parent.matrixWorld).invert();
-      out.multiplyMatrices(tmpMatrix, worldMatrix);
+      out.multiplyMatrices(tmpMatrix, worldMatrix2);
     } else {
-      out.copy(worldMatrix);
+      out.copy(worldMatrix2);
     }
     return out;
   }
@@ -22365,7 +22477,7 @@
   }
   var Mesh2 = class extends Mesh {
     constructor(geometry, material) {
-      super(substituteGeometry(geometry), substituteMaterial(material));
+      super(substituteGeometry(geometry), Array.isArray(material) ? material : substituteMaterial(material));
     }
   };
   Object.defineProperty(Mesh2.prototype, "geometry", {
@@ -22385,17 +22497,186 @@
       return this[MATERIAL] === void 0 ? null : this[MATERIAL];
     },
     set(material) {
-      if (Array.isArray(material)) {
-        throw new SpatialUnsupportedError(
-          "Multiple materials per mesh are not in scope (SPEC section 4)",
-          "Mesh.material[]",
-          this
-        );
-      }
       this[MATERIAL] = material === void 0 ? null : material;
-      this[DIRTY] = this[DIRTY] | 0 | DIRTY_MATERIAL;
+      this[DIRTY] = this[DIRTY] | 0 | DIRTY_MATERIAL | DIRTY_FEATURE;
     }
   });
+
+  // src/shader-graph.js
+  function shaderParameterValue(value, textureIdFor2) {
+    if (typeof value === "number") return Number.isFinite(value) ? value : void 0;
+    if (typeof value === "boolean") return value;
+    if (typeof value === "string") {
+      return value.length > MAX_PARAMETER_STRING ? cut(value, MAX_PARAMETER_STRING) : value;
+    }
+    if (value === null || value === void 0) return void 0;
+    if (typeof value !== "object") return void 0;
+    if (value.isTexture === true) return textureIdFor2 === null ? void 0 : textureIdFor2(value);
+    if (value.isColor === true) return [clamp2(value.r, 0, 1, 0), clamp2(value.g, 0, 1, 0), clamp2(value.b, 0, 1, 0)];
+    if (typeof value.w === "number") return floats([value.x, value.y, value.z, value.w]);
+    if (typeof value.z === "number") return floats([value.x, value.y, value.z]);
+    if (typeof value.y === "number") return floats([value.x, value.y]);
+    if (Array.isArray(value)) {
+      if (value.length < 2 || value.length > 4) return void 0;
+      return floats(value);
+    }
+    return void 0;
+  }
+  function floats(values) {
+    const out = [];
+    for (let i = 0; i < values.length; i += 1) {
+      if (!Number.isFinite(values[i])) return void 0;
+      push(out, values[i]);
+    }
+    return out;
+  }
+  var ACCEPTED_VALUES = "a finite number, a boolean, a string, a Color, a Vector2/3/4, an array of two to four finite numbers, or a Texture";
+  var FALLBACK_PROPERTIES = [
+    "color",
+    "emissive",
+    "emissiveIntensity",
+    "opacity",
+    "transparent",
+    "roughness",
+    "metalness",
+    "clearcoat",
+    "clearcoatRoughness",
+    "wireframe",
+    "side",
+    "depthWrite",
+    "depthTest",
+    "map",
+    "normalMap",
+    "roughnessMap",
+    "metalnessMap",
+    "emissiveMap"
+  ];
+  var ShaderGraphMaterial = class extends Material {
+    constructor(options = {}) {
+      super();
+      if (options === null || typeof options !== "object") {
+        throw new TypeError("ShaderGraphMaterial expects an options object");
+      }
+      if (!options.fallback || options.fallback.isMaterial !== true) {
+        throw new TypeError(
+          "ShaderGraphMaterial needs a `fallback` material: it is what every consumer without shader graphs renders"
+        );
+      }
+      this.type = "ShaderGraphMaterial";
+      this.isShaderGraphMaterial = true;
+      const runtime2 = host();
+      const source = typeof options.source === "string" ? options.source : null;
+      this.source = source === null || runtime2 === null ? source : runtime2.resolveUrl(source);
+      if (source !== null && this.source === null && runtime2 !== null) {
+        runtime2.warnOnce(
+          `shader-source:${this.uuid}`,
+          `ShaderGraphMaterial was given a source url that was refused; the fallback is used`
+        );
+      }
+      this.graphName = typeof options.name === "string" ? options.name : "";
+      this.fallback = options.fallback;
+      this.parameters = {};
+      this.generation = 0;
+      this._changed = /* @__PURE__ */ new Map();
+      if (options.parameters !== null && typeof options.parameters === "object") {
+        const keys = objectKeys(options.parameters);
+        const refused = [];
+        for (let i = 0; i < keys.length && i < MAX_PARAMETER_KEYS; i += 1) {
+          const value = options.parameters[keys[i]];
+          if (shaderParameterValue(value, () => 0) === void 0) {
+            push(refused, keys[i]);
+            continue;
+          }
+          this.parameters[keys[i]] = value;
+        }
+        if (refused.length > 0 && runtime2 !== null) {
+          runtime2.warnOnce(
+            `shader-parameters-refused:${this.uuid}`,
+            `ShaderGraphMaterial parameters ${refused.join(", ")} carry values the command stream cannot carry and were dropped. Accepted: ${ACCEPTED_VALUES}`
+          );
+        }
+      }
+      if (runtime2 !== null && runtime2.env.capabilities.shaderGraph !== true) {
+        runtime2.warnOnce(
+          "shader-graph",
+          "ShaderGraphMaterial has no shader graph on this consumer; the fallback material is rendered"
+        );
+      }
+    }
+    /**
+     * Updates one parameter. On a consumer without shader graphs the same-named
+     * property of the fallback is updated instead, so the scene still reacts.
+     */
+    setParameter(name, value) {
+      if (typeof name !== "string" || name.length === 0) {
+        throw new TypeError("ShaderGraphMaterial.setParameter expects a parameter name");
+      }
+      if (objectKeys(this.parameters).length >= MAX_PARAMETER_KEYS && this.parameters[name] === void 0) {
+        const runtime2 = host();
+        if (runtime2) {
+          runtime2.warnOnce(
+            `shader-parameters:${this.uuid}`,
+            `More than ${MAX_PARAMETER_KEYS} shader parameters; "${name}" was dropped`
+          );
+        }
+        return this;
+      }
+      if (shaderParameterValue(value, () => 0) === void 0) {
+        const runtime2 = host();
+        if (runtime2) {
+          runtime2.warnOnce(
+            `shader-value:${this.uuid}:${name}`,
+            `ShaderGraphMaterial.setParameter("${name}") was given a value the command stream cannot carry; it was ignored. Accepted: ${ACCEPTED_VALUES}`
+          );
+        }
+        return this;
+      }
+      this.parameters[name] = value;
+      this.generation += 1;
+      this._changed.set(name, this.generation);
+      this[MATERIAL_DIRTY] = true;
+      const fallback = this.fallback;
+      if (fallback !== null && FALLBACK_PROPERTIES.indexOf(name) !== -1 && fallback[name] !== void 0) {
+        const target = fallback[name];
+        if (target !== null && typeof target === "object" && typeof target.copy === "function" && typeof value === "object") {
+          target.copy(value);
+        } else {
+          fallback[name] = value;
+        }
+        fallback[MATERIAL_DIRTY] = true;
+      }
+      return this;
+    }
+    getParameter(name) {
+      return this.parameters[name];
+    }
+    /** Parameters changed after `generation`, for the per-mesh command. */
+    changedSince(generation) {
+      const names = [];
+      for (const [name, at] of this._changed) {
+        if (at > generation) push(names, name);
+      }
+      return names;
+    }
+  };
+  function shaderGraphSnapshot(material, textureIdFor2, materialSnapshot2) {
+    const parameters = {};
+    const keys = objectKeys(material.parameters);
+    for (let i = 0; i < keys.length && i < MAX_PARAMETER_KEYS; i += 1) {
+      const value = shaderParameterValue(material.parameters[keys[i]], textureIdFor2);
+      if (value !== void 0) parameters[keys[i]] = value;
+    }
+    return {
+      type: "ShaderGraphMaterial",
+      uuid: material.uuid,
+      source: material.source,
+      name: material.graphName,
+      parameters,
+      // Lets a consumer tell one parameter edit from the next without diffing.
+      generation: material.generation,
+      fallback: materialSnapshot2(material.fallback, textureIdFor2, null)
+    };
+  }
 
   // src/materials.js
   var MATERIAL_DIRTY = Symbol("spatial.materialDirty");
@@ -22463,6 +22744,9 @@
   };
   var MATERIAL_MAP_SLOTS = ["map", "normalMap", "roughnessMap", "metalnessMap", "emissiveMap"];
   function materialSnapshot(material, textureIdFor2, warn2) {
+    if (material.isShaderGraphMaterial === true) {
+      return shaderGraphSnapshot(material, textureIdFor2, materialSnapshot);
+    }
     const maps = {};
     for (const slot of MATERIAL_MAP_SLOTS) {
       const texture = material[slot];
@@ -22478,18 +22762,18 @@
     if (side !== FrontSide && side !== BackSide && side !== DoubleSide) side = FrontSide;
     if (warn2 !== null && warn2 !== void 0) {
       let adjusted = null;
-      const note = (key, given, used) => {
+      const note2 = (key, given, used) => {
         if (given === void 0 || given === used) return;
         if (adjusted === null) adjusted = [];
         push(adjusted, `${key} ${given} -> ${used}`);
       };
-      note("opacity", material.opacity, opacity);
-      note("metalness", material.metalness, metalness);
-      note("roughness", material.roughness, roughness);
-      note("clearcoat", material.clearcoat, clearcoat);
-      note("clearcoatRoughness", material.clearcoatRoughness, clearcoatRoughness);
-      note("emissiveIntensity", material.emissiveIntensity, emissiveIntensity);
-      note("side", material.side, side);
+      note2("opacity", material.opacity, opacity);
+      note2("metalness", material.metalness, metalness);
+      note2("roughness", material.roughness, roughness);
+      note2("clearcoat", material.clearcoat, clearcoat);
+      note2("clearcoatRoughness", material.clearcoatRoughness, clearcoatRoughness);
+      note2("emissiveIntensity", material.emissiveIntensity, emissiveIntensity);
+      note2("side", material.side, side);
       if (adjusted !== null) {
         warn2(`material:${material.uuid}`, `${material.type} properties were clamped: ${adjusted.join(", ")}`);
       }
@@ -22519,6 +22803,9 @@
   function materialSnapshotEquals(a, b) {
     if (a === b) return true;
     if (!a || !b) return false;
+    if (a.type === "ShaderGraphMaterial" || b.type === "ShaderGraphMaterial") {
+      return a.type === b.type && a.uuid === b.uuid && a.source === b.source && a.name === b.name && a.generation === b.generation && materialSnapshotEquals(a.fallback, b.fallback);
+    }
     if (a.type !== b.type || a.uuid !== b.uuid || a.opacity !== b.opacity || a.transparent !== b.transparent || a.side !== b.side || a.wireframe !== b.wireframe || a.metalness !== b.metalness || a.roughness !== b.roughness || a.emissiveIntensity !== b.emissiveIntensity || a.clearcoat !== b.clearcoat || a.clearcoatRoughness !== b.clearcoatRoughness || a.depthWrite !== b.depthWrite || a.depthTest !== b.depthTest || a.blending !== b.blending) {
       return false;
     }
@@ -22609,19 +22896,19 @@
         point ? point.x : null,
         point ? point.y : null,
         point ? point.z : null
-      ]);
+      ], this.object);
       return this;
     }
     applyForce(vector) {
       const runtime2 = host();
       if (!runtime2 || !runtime2.canCommand(this.object, "RigidBody.applyForce")) return this;
-      runtime2.queueCommand(["bodyForce", runtime2.idForObject(this.object), vector.x, vector.y, vector.z]);
+      runtime2.queueCommand(["bodyForce", runtime2.idForObject(this.object), vector.x, vector.y, vector.z], this.object);
       return this;
     }
     applyTorque(vector) {
       const runtime2 = host();
       if (!runtime2 || !runtime2.canCommand(this.object, "RigidBody.applyTorque")) return this;
-      runtime2.queueCommand(["bodyTorque", runtime2.idForObject(this.object), vector.x, vector.y, vector.z]);
+      runtime2.queueCommand(["bodyTorque", runtime2.idForObject(this.object), vector.x, vector.y, vector.z], this.object);
       return this;
     }
     setLinearVelocity(vector) {
@@ -22646,7 +22933,7 @@
         angular ? angular.x : null,
         angular ? angular.y : null,
         angular ? angular.z : null
-      ]);
+      ], this.object);
     }
     toJSON() {
       return {
@@ -23015,158 +23302,22 @@
     return a.worldId === b.worldId && a.width === b.width && a.height === b.height && a.crossing === b.crossing;
   }
 
-  // src/asset.js
-  var AssetGroup = class extends Group {
-    constructor(urls) {
-      super();
-      this.type = "Asset";
-      this.isAsset = true;
-      this.urls = {
-        usdz: urls.usdz === void 0 ? null : urls.usdz,
-        reality: urls.reality === void 0 ? null : urls.reality,
-        glb: urls.glb === void 0 ? null : urls.glb,
-        gltf: urls.gltf === void 0 ? null : urls.gltf
-      };
-      this.animations = [];
-      this.boundingBox = new Box3();
-      this.loaded = false;
-      this._resolve = null;
-      this._reject = null;
-      this._currentAnimation = null;
-    }
-    playAnimation(name, options = {}) {
-      const runtime2 = host();
-      const loop = options.loop === void 0 ? true : options.loop !== false;
-      const speed = options.speed === void 0 ? 1 : options.speed;
-      this._currentAnimation = { name, loop, speed };
-      if (runtime2 && runtime2.canCommand(this, "AssetGroup.playAnimation")) {
-        runtime2.queueCommand(["assetAnimation", runtime2.idForObject(this), name, loop, speed]);
-      }
-      return this;
-    }
-    stopAnimation() {
-      const runtime2 = host();
-      this._currentAnimation = null;
-      if (runtime2 && runtime2.canCommand(this, "AssetGroup.stopAnimation")) {
-        runtime2.queueCommand(["assetAnimation", runtime2.idForObject(this), null, false, 1]);
-      }
-      return this;
-    }
-    toJSON() {
-      return { ...this.urls };
-    }
-  };
-  var ImageBasedLight = class {
-    constructor(url, intensity = 1) {
-      this.url = url;
-      this.intensity = intensity;
-    }
-    toJSON() {
-      return { url: this.url, intensity: this.intensity };
-    }
-  };
-  function environmentJSONEquals(a, b) {
-    if (a === b) return true;
-    if (!a || !b) return false;
-    return a.url === b.url && a.intensity === b.intensity;
-  }
-
-  // src/urls.js
-  var SCHEME = /^([a-zA-Z][a-zA-Z0-9+.-]*:)/;
-  function normalizeSegments(path) {
-    const parts = path.split("/");
-    const out = [];
-    for (let i = 0; i < parts.length; i += 1) {
-      const part = parts[i];
-      if (part === "" || part === ".") continue;
-      if (part === "..") {
-        if (out.length === 0) return null;
-        out.pop();
-        continue;
-      }
-      push(out, part);
-    }
-    return out.join("/");
-  }
-  function resolveUrl(raw, assetRoot) {
-    if (typeof raw !== "string" || raw.length === 0) return { url: raw, warning: null };
-    const match = SCHEME.exec(raw);
-    if (match !== null) {
-      const scheme = match[1].toLowerCase();
-      if (ALLOWED_URL_SCHEMES.indexOf(scheme) === -1) {
-        return {
-          url: null,
-          warning: `The url scheme "${scheme}" is not allowed; "${short(raw)}" was dropped`
-        };
-      }
-      if (scheme === "data:") return { url: raw, warning: null };
-      const rest = raw.slice(scheme.length);
-      if (!rest.startsWith("//")) {
-        const contained3 = normalizeSegments(rest);
-        if (contained3 === null) {
-          return { url: null, warning: `"${short(raw)}" escapes its root and was dropped` };
-        }
-        return { url: contained3 === rest ? raw : `${scheme}${contained3}`, warning: null };
-      }
-      const authorityEnd = indexOfAny(rest, 2, "/?#");
-      const authority = rest.slice(2, authorityEnd);
-      const tail = rest.slice(authorityEnd);
-      const at = authority.lastIndexOf("@");
-      let warning = null;
-      let host2 = authority;
-      if (at !== -1) {
-        host2 = authority.slice(at + 1);
-        warning = `Credentials were stripped from "${short(raw)}" before it reached the consumer`;
-      }
-      const pathEnd = indexOfAny(tail, 0, "?#");
-      const path = tail.slice(0, pathEnd);
-      const query = tail.slice(pathEnd);
-      const contained2 = normalizeSegments(path);
-      if (contained2 === null) {
-        return { url: null, warning: `"${short(raw)}" escapes its root and was dropped` };
-      }
-      const rebuilt = `${scheme}//${host2}${contained2.length > 0 ? `/${contained2}` : path === "/" ? "/" : ""}${query}`;
-      if (scheme === "file:" && assetRoot) {
-        const root2 = normalizeSegments(assetRoot);
-        if (root2 !== null && root2.length > 0 && !contained2.startsWith(root2)) {
-          return {
-            url: null,
-            warning: `"${short(raw)}" is outside the asset root and was dropped`
-          };
-        }
-      }
-      return { url: rebuilt, warning };
-    }
-    const absoluteRoot = typeof assetRoot === "string" && assetRoot.startsWith("/");
-    const joined = assetRoot ? `${trimSlashes(assetRoot)}/${raw}` : raw;
-    const contained = normalizeSegments(joined);
-    if (contained === null) {
-      return { url: null, warning: `"${short(raw)}" escapes the asset root and was dropped` };
-    }
-    const root = assetRoot ? normalizeSegments(assetRoot) : null;
-    if (root !== null && root.length > 0 && !contained.startsWith(root)) {
-      return { url: null, warning: `"${short(raw)}" escapes the asset root and was dropped` };
-    }
-    return { url: absoluteRoot ? `/${contained}` : contained, warning: null };
-  }
-  function indexOfAny(text, from, characters) {
-    for (let i = from; i < text.length; i += 1) {
-      if (characters.indexOf(text[i]) !== -1) return i;
-    }
-    return text.length;
-  }
-  function trimSlashes(text) {
-    let start = 0;
-    let end = text.length;
-    while (start < end && text[start] === "/") start += 1;
-    while (end > start && text[end - 1] === "/") end -= 1;
-    return text.slice(start, end);
-  }
-  function short(url) {
-    return url.length > 80 ? `${cut(url, 80)}\u2026` : url;
-  }
-
   // src/input.js
+  var MULTI_CLICK_SECONDS = 0.4;
+  var CONTROLLER_BUTTONS = [
+    "a",
+    "b",
+    "x",
+    "y",
+    "leftShoulder",
+    "rightShoulder",
+    "dpadUp",
+    "dpadDown",
+    "dpadLeft",
+    "dpadRight",
+    "menu",
+    "options"
+  ];
   var HAND_JOINT_NAMES = [
     "wrist",
     "forearmWrist",
@@ -23201,6 +23352,7 @@
     constructor() {
       this.down = /* @__PURE__ */ new Set();
       this.pressed = /* @__PURE__ */ new Set();
+      this.connected = false;
     }
     isDown(code) {
       return this.down.has(code);
@@ -23209,11 +23361,132 @@
       return this.pressed.has(code);
     }
   };
+  var ButtonState = class {
+    constructor() {
+      this.down = false;
+      this.pressed = false;
+      this.released = false;
+      this.value = 0;
+      this.pressCount = 0;
+      this._lastPress = -Infinity;
+    }
+    _update(down, value, elapsed) {
+      const wasDown = this.down;
+      this.down = down === true;
+      this.value = clamp2(value, 0, 1, this.down ? 1 : 0);
+      this.pressed = this.down && !wasDown;
+      this.released = !this.down && wasDown;
+      if (this.pressed) {
+        this.pressCount = elapsed - this._lastPress <= MULTI_CLICK_SECONDS ? this.pressCount + 1 : 1;
+        this._lastPress = elapsed;
+      }
+    }
+  };
   var Mouse = class {
     constructor() {
       this.position = null;
+      this.scenePosition = null;
       this.buttons = { left: false, right: false, middle: false };
       this.delta = new Vector2();
+      this.scroll = new Vector2();
+      this.connected = false;
+      this.left = new ButtonState();
+      this.right = new ButtonState();
+      this.middle = new ButtonState();
+    }
+  };
+  var ControllerButton = class extends ButtonState {
+  };
+  var Controller = class {
+    constructor(id) {
+      this.id = id;
+      this.name = "";
+      this.leftThumbstick = new Vector2();
+      this.rightThumbstick = new Vector2();
+      this.leftTrigger = 0;
+      this.rightTrigger = 0;
+      for (const name of CONTROLLER_BUTTONS) this[name] = new ControllerButton();
+      this._seen = -1;
+    }
+    /** Haptics where the consumer has them; a warning where it does not. */
+    rumble(intensity, duration) {
+      const runtime2 = host();
+      if (runtime2 === null) return this;
+      if (runtime2.env.capabilities.controllers !== true) {
+        runtime2.warnOnce(
+          "controller-rumble",
+          "Controller.rumble has no haptics on this consumer; the request has no effect"
+        );
+      }
+      runtime2.queueCommand([
+        "controllerRumble",
+        0,
+        this.id,
+        clamp2(intensity, 0, 1, 1),
+        Math.max(0, finite(duration, 0.2))
+      ]);
+      return this;
+    }
+    /**
+     * Folds one consumer record in and reports whether anything the player did
+     * changed, which is what "most recently used" means (SPEC 14.8, P2-B-47).
+     */
+    _update(json, elapsed) {
+      const before = this._signature();
+      if (typeof json.name === "string") {
+        this.name = json.name.length > MAX_NAME_LENGTH ? json.name.slice(0, MAX_NAME_LENGTH) : json.name;
+      }
+      const left = json.leftThumbstick;
+      if (Array.isArray(left)) this.leftThumbstick.set(clamp2(left[0], -1, 1, 0), clamp2(left[1], -1, 1, 0));
+      else this.leftThumbstick.set(0, 0);
+      const right = json.rightThumbstick;
+      if (Array.isArray(right)) this.rightThumbstick.set(clamp2(right[0], -1, 1, 0), clamp2(right[1], -1, 1, 0));
+      else this.rightThumbstick.set(0, 0);
+      this.leftTrigger = clamp2(json.leftTrigger, 0, 1, 0);
+      this.rightTrigger = clamp2(json.rightTrigger, 0, 1, 0);
+      const buttons = json.buttons;
+      for (let i = 0; i < CONTROLLER_BUTTONS.length; i += 1) {
+        const name = CONTROLLER_BUTTONS[i];
+        const raw = buttons === void 0 || buttons === null ? void 0 : buttons[name];
+        const value = typeof raw === "number" ? raw : raw === true ? 1 : 0;
+        this[name]._update(value > 0, value, elapsed);
+      }
+      return this._signature() !== before;
+    }
+    /** Everything a player can move, as one comparable string. */
+    _signature() {
+      let out = `${this.leftThumbstick.x},${this.leftThumbstick.y},${this.rightThumbstick.x},${this.rightThumbstick.y},${this.leftTrigger},${this.rightTrigger}`;
+      for (let i = 0; i < CONTROLLER_BUTTONS.length; i += 1) {
+        out += `,${this[CONTROLLER_BUTTONS[i]].value}`;
+      }
+      return out;
+    }
+    toJSON() {
+      const buttons = {};
+      for (const name of CONTROLLER_BUTTONS) buttons[name] = this[name].value;
+      return {
+        id: this.id,
+        name: this.name,
+        leftThumbstick: [this.leftThumbstick.x, this.leftThumbstick.y],
+        rightThumbstick: [this.rightThumbstick.x, this.rightThumbstick.y],
+        leftTrigger: this.leftTrigger,
+        rightTrigger: this.rightTrigger,
+        buttons
+      };
+    }
+  };
+  var ControllerSet = class {
+    constructor() {
+      this.all = [];
+      this.current = null;
+      this._byId = /* @__PURE__ */ new Map();
+    }
+    get connected() {
+      return this.all.length;
+    }
+    get(id) {
+      const controller = this._byId.get(id);
+      return controller === void 0 ? null : controller;
     }
   };
   var Hand = class {
@@ -23249,6 +23522,10 @@
       this.keyboard = new Keyboard();
       this.mouse = new Mouse();
       this.hands = { left: null, right: null };
+      this.controllers = new ControllerSet();
+      this.connectionEvents = [];
+      this._injectedControllers = null;
+      this._useCounter = 0;
       this._injectedDown = /* @__PURE__ */ new Set();
       this._released = /* @__PURE__ */ new Set();
     }
@@ -23256,7 +23533,7 @@
      * Folds the consumer's state and any injected key transitions into the
      * polled state for the coming frame.
      */
-    beginFrame(pendingInput, injectedKeys) {
+    beginFrame(pendingInput, injectedKeys, elapsed = 0) {
       const previousDown = this.keyboard.down;
       const pressed = this.keyboard.pressed;
       pressed.clear();
@@ -23282,7 +23559,11 @@
       for (const code of this._injectedDown) nextDown.add(code);
       for (const code of nextDown) if (!previousDown.has(code)) pressed.add(code);
       this.keyboard.down = nextDown;
+      if (pendingInput && pendingInput.keyboard && pendingInput.keyboard.connected !== void 0) {
+        this.keyboard.connected = pendingInput.keyboard.connected === true;
+      }
       this.mouse.delta.set(0, 0);
+      this.mouse.scroll.set(0, 0);
       if (pendingInput && pendingInput.mouse) {
         const mouse = pendingInput.mouse;
         if (mouse.position === null || mouse.position === void 0) {
@@ -23291,13 +23572,28 @@
           if (this.mouse.position === null) this.mouse.position = new Vector2();
           this.mouse.position.set(mouse.position[0], mouse.position[1]);
         }
+        const scene = mouse.scenePosition;
+        if (Array.isArray(scene) && scene.length >= 3) {
+          if (this.mouse.scenePosition === null) this.mouse.scenePosition = new Vector3();
+          this.mouse.scenePosition.set(scene[0], scene[1], scene[2]);
+        } else {
+          this.mouse.scenePosition = null;
+        }
         const buttons = mouse.buttons || [false, false, false];
         this.mouse.buttons.left = buttons[0] === true;
         this.mouse.buttons.right = buttons[1] === true;
         this.mouse.buttons.middle = buttons[2] === true;
         const delta = mouse.delta || [0, 0];
         this.mouse.delta.set(delta[0], delta[1]);
+        const scroll = mouse.scroll;
+        if (Array.isArray(scroll)) this.mouse.scroll.set(finite(scroll[0], 0), finite(scroll[1], 0));
+        if (mouse.connected !== void 0) this.mouse.connected = mouse.connected === true;
+        else if (mouse.position !== null && mouse.position !== void 0) this.mouse.connected = true;
       }
+      this.mouse.left._update(this.mouse.buttons.left, this.mouse.buttons.left ? 1 : 0, elapsed);
+      this.mouse.right._update(this.mouse.buttons.right, this.mouse.buttons.right ? 1 : 0, elapsed);
+      this.mouse.middle._update(this.mouse.buttons.middle, this.mouse.buttons.middle ? 1 : 0, elapsed);
+      this._updateControllers(pendingInput, elapsed);
       if (pendingInput && pendingInput.hands) {
         for (const side of ["left", "right"]) {
           const json = pendingInput.hands[side];
@@ -23311,6 +23607,1047 @@
       }
     }
   };
+  InputState.prototype._updateControllers = function _updateControllers(pendingInput, elapsed) {
+    let list = null;
+    if (this._injectedControllers !== null) {
+      list = this._injectedControllers;
+      this._injectedControllers = null;
+    } else if (pendingInput && Array.isArray(pendingInput.controllers)) {
+      list = pendingInput.controllers;
+    }
+    const set = this.controllers;
+    if (list === null) {
+      for (let i = 0; i < set.all.length; i += 1) {
+        const controller = set.all[i];
+        for (let k = 0; k < CONTROLLER_BUTTONS.length; k += 1) {
+          const button = controller[CONTROLLER_BUTTONS[k]];
+          button.pressed = false;
+          button.released = false;
+        }
+      }
+      return;
+    }
+    const seen = /* @__PURE__ */ new Set();
+    const runtime2 = host();
+    for (let i = 0; i < list.length && i < MAX_CONTROLLERS; i += 1) {
+      const json = list[i];
+      if (json === null || typeof json !== "object") continue;
+      const id = typeof json.id === "string" && json.id.length > 0 ? json.id : `controller-${i}`;
+      let controller = set._byId.get(id);
+      if (controller === void 0) {
+        controller = new Controller(id);
+        set._byId.set(id, controller);
+        push(this.connectionEvents, { type: "controllerconnected", controller });
+      }
+      const moved = controller._update(json, elapsed);
+      if (moved || json.current === true) {
+        this._useCounter += 1;
+        controller._seen = this._useCounter;
+      }
+      seen.add(id);
+    }
+    if (list.length > MAX_CONTROLLERS && runtime2 !== null) {
+      runtime2.warnOnce(
+        "controller-count",
+        `More than ${MAX_CONTROLLERS} controllers were reported; the rest were dropped`
+      );
+    }
+    for (const [id, controller] of set._byId) {
+      if (seen.has(id)) continue;
+      set._byId.delete(id);
+      push(this.connectionEvents, { type: "controllerdisconnected", controller });
+    }
+    const all = [];
+    let current = null;
+    for (const controller of set._byId.values()) {
+      push(all, controller);
+      if (controller._seen >= 0 && (current === null || controller._seen > current._seen)) {
+        current = controller;
+      }
+    }
+    set.all = all;
+    set.current = current;
+  };
+
+  // src/audio.js
+  var DISTANCE_MODELS = ["inverse", "linear", "exponential"];
+  function groupName(value) {
+    if (typeof value !== "string" || value.length === 0) return "master";
+    return value.length > MAX_NAME_LENGTH ? cut(value, MAX_NAME_LENGTH) : value;
+  }
+  var AudioBuffer = class {
+    constructor(url, error2 = null) {
+      this.url = url;
+      this.error = error2;
+      this.duration = 0;
+    }
+  };
+  var AudioLoader2 = class {
+    constructor() {
+      this.path = "";
+    }
+    setPath(path) {
+      this.path = typeof path === "string" ? path : "";
+      return this;
+    }
+    /**
+     * Returns the handle synchronously (the consumer does the loading) and calls
+     * `onLoad` on the next microtask so a script written either way works. A url
+     * the containment of 3.5 refuses never becomes a buffer.
+     */
+    load(url, onLoad, onProgress, onError) {
+      const runtime2 = host();
+      const raw = `${this.path}${typeof url === "string" ? url : ""}`;
+      const resolved = runtime2 === null ? raw : runtime2.resolveUrl(raw);
+      const buffer = new AudioBuffer(resolved, resolved === null ? "the url was refused" : null);
+      Promise.resolve().then(() => {
+        if (resolved === null) {
+          const error2 = new Error(`AudioLoader could not load "${raw}": the url was refused`);
+          if (typeof onError === "function") onError(error2);
+          return;
+        }
+        if (typeof onProgress === "function") onProgress({ loaded: 0, total: 0 });
+        if (typeof onLoad === "function") onLoad(buffer);
+      });
+      return buffer;
+    }
+    loadAsync(url) {
+      return new Promise((resolve, reject) => {
+        this.load(url, resolve, void 0, reject);
+      });
+    }
+  };
+  var AudioMixer = class {
+    constructor() {
+      this.reset();
+    }
+    reset() {
+      this._masterVolume = 1;
+      this._groups = /* @__PURE__ */ new Map();
+      this._state = "suspended";
+      this._revision = 0;
+    }
+    get masterVolume() {
+      return this._masterVolume;
+    }
+    set masterVolume(value) {
+      const next = clamp2(finite(value, this._masterVolume), 0, 1);
+      if (next === this._masterVolume) return;
+      this._masterVolume = next;
+      this._revision += 1;
+    }
+    setGroupVolume(name, volume) {
+      const key = groupName(name);
+      const next = clamp2(finite(volume, 1), 0, 1);
+      if (this._groups.get(key) === next) return this;
+      this._groups.set(key, next);
+      this._revision += 1;
+      return this;
+    }
+    /** Read-only view: the group names that have a volume set. */
+    get groups() {
+      const names = [];
+      for (const name of this._groups.keys()) names[names.length] = name;
+      return names;
+    }
+    get state() {
+      return this._state;
+    }
+    /** Web audio needs a gesture; the consumer confirms through `audioState`. */
+    resume() {
+      if (this._state === "running") return this;
+      this._state = "running";
+      this._revision += 1;
+      return this;
+    }
+    toJSON() {
+      const groups = {};
+      for (const [name, volume] of this._groups) groups[name] = volume;
+      return { masterVolume: this._masterVolume, groups, state: this._state };
+    }
+  };
+  var Audio2 = class extends Object3D {
+    constructor() {
+      super();
+      this.type = "Audio";
+      this.isAudio = true;
+      this.isSpatialAudio = false;
+      this.isAmbientAudio = false;
+      this.buffer = null;
+      this.onEnded = null;
+      this._loop = false;
+      this._volume = 1;
+      this._rate = 1;
+      this._group = "master";
+      this._playing = false;
+      this._currentTime = 0;
+      this._duration = 0;
+      this._refDistance = 1;
+      this._rolloff = 1;
+      this._distanceModel = "inverse";
+      this._cone = null;
+      this._reverbLevel = 0;
+    }
+    // ---------------------------------------------------------------- contents
+    setBuffer(buffer) {
+      if (buffer !== null && buffer !== void 0 && !(buffer instanceof AudioBuffer)) {
+        throw new TypeError("Audio.setBuffer expects an AudioBuffer from AudioLoader");
+      }
+      this.buffer = buffer === void 0 ? null : buffer;
+      if (this.buffer !== null && this.buffer.url === null) {
+        const runtime2 = host();
+        if (runtime2) {
+          runtime2.warnOnce(
+            `audio-url:${this.uuid}`,
+            `${this.type} was given a buffer whose url was refused; it stays silent`
+          );
+        }
+      }
+      this._touch();
+      return this;
+    }
+    setLoop(value) {
+      this._loop = value === true;
+      this._touch();
+      return this;
+    }
+    get loop() {
+      return this._loop;
+    }
+    set loop(value) {
+      this.setLoop(value);
+    }
+    setVolume(value) {
+      this._volume = clamp2(finite(value, this._volume), 0, 1);
+      this._touch();
+      return this;
+    }
+    getVolume() {
+      return this._volume;
+    }
+    get volume() {
+      return this._volume;
+    }
+    set volume(value) {
+      this.setVolume(value);
+    }
+    setPlaybackRate(value) {
+      this._rate = clamp2(finite(value, this._rate), 0.01, 8);
+      this._touch();
+      return this;
+    }
+    get playbackRate() {
+      return this._rate;
+    }
+    set playbackRate(value) {
+      this.setPlaybackRate(value);
+    }
+    get group() {
+      return this._group;
+    }
+    set group(value) {
+      this._group = groupName(value);
+      this._touch();
+    }
+    // --------------------------------------------------------------- transport
+    play() {
+      if (this._dropIfDestroyed("play")) return this;
+      if (!this._canPlay("play")) return this;
+      this._playing = true;
+      this._control("play", null);
+      return this;
+    }
+    pause() {
+      if (this._dropIfDestroyed("pause")) return this;
+      this._playing = false;
+      this._control("pause", null);
+      return this;
+    }
+    stop() {
+      if (this._dropIfDestroyed("stop")) return this;
+      this._playing = false;
+      this._currentTime = 0;
+      this._control("stop", null);
+      return this;
+    }
+    get isPlaying() {
+      return this._playing;
+    }
+    get currentTime() {
+      return this._currentTime;
+    }
+    set currentTime(value) {
+      if (this._dropIfDestroyed("seek")) return;
+      const next = Math.max(0, finite(value, 0));
+      this._currentTime = next;
+      this._control("seek", next);
+    }
+    get duration() {
+      return this._duration;
+    }
+    // ----------------------------------------------------------------- payload
+    toJSON() {
+      return {
+        url: this.buffer === null ? null : this.buffer.url,
+        spatial: this.isSpatialAudio === true,
+        ambient: this.isAmbientAudio === true,
+        loop: this._loop,
+        volume: this._volume,
+        rate: this._rate,
+        group: this._group,
+        refDistance: this._refDistance,
+        rolloff: this._rolloff,
+        distanceModel: this._distanceModel,
+        cone: this._cone,
+        reverbLevel: this._reverbLevel
+      };
+    }
+    // ------------------------------------------------------------------ inside
+    /** Raises the feature bit so the diff re-reads this object's payload. */
+    _touch() {
+      this[DIRTY] = this[DIRTY] | 0 | DIRTY_FEATURE;
+    }
+    _canPlay(what) {
+      const runtime2 = host();
+      if (this.buffer === null || this.buffer.url === null) {
+        if (runtime2) {
+          runtime2.warnOnce(
+            `audio-nobuffer:${this.uuid}`,
+            `${this.type}.${what}() was called without a playable buffer; nothing was started`
+          );
+        }
+        return false;
+      }
+      return true;
+    }
+    /**
+     * Stops the sound, tells the consumer to drop it (`audio id null`) and frees
+     * the object (SPEC 14.1). Equivalent to `Spatial.destroy(sound)`.
+     */
+    dispose() {
+      const runtime2 = host();
+      if (runtime2 === null || isDestroyed(this)) return this;
+      this._playing = false;
+      runtime2.destroy(this);
+      return this;
+    }
+    /**
+     * A destroyed sound is gone for good: nothing about it changes again, and
+     * adopting it as a root would resurrect it behind Spatial.destroy's back
+     * (P2-B-04).
+     */
+    _dropIfDestroyed(action) {
+      if (!isDestroyed(this)) return false;
+      const runtime2 = host();
+      if (runtime2 !== null) {
+        runtime2.warnOnce(
+          `uncreated:${this.type}.${action}`,
+          `${this.type}.${action} on ${this.name ? `"${this.name}"` : this.type} was dropped: the object was destroyed`
+        );
+      }
+      return true;
+    }
+    _control(action, value) {
+      const runtime2 = host();
+      if (runtime2 === null) return;
+      if (this._dropIfDestroyed(action)) return;
+      runtime2.registerAudio(this);
+      if (!runtime2.canCommand(this, `${this.type}.${action}`)) return;
+      runtime2.queueCommand(["audioControl", runtime2.idForObject(this), action, value], this);
+    }
+    /** Applied by syncAudio: the consumer owns playback state. */
+    _sync(playing, currentTime, duration) {
+      this._playing = playing;
+      this._currentTime = currentTime;
+      this._duration = duration;
+      if (this.buffer !== null) this.buffer.duration = duration;
+    }
+  };
+  var PositionalAudio2 = class extends Audio2 {
+    constructor() {
+      super();
+      this.type = "PositionalAudio";
+      this.isSpatialAudio = true;
+    }
+    setRefDistance(value) {
+      this._refDistance = Math.max(1e-4, finite(value, this._refDistance));
+      this._touch();
+      return this;
+    }
+    getRefDistance() {
+      return this._refDistance;
+    }
+    setRolloffFactor(value) {
+      this._rolloff = Math.max(0, finite(value, this._rolloff));
+      this._touch();
+      return this;
+    }
+    getRolloffFactor() {
+      return this._rolloff;
+    }
+    setDistanceModel(model) {
+      if (DISTANCE_MODELS.indexOf(model) === -1) {
+        throw new TypeError(
+          `PositionalAudio.setDistanceModel expects one of ${DISTANCE_MODELS.join(", ")} (got ${String(model)})`
+        );
+      }
+      this._distanceModel = model;
+      this._touch();
+      return this;
+    }
+    getDistanceModel() {
+      return this._distanceModel;
+    }
+    setDirectionalCone(innerAngle, outerAngle, outerGain) {
+      const inner = clamp2(finite(innerAngle, 360), 0, 360);
+      const outer = clamp2(finite(outerAngle, 360), inner, 360);
+      const gain = clamp2(finite(outerGain, 0), 0, 1);
+      this._cone = [inner, outer, gain];
+      this._touch();
+      return this;
+    }
+    get reverbLevel() {
+      return this._reverbLevel;
+    }
+    set reverbLevel(value) {
+      this._reverbLevel = clamp2(finite(value, this._reverbLevel), -80, 20);
+      this._touch();
+    }
+  };
+  var AmbientAudio = class extends Audio2 {
+    constructor() {
+      super();
+      this.type = "AmbientAudio";
+      this.isAmbientAudio = true;
+    }
+  };
+  function audioJSONEquals(a, b) {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    if (a.url !== b.url || a.spatial !== b.spatial || a.ambient !== b.ambient || a.loop !== b.loop || a.volume !== b.volume || a.rate !== b.rate || a.group !== b.group || a.refDistance !== b.refDistance || a.rolloff !== b.rolloff || a.distanceModel !== b.distanceModel || a.reverbLevel !== b.reverbLevel) {
+      return false;
+    }
+    const ac = a.cone;
+    const bc = b.cone;
+    if (ac === bc) return true;
+    if (ac === null || bc === null) return false;
+    return ac[0] === bc[0] && ac[1] === bc[1] && ac[2] === bc[2];
+  }
+
+  // src/video.js
+  var SOURCE_KEYS = ["mp4", "hls", "webm"];
+  function resolveSources(screen, raw, runtime2) {
+    if (raw === null || raw === void 0) {
+      failSource(screen, "no url was given");
+      return null;
+    }
+    if (typeof raw === "string") {
+      const url = runtime2 === null ? raw : runtime2.resolveUrl(raw);
+      if (url === null && runtime2 !== null) {
+        runtime2.warnOnce(
+          `video-url:${screen.uuid}`,
+          "VideoScreen was given a url that was refused; the screen stays blank"
+        );
+        failSource(screen, "every url was refused");
+      }
+      return url;
+    }
+    if (typeof raw !== "object") {
+      throw new TypeError("VideoScreen url expects a string or { mp4, hls, webm }");
+    }
+    const sources = {};
+    const refused = [];
+    let kept = 0;
+    for (let i = 0; i < SOURCE_KEYS.length; i += 1) {
+      const key = SOURCE_KEYS[i];
+      const value = raw[key];
+      if (typeof value !== "string" || value.length === 0) continue;
+      const url = runtime2 === null ? value : runtime2.resolveUrl(value);
+      if (url === null) {
+        push(refused, key);
+        continue;
+      }
+      sources[key] = url;
+      kept += 1;
+    }
+    if (refused.length > 0 && runtime2 !== null) {
+      runtime2.warnOnce(
+        `video-url:${screen.uuid}`,
+        `VideoScreen ${refused.join(" and ")} url${refused.length > 1 ? "s were" : " was"} refused and dropped`
+      );
+    }
+    if (kept === 0) {
+      failSource(screen, "no url survived containment");
+      return null;
+    }
+    return sources;
+  }
+  function failSource(screen, reason) {
+    screen.error = `VideoScreen has no playable source: ${reason}`;
+    screen._pendingError = screen.error;
+  }
+  var VideoScreen = class extends Mesh2 {
+    constructor(options = {}) {
+      const hasWidth = Number.isFinite(options.width);
+      const hasHeight = Number.isFinite(options.height);
+      const width = hasWidth ? Math.abs(options.width) : hasHeight ? Math.abs(options.height) * (16 / 9) : 1;
+      const height = hasHeight ? Math.abs(options.height) : width * (9 / 16);
+      super(new PlaneGeometry2(width || 1e-3, height || 1e-3), new MeshBasicMaterial());
+      this.type = "VideoScreen";
+      this.isVideoScreen = true;
+      this.error = null;
+      this._pendingError = null;
+      this._width = width;
+      this._height = height;
+      this._fixedWidth = hasWidth;
+      this._fixedHeight = hasHeight;
+      this._aspect = null;
+      const runtime2 = host();
+      this._url = resolveSources(this, options.url, runtime2);
+      this._loop = options.loop === true;
+      this._muted = options.muted === true;
+      this._autoplay = options.autoplay === true;
+      this._docking = options.docking === true;
+      if (this._docking && runtime2 !== null && runtime2.env.platform !== "visionos") {
+        runtime2.warnOnce(
+          "video-docking",
+          "VideoScreen docking is visionOS only; the state is kept and reported but has no effect"
+        );
+      }
+      this._volume = 1;
+      this._rate = 1;
+      this._playing = options.autoplay === true;
+      this._currentTime = 0;
+      this._duration = 0;
+    }
+    // ---------------------------------------------------------------- geometry
+    get width() {
+      return this._width;
+    }
+    get height() {
+      return this._height;
+    }
+    /**
+     * The video's own aspect, once the consumer reports it. Whichever dimension
+     * the script did not fix follows it; if it fixed both, the plane is left
+     * alone (SPEC 14.2).
+     */
+    _applyAspect(aspect) {
+      if (!Number.isFinite(aspect) || aspect <= 0) return;
+      this._aspect = aspect;
+      if (this._fixedWidth && this._fixedHeight) return;
+      if (this._fixedHeight) this._width = this._height * aspect;
+      else this._height = this._width / aspect;
+      const previous = this.geometry;
+      this.geometry = new PlaneGeometry2(this._width || 1e-3, this._height || 1e-3);
+      if (previous !== null && previous !== void 0 && typeof previous.dispose === "function") {
+        previous.dispose();
+      }
+      this[DIRTY] = this[DIRTY] | 0 | DIRTY_GEOMETRY;
+    }
+    // --------------------------------------------------------------- transport
+    play() {
+      this._playing = true;
+      this._control("play", null);
+      return this;
+    }
+    pause() {
+      this._playing = false;
+      this._control("pause", null);
+      return this;
+    }
+    get isPlaying() {
+      return this._playing;
+    }
+    get currentTime() {
+      return this._currentTime;
+    }
+    set currentTime(value) {
+      const next = Math.max(0, finite(value, 0));
+      this._currentTime = next;
+      this._control("seek", next);
+    }
+    get duration() {
+      return this._duration;
+    }
+    get url() {
+      return this._url;
+    }
+    get volume() {
+      return this._volume;
+    }
+    set volume(value) {
+      this._volume = clamp2(finite(value, this._volume), 0, 1);
+      this._touch();
+    }
+    get muted() {
+      return this._muted;
+    }
+    set muted(value) {
+      this._muted = value === true;
+      this._touch();
+    }
+    get loop() {
+      return this._loop;
+    }
+    set loop(value) {
+      this._loop = value === true;
+      this._touch();
+    }
+    get playbackRate() {
+      return this._rate;
+    }
+    set playbackRate(value) {
+      this._rate = clamp2(finite(value, this._rate), 0.01, 8);
+      this._touch();
+    }
+    get docking() {
+      return this._docking;
+    }
+    toJSON() {
+      return {
+        url: this._url,
+        width: this._width,
+        height: this._height,
+        loop: this._loop,
+        muted: this._muted,
+        autoplay: this._autoplay,
+        docking: this._docking,
+        volume: this._volume,
+        rate: this._rate
+      };
+    }
+    _touch() {
+      this[DIRTY] = this[DIRTY] | 0 | DIRTY_FEATURE;
+    }
+    _control(action, value) {
+      const runtime2 = host();
+      if (runtime2 === null) return;
+      if (!runtime2.canCommand(this, `VideoScreen.${action}`)) return;
+      runtime2.queueCommand(["videoControl", runtime2.idForObject(this), action, value], this);
+    }
+    /** Applied by syncVideo: the consumer owns playback state. */
+    _sync(playing, currentTime, duration) {
+      this._playing = playing;
+      this._currentTime = currentTime;
+      this._duration = duration;
+    }
+  };
+  function videoJSONEquals(a, b) {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    return urlEquals(a.url, b.url) && a.width === b.width && a.height === b.height && a.loop === b.loop && a.muted === b.muted && a.autoplay === b.autoplay && a.docking === b.docking && a.volume === b.volume && a.rate === b.rate;
+  }
+  function urlEquals(a, b) {
+    if (a === b) return true;
+    if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+    for (let i = 0; i < SOURCE_KEYS.length; i += 1) {
+      if (a[SOURCE_KEYS[i]] !== b[SOURCE_KEYS[i]]) return false;
+    }
+    return true;
+  }
+
+  // src/host-channel.js
+  function checkName(name, what) {
+    if (typeof name !== "string" || name.length === 0) {
+      throw new TypeError(`${what} expects a non-empty name`);
+    }
+    return name;
+  }
+  var HostChannel = class {
+    constructor(runtime2) {
+      this._runtime = runtime2;
+      this._handlers = /* @__PURE__ */ new Map();
+      this._functions = [];
+      this._pending = /* @__PURE__ */ new Map();
+      this._nextCallId = 1;
+    }
+    /** The functions the app registered, as `Module.function` names. */
+    get functions() {
+      return this._functions.slice();
+    }
+    on(name, handler) {
+      checkName(name, "Spatial.host.on");
+      if (typeof handler !== "function") throw new TypeError("Spatial.host.on expects a function");
+      let list = this._handlers.get(name);
+      if (list === void 0) {
+        list = [];
+        this._handlers.set(name, list);
+      }
+      if (list.length >= MAX_LISTENERS_PER_EVENT) {
+        this._runtime.warnOnce(
+          `host-listener-limit:${name}`,
+          `More than ${MAX_LISTENERS_PER_EVENT} handlers for the host event "${name}"; the registration was dropped`
+        );
+        return handler;
+      }
+      push(list, handler);
+      return handler;
+    }
+    off(name, handler) {
+      const list = this._handlers.get(name);
+      if (list === void 0) return;
+      if (handler === void 0) {
+        this._handlers.delete(name);
+        return;
+      }
+      const index = list.indexOf(handler);
+      if (index !== -1) list.splice(index, 1);
+      if (list.length === 0) this._handlers.delete(name);
+    }
+    /** Script to host. The payload is copied into JSON before it leaves. */
+    send(name, payload) {
+      checkName(name, "Spatial.host.send");
+      this._runtime.queueCommand(["hostEvent", 0, name, jsonSafe(payload === void 0 ? null : payload)]);
+      return this;
+    }
+    /**
+     * Script to host, with an answer. An unknown function rejects immediately
+     * rather than waiting for a host that will never reply.
+     */
+    call(name, args) {
+      let checked;
+      try {
+        checked = checkName(name, "Spatial.host.call");
+      } catch (error2) {
+        return Promise.reject(error2);
+      }
+      if (this._functions.indexOf(checked) === -1) {
+        return Promise.reject(
+          new SpatialUnsupportedError(
+            `The host function "${checked}" is not registered; Spatial.host.functions lists what is`,
+            "host-function",
+            null
+          )
+        );
+      }
+      if (this._pending.size >= MAX_PENDING_HOST_CALLS) {
+        return Promise.reject(
+          new SpatialUnsupportedError(
+            `More than ${MAX_PENDING_HOST_CALLS} host calls are waiting for an answer; the call was refused`,
+            "host-function",
+            null
+          )
+        );
+      }
+      const callId = this._nextCallId;
+      this._nextCallId += 1;
+      const promise = new Promise((resolve, reject) => {
+        this._pending.set(callId, { resolve, reject, name: checked });
+      });
+      this._runtime.queueCommand(["hostCall", callId, checked, jsonSafe(args === void 0 ? null : args)]);
+      return promise;
+    }
+    /** Host to script: `__spatial.hostEvent(name, payload)`. */
+    deliver(name, payload) {
+      const list = this._handlers.get(name);
+      if (list === void 0 || list.length === 0) return;
+      const handlers = list.slice();
+      for (let i = 0; i < handlers.length; i += 1) {
+        try {
+          handlers[i](payload);
+        } catch (error2) {
+          this._runtime.reportError(error2);
+        }
+      }
+    }
+    /** Host to script: `dispatch("hostResult", callId, { value } | { error })`. */
+    settle(callId, payload) {
+      const entry = this._pending.get(callId);
+      if (entry === void 0) return;
+      this._pending.delete(callId);
+      if (payload && payload.error !== void 0 && payload.error !== null) {
+        const message = typeof payload.error === "string" ? payload.error : "the host function failed";
+        entry.reject(new SpatialUnsupportedError(`${entry.name}: ${message}`, "host-function", null));
+        return;
+      }
+      entry.resolve(payload === null || payload === void 0 ? null : payload.value);
+    }
+    /**
+     * A script reload clears handlers and in-flight calls but keeps what the app
+     * registered: the functions belong to the app, not to the script.
+     */
+    reset() {
+      this._handlers.clear();
+      this.clearPending("the script was replaced");
+    }
+    /** The app declares what it registered, at load or later. */
+    setFunctions(names) {
+      const list = [];
+      if (Array.isArray(names)) {
+        for (let i = 0; i < names.length; i += 1) {
+          if (typeof names[i] === "string" && names[i].length > 0) push(list, names[i]);
+        }
+      }
+      this._functions = list;
+    }
+    /** Rejects everything still waiting; used by dispose and reload. */
+    clearPending(reason) {
+      for (const entry of this._pending.values()) {
+        entry.reject(new SpatialUnsupportedError(`${entry.name}: ${reason}`, "host-function", null));
+      }
+      this._pending.clear();
+    }
+    get pendingCount() {
+      return this._pending.size;
+    }
+  };
+  var FetchChannel = class {
+    constructor(runtime2) {
+      this._runtime = runtime2;
+      this._pending = /* @__PURE__ */ new Map();
+      this._nextId = 1;
+    }
+    request(url, kind) {
+      if (typeof url !== "string" || url.length === 0) {
+        return Promise.reject(new TypeError(`Spatial.fetch${kind === "json" ? "JSON" : "Text"} expects a url`));
+      }
+      const resolved = this._runtime.resolveUrl(url);
+      if (resolved === null) {
+        return Promise.reject(
+          new SpatialUnsupportedError(`The url "${url}" was refused`, "fetch", null)
+        );
+      }
+      if (this._pending.size >= MAX_PENDING_HOST_CALLS) {
+        return Promise.reject(
+          new SpatialUnsupportedError(
+            `More than ${MAX_PENDING_HOST_CALLS} fetches are waiting for an answer; the request was refused`,
+            "fetch",
+            null
+          )
+        );
+      }
+      const requestId = this._nextId;
+      this._nextId += 1;
+      const promise = new Promise((resolve, reject) => {
+        this._pending.set(requestId, { resolve, reject, url: resolved, kind });
+      });
+      this._runtime.queueCommand(["fetch", requestId, { url: resolved, kind }]);
+      return promise;
+    }
+    settle(requestId, payload) {
+      const entry = this._pending.get(requestId);
+      if (entry === void 0) return;
+      this._pending.delete(requestId);
+      if (payload && payload.error !== void 0 && payload.error !== null) {
+        const message = typeof payload.error === "string" ? payload.error : "the request failed";
+        entry.reject(new SpatialUnsupportedError(`${entry.url}: ${message}`, "fetch", null));
+        return;
+      }
+      if (entry.kind === "json") {
+        if (payload && payload.json !== void 0) {
+          entry.resolve(payload.json);
+          return;
+        }
+        const text2 = payload === null || payload === void 0 ? "" : payload.text;
+        try {
+          entry.resolve(JSON.parse(typeof text2 === "string" ? text2 : ""));
+        } catch (error2) {
+          entry.reject(new SpatialUnsupportedError(`${entry.url}: the response was not JSON`, "fetch", null));
+        }
+        return;
+      }
+      const text = payload === null || payload === void 0 ? null : payload.text;
+      entry.resolve(typeof text === "string" ? text : "");
+    }
+    clearPending(reason) {
+      for (const entry of this._pending.values()) {
+        entry.reject(new SpatialUnsupportedError(`${entry.url}: ${reason}`, "fetch", null));
+      }
+      this._pending.clear();
+    }
+    reset() {
+      this.clearPending("the script was replaced");
+    }
+    get pendingCount() {
+      return this._pending.size;
+    }
+  };
+
+  // src/camera.js
+  var installed2 = false;
+  function installCameraTracking(PerspectiveCamera2) {
+    if (installed2) return;
+    installed2 = true;
+    const proto = PerspectiveCamera2.prototype;
+    const backing = Symbol("spatial.aspect");
+    Object.defineProperty(proto, "aspect", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        const value = this[backing];
+        return value === void 0 ? 1 : value;
+      },
+      set(value) {
+        if (value !== 1) {
+          const runtime2 = host();
+          if (runtime2) {
+            runtime2.warnOnce(
+              "camera-aspect",
+              "PerspectiveCamera.aspect is managed by the consumer from the viewport; the script value is ignored"
+            );
+          }
+        }
+        this[backing] = value;
+      }
+    });
+  }
+  function isCamera(object) {
+    return object !== null && object !== void 0 && object.isCamera === true;
+  }
+  function cameraPayload(camera, out) {
+    if (camera === null) {
+      out.kind = null;
+    } else if (camera.isPerspectiveCamera === true) {
+      out.kind = "perspective";
+    } else if (camera.isOrthographicCamera === true) {
+      out.kind = "orthographic";
+    } else {
+      out.kind = null;
+    }
+    out.fov = camera !== null && camera.isPerspectiveCamera === true ? finite(camera.fov, 60) : null;
+    out.near = camera === null ? null : finite(camera.near, 0.01);
+    out.far = camera === null ? null : finite(camera.far, 1e3);
+    const ortho = camera !== null && camera.isOrthographicCamera === true;
+    out.left = ortho ? finite(camera.left, -1) : null;
+    out.right = ortho ? finite(camera.right, 1) : null;
+    out.top = ortho ? finite(camera.top, 1) : null;
+    out.bottom = ortho ? finite(camera.bottom, -1) : null;
+    return out;
+  }
+  function createCameraScratch() {
+    return { kind: null, fov: null, near: null, far: null, left: null, right: null, top: null, bottom: null };
+  }
+  function cameraPayloadEquals(a, b) {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    return a.kind === b.kind && a.fov === b.fov && a.near === b.near && a.far === b.far && a.left === b.left && a.right === b.right && a.top === b.top && a.bottom === b.bottom;
+  }
+  function copyCameraPayload(source) {
+    return {
+      kind: source.kind,
+      fov: source.fov,
+      near: source.near,
+      far: source.far,
+      left: source.left,
+      right: source.right,
+      top: source.top,
+      bottom: source.bottom
+    };
+  }
+
+  // src/character.js
+  var CharacterController = class {
+    constructor(options = {}) {
+      if (options === null || typeof options !== "object") {
+        throw new TypeError("CharacterController expects an options object");
+      }
+      this.radius = atLeast(options.radius, 1e-3, 0.2);
+      this.height = atLeast(options.height, 1e-3, 1);
+      this.slopeLimit = clamp2(options.slopeLimit, 0, Math.PI / 2, 0.785);
+      this.stepLimit = atLeast(options.stepLimit, 0, 0.3);
+      this.gravity = options.gravity !== false;
+      this.object = null;
+      this._isOnGround = false;
+      this._velocity = new Vector3();
+    }
+    get isOnGround() {
+      return this._isOnGround;
+    }
+    /** Read-only: the consumer owns it. */
+    get velocity() {
+      return this._velocity;
+    }
+    /** A displacement for the coming frame; the consumer slides it along walls. */
+    move(displacement) {
+      if (!displacement || !Number.isFinite(displacement.x)) {
+        throw new TypeError("CharacterController.move expects a Vector3");
+      }
+      const runtime2 = host();
+      const object = this.object;
+      if (runtime2 === null || object === null) return this;
+      if (!runtime2.canCommand(object, "CharacterController.move")) return this;
+      if (!Number.isFinite(displacement.x) || !Number.isFinite(displacement.y) || !Number.isFinite(displacement.z)) {
+        return this;
+      }
+      runtime2.queueCommand([
+        "characterMove",
+        runtime2.idForObject(object),
+        displacement.x,
+        displacement.y,
+        displacement.z
+      ], object);
+      return this;
+    }
+    /** An unconditional placement, ignoring collision. */
+    teleport(position) {
+      if (!position || !Number.isFinite(position.x)) {
+        throw new TypeError("CharacterController.teleport expects a Vector3");
+      }
+      const runtime2 = host();
+      const object = this.object;
+      if (object !== null) {
+        object.position.copy(position);
+        if (object.parent !== null) object.parent.worldToLocal(object.position);
+      }
+      if (runtime2 === null || object === null) return this;
+      if (!runtime2.canCommand(object, "CharacterController.teleport")) return this;
+      runtime2.queueCommand([
+        "characterTeleport",
+        runtime2.idForObject(object),
+        position.x,
+        position.y,
+        position.z
+      ], object);
+      return this;
+    }
+    toJSON() {
+      return {
+        radius: this.radius,
+        height: this.height,
+        slopeLimit: this.slopeLimit,
+        stepLimit: this.stepLimit,
+        gravity: this.gravity
+      };
+    }
+    _sync(isOnGround, vx, vy, vz) {
+      this._isOnGround = isOnGround;
+      this._velocity.set(vx, vy, vz);
+    }
+  };
+  var CONTROLLER = Symbol("spatial.characterController");
+  function installCharacterController() {
+    Object.defineProperty(Object3D.prototype, "characterController", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return this[CONTROLLER] === void 0 ? null : this[CONTROLLER];
+      },
+      set(controller) {
+        const previous = this[CONTROLLER];
+        if (previous && previous !== controller) previous.object = null;
+        if (controller === null || controller === void 0) {
+          this[CONTROLLER] = null;
+          this[DIRTY] = this[DIRTY] | 0 | DIRTY_FEATURE;
+          return;
+        }
+        if (!(controller instanceof CharacterController)) {
+          throw new TypeError("Object3D.characterController must be a Spatial.CharacterController or null");
+        }
+        if (controller.object !== null && controller.object !== this) {
+          const owner = controller.object.name ? `"${controller.object.name}"` : controller.object.type;
+          throw new SpatialUnsupportedError(
+            `This CharacterController is already attached to ${owner}; construct one per object`,
+            "character-shared",
+            this
+          );
+        }
+        controller.object = this;
+        this[CONTROLLER] = controller;
+        this[DIRTY] = this[DIRTY] | 0 | DIRTY_FEATURE;
+      }
+    });
+  }
 
   // src/timers.js
   var BUCKET_SECONDS = 1 / 240;
@@ -23508,7 +24845,17 @@
     geometryTrackingInstalled = true;
     const proto = BufferGeometry2.prototype;
     proto[GEOMETRY_REVISION] = 0;
-    for (const name of ["setAttribute", "deleteAttribute", "setIndex", "computeVertexNormals", "applyMatrix4"]) {
+    for (const name of [
+      "setAttribute",
+      "deleteAttribute",
+      "setIndex",
+      "computeVertexNormals",
+      "applyMatrix4",
+      // Groups select a material each (SPEC 14.12), so they are part of the
+      // descriptor and an edit has to re-emit it.
+      "addGroup",
+      "clearGroups"
+    ]) {
       const base = proto[name];
       if (typeof base !== "function") continue;
       proto[name] = function tracked(...args) {
@@ -23552,6 +24899,23 @@
       normalVersion: NaN,
       uvVersion: NaN,
       indexVersion: NaN,
+      // Phase 2 per-object state (SPEC 14). `features` is a bitmask of what this
+      // object actually has, so an object with none of it costs one compare.
+      features: 0,
+      // What is currently on the wire, so a feature that goes away can still be
+      // retracted after the mask has dropped to zero (P2-B-02).
+      emittedFeatures: 0,
+      // features | emittedFeatures, so the hot path reads one field.
+      featureGate: 0,
+      audio: null,
+      video: null,
+      character: null,
+      forceField: null,
+      accessibility: null,
+      shaderGeneration: -1,
+      shaderGenerations: null,
+      skeletonGeneration: -1,
+      blendGeneration: -1,
       hasBody: false,
       materialObject: null,
       material: null,
@@ -23655,9 +25019,9 @@
     }
     return true;
   }
-  function textureSnapshot(texture, resolveUrl2) {
+  function textureSnapshot(texture, resolveUrl3) {
     return {
-      url: texture.url === null || texture.url === void 0 ? null : resolveUrl2(texture.url),
+      url: texture.url === null || texture.url === void 0 ? null : resolveUrl3(texture.url),
       repeat: vector2Array(texture.repeat, 1, 1),
       offset: vector2Array(texture.offset, 0, 0),
       wrapS: finite(texture.wrapS, 1001),
@@ -23689,6 +25053,21 @@
   function geometryRevisionOf(geometry) {
     return geometryPayloadKey(geometry);
   }
+  function geometryGroups(geometry) {
+    const groups = geometry.groups;
+    if (!Array.isArray(groups) || groups.length === 0) return null;
+    const out = [];
+    for (let i = 0; i < groups.length; i += 1) {
+      const group = groups[i];
+      if (!group) continue;
+      push(out, {
+        start: finite(group.start, 0),
+        count: finite(group.count, 0),
+        materialIndex: finite(group.materialIndex, 0)
+      });
+    }
+    return out.length === 0 ? null : out;
+  }
   function buildGeometryPayload(geometry, dropped) {
     const attributes = geometry.attributes || {};
     const position = attributes.position ? toFloat32(attributes.position.array) : new Float32Array(0);
@@ -23707,7 +25086,10 @@
         // Bumps on every structural or in-place edit, so a consumer can tell
         // "the same geometry again" from "the same geometry, changed".
         revision: geometryRevisionOf(geometry),
-        parameters: sanitizeParameters(geometry.parameters, dropped)
+        parameters: sanitizeParameters(geometry.parameters, dropped),
+        // Index ranges that select a material each, when a mesh carries several
+        // (SPEC 14.12). Absent (null) for the single-material case.
+        groups: geometryGroups(geometry)
       },
       position,
       normal,
@@ -23765,7 +25147,7 @@
     burst() {
       const runtime2 = host();
       if (runtime2 && runtime2.canCommand(this, "ParticleEmitter.burst")) {
-        runtime2.queueCommand(["particlesBurst", runtime2.idForObject(this)]);
+        runtime2.queueCommand(["particlesBurst", runtime2.idForObject(this)], this);
       }
       return this;
     }
@@ -23799,6 +25181,64 @@
     }
   };
   ParticleEmitter.prototype.isParticleEmitter = true;
+
+  // src/asset.js
+  var AssetGroup = class extends Group {
+    constructor(urls) {
+      super();
+      this.type = "Asset";
+      this.isAsset = true;
+      this.urls = {
+        usdz: urls.usdz === void 0 ? null : urls.usdz,
+        reality: urls.reality === void 0 ? null : urls.reality,
+        glb: urls.glb === void 0 ? null : urls.glb,
+        gltf: urls.gltf === void 0 ? null : urls.gltf
+      };
+      this.animations = [];
+      this.skeleton = null;
+      this.blendShapes = null;
+      this.boundingBox = new Box3();
+      this.loaded = false;
+      this._resolve = null;
+      this._reject = null;
+      this._currentAnimation = null;
+    }
+    playAnimation(name, options = {}) {
+      const runtime2 = host();
+      const loop = options.loop === void 0 ? true : options.loop !== false;
+      const speed = options.speed === void 0 ? 1 : options.speed;
+      this._currentAnimation = { name, loop, speed };
+      if (runtime2 && runtime2.canCommand(this, "AssetGroup.playAnimation")) {
+        runtime2.queueCommand(["assetAnimation", runtime2.idForObject(this), name, loop, speed], this);
+      }
+      return this;
+    }
+    stopAnimation() {
+      const runtime2 = host();
+      this._currentAnimation = null;
+      if (runtime2 && runtime2.canCommand(this, "AssetGroup.stopAnimation")) {
+        runtime2.queueCommand(["assetAnimation", runtime2.idForObject(this), null, false, 1], this);
+      }
+      return this;
+    }
+    toJSON() {
+      return { ...this.urls };
+    }
+  };
+  var ImageBasedLight = class {
+    constructor(url, intensity = 1) {
+      this.url = url;
+      this.intensity = intensity;
+    }
+    toJSON() {
+      return { url: this.url, intensity: this.intensity };
+    }
+  };
+  function environmentJSONEquals(a, b) {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    return a.url === b.url && a.intensity === b.intensity;
+  }
 
   // src/kinds.js
   var KINDS = [
@@ -23869,6 +25309,233 @@
     return entry === void 0 || entry.snapshotKey === null ? null : entry;
   }
 
+  // src/runtime/payloads.js
+  function shallowJSONEquals(a, b) {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    const keys = objectKeys(a);
+    if (keys.length !== objectKeys(b).length) return false;
+    for (const key of keys) {
+      const av = a[key];
+      const bv = b[key];
+      if (Array.isArray(av) && Array.isArray(bv)) {
+        if (av.length !== bv.length) return false;
+        for (let i = 0; i < av.length; i += 1) if (av[i] !== bv[i]) return false;
+      } else if (av !== bv) {
+        return false;
+      }
+    }
+    return true;
+  }
+  function copyLightSnapshot(source) {
+    return {
+      type: source.type,
+      color: source.color,
+      intensity: source.intensity,
+      distance: source.distance,
+      decay: source.decay,
+      angle: source.angle,
+      penumbra: source.penumbra,
+      castShadow: source.castShadow,
+      direction: source.direction
+    };
+  }
+
+  // src/runtime/features.js
+  var FEATURE_AUDIO = 1;
+  var FEATURE_VIDEO = 2;
+  var FEATURE_CHARACTER = 4;
+  var FEATURE_FORCE_FIELD = 8;
+  var FEATURE_ACCESSIBILITY = 16;
+  var FEATURE_SKELETON = 32;
+  var FEATURE_BLEND_SHAPES = 64;
+  var FEATURE_SHADER = 128;
+  function featuresFor(object) {
+    let features = 0;
+    if (object.isAudio === true) features |= FEATURE_AUDIO;
+    if (object.isVideoScreen === true) features |= FEATURE_VIDEO;
+    if (object.characterController !== null && object.characterController !== void 0) {
+      features |= FEATURE_CHARACTER;
+    }
+    if (object.isForceField === true) features |= FEATURE_FORCE_FIELD;
+    if (object.accessibility !== null && object.accessibility !== void 0) {
+      features |= FEATURE_ACCESSIBILITY;
+    }
+    const material = object.material;
+    if (Array.isArray(material)) {
+      for (let i = 0; i < material.length; i += 1) {
+        const entry = material[i];
+        if (entry !== null && entry !== void 0 && entry.isShaderGraphMaterial === true) {
+          features |= FEATURE_SHADER;
+          break;
+        }
+      }
+    } else if (material !== null && material !== void 0 && material.isShaderGraphMaterial === true) {
+      features |= FEATURE_SHADER;
+    }
+    if (object.isAsset === true) {
+      if (object.skeleton !== null && object.skeleton !== void 0) features |= FEATURE_SKELETON;
+      if (object.blendShapes !== null && object.blendShapes !== void 0) features |= FEATURE_BLEND_SHAPES;
+    }
+    return features;
+  }
+  function diffFeatures(runtime2, object, snapshot, id, out) {
+    const features = snapshot.features;
+    const emitted = snapshot.emittedFeatures;
+    diffFeaturesInner(runtime2, object, snapshot, id, out, features, emitted);
+    snapshot.featureGate = snapshot.features | snapshot.emittedFeatures;
+  }
+  function diffFeaturesInner(runtime2, object, snapshot, id, out, features, emitted) {
+    if ((features & FEATURE_AUDIO) !== 0) {
+      const next = object.toJSON();
+      if (!audioJSONEquals(snapshot.audio, next)) {
+        snapshot.audio = next;
+        snapshot.emittedFeatures |= FEATURE_AUDIO;
+        push(out.object, ["audio", id, next]);
+      }
+    } else if ((emitted & FEATURE_AUDIO) !== 0) {
+      snapshot.audio = null;
+      snapshot.emittedFeatures &= ~FEATURE_AUDIO;
+      push(out.object, ["audio", id, null]);
+    }
+    if ((features & FEATURE_VIDEO) !== 0) {
+      const next = object.toJSON();
+      if (!videoJSONEquals(snapshot.video, next)) {
+        snapshot.video = next;
+        snapshot.emittedFeatures |= FEATURE_VIDEO;
+        push(out.object, ["video", id, next]);
+      }
+      if (object._pendingError !== null && object._pendingError !== void 0) {
+        const message = object._pendingError;
+        object._pendingError = null;
+        runtime2.dispatch("error", id, { message });
+      }
+    } else if ((emitted & FEATURE_VIDEO) !== 0) {
+      snapshot.video = null;
+      snapshot.emittedFeatures &= ~FEATURE_VIDEO;
+      push(out.object, ["video", id, null]);
+    }
+    if ((features & FEATURE_CHARACTER) !== 0) {
+      const controller = object.characterController;
+      const next = controller === null || controller === void 0 ? null : controller.toJSON();
+      if (!shallowJSONEquals(snapshot.character, next)) {
+        snapshot.character = next;
+        snapshot.emittedFeatures |= FEATURE_CHARACTER;
+        push(out.object, ["characterController", id, next]);
+      }
+    } else if ((emitted & FEATURE_CHARACTER) !== 0) {
+      snapshot.character = null;
+      snapshot.emittedFeatures &= ~FEATURE_CHARACTER;
+      push(out.object, ["characterController", id, null]);
+    }
+    if ((features & FEATURE_FORCE_FIELD) !== 0) {
+      const next = object.toJSON();
+      if (!shallowJSONEquals(snapshot.forceField, next)) {
+        snapshot.forceField = next;
+        snapshot.emittedFeatures |= FEATURE_FORCE_FIELD;
+        push(out.object, ["forceField", id, next]);
+      }
+    } else if ((emitted & FEATURE_FORCE_FIELD) !== 0) {
+      snapshot.forceField = null;
+      snapshot.emittedFeatures &= ~FEATURE_FORCE_FIELD;
+      push(out.object, ["forceField", id, null]);
+    }
+    if ((features & FEATURE_ACCESSIBILITY) !== 0) {
+      const next = accessibilityJSON(object.accessibility);
+      if (!shallowJSONEquals(snapshot.accessibility, next)) {
+        snapshot.accessibility = next;
+        snapshot.emittedFeatures |= FEATURE_ACCESSIBILITY;
+        push(out.object, ["accessibility", id, next]);
+      }
+    } else if ((emitted & FEATURE_ACCESSIBILITY) !== 0) {
+      snapshot.accessibility = null;
+      snapshot.emittedFeatures &= ~FEATURE_ACCESSIBILITY;
+      push(out.object, ["accessibility", id, null]);
+    }
+    if ((features & FEATURE_SHADER) !== 0) {
+      diffShaderParameters(runtime2, object, snapshot, id, out);
+      snapshot.emittedFeatures |= FEATURE_SHADER;
+    } else if ((emitted & FEATURE_SHADER) !== 0) {
+      snapshot.shaderGeneration = -1;
+      snapshot.shaderGenerations = null;
+      snapshot.emittedFeatures &= ~FEATURE_SHADER;
+    }
+    if ((features & FEATURE_SKELETON) !== 0) {
+      const skeleton = object.skeleton;
+      if (skeleton !== null && skeleton.generation !== snapshot.skeletonGeneration) {
+        snapshot.skeletonGeneration = skeleton.generation;
+        snapshot.emittedFeatures |= FEATURE_SKELETON;
+        push(out.object, ["skeleton", id, skeleton.toJSON()]);
+      }
+    } else if ((emitted & FEATURE_SKELETON) !== 0) {
+      snapshot.skeletonGeneration = -1;
+      snapshot.emittedFeatures &= ~FEATURE_SKELETON;
+      push(out.object, ["skeleton", id, { joints: {}, track: false }]);
+    }
+    if ((features & FEATURE_BLEND_SHAPES) !== 0) {
+      const shapes = object.blendShapes;
+      if (shapes !== null && shapes.generation !== snapshot.blendGeneration) {
+        snapshot.blendGeneration = shapes.generation;
+        snapshot.emittedFeatures |= FEATURE_BLEND_SHAPES;
+        push(out.object, ["blendShapes", id, shapes.toJSON()]);
+      }
+    } else if ((emitted & FEATURE_BLEND_SHAPES) !== 0) {
+      snapshot.blendGeneration = -1;
+      snapshot.emittedFeatures &= ~FEATURE_BLEND_SHAPES;
+      push(out.object, ["blendShapes", id, {}]);
+    }
+  }
+  function diffShaderParameters(runtime2, object, snapshot, id, out) {
+    const material = object.material;
+    if (Array.isArray(material)) {
+      let generations = snapshot.shaderGenerations;
+      if (generations === null || generations === void 0) {
+        generations = [];
+        snapshot.shaderGenerations = generations;
+      }
+      for (let index = 0; index < material.length; index += 1) {
+        const entry = material[index];
+        if (entry === null || entry === void 0 || entry.isShaderGraphMaterial !== true) continue;
+        const seen = generations[index] === void 0 ? -1 : generations[index];
+        if (seen === -1) {
+          generations[index] = entry.generation;
+          continue;
+        }
+        if (entry.generation === seen) continue;
+        const names2 = entry.changedSince(seen);
+        generations[index] = entry.generation;
+        emitParameters(runtime2, entry, names2, id, index, out);
+      }
+      return;
+    }
+    if (material === null || material === void 0 || material.isShaderGraphMaterial !== true) return;
+    if (snapshot.shaderGeneration === -1) {
+      snapshot.shaderGeneration = material.generation;
+      return;
+    }
+    if (material.generation === snapshot.shaderGeneration) return;
+    const names = material.changedSince(snapshot.shaderGeneration);
+    snapshot.shaderGeneration = material.generation;
+    emitParameters(runtime2, material, names, id, 0, out);
+  }
+  function emitParameters(runtime2, material, names, id, index, out) {
+    for (let i = 0; i < names.length; i += 1) {
+      const name = names[i];
+      const value = shaderParameterValue(material.parameters[name], runtime2.boundTextureIdFor);
+      if (value === void 0) continue;
+      push(out.object, ["shaderParameter", id, name, value, index]);
+    }
+  }
+  function accessibilityJSON(value) {
+    if (value === null || typeof value !== "object") return null;
+    return {
+      label: typeof value.label === "string" ? value.label : "",
+      value: typeof value.value === "string" ? value.value : "",
+      hint: typeof value.hint === "string" ? value.hint : "",
+      isButton: value.isButton === true
+    };
+  }
+
   // src/dump.js
   var worldPosition = new Vector3();
   function buildDump(runtime2, options) {
@@ -23921,7 +25588,7 @@
     for (const root of wantObjects ? runtime2.extraRoots : EMPTY_LIST) {
       if (seen.has(root)) continue;
       const parent = root.parent;
-      let parentId = -1;
+      let parentId = 0;
       if (parent === scene && scene !== null) parentId = 0;
       else if (parent !== null && runtime2.objectIds.has(parent)) parentId = runtime2.objectIds.get(parent);
       push(stack, root);
@@ -23946,6 +25613,18 @@
       joints,
       gravity: [gravity.x, gravity.y, gravity.z],
       environment: runtime2.environmentPayload(),
+      // Phase 2 scene-level state (SPEC 14).
+      isActive: runtime2.active,
+      audioMixer: runtime2.audio.toJSON(),
+      // The live value, not the last flushed one (P2-B-45): null means the
+      // consumer's built-in camera.
+      camera: runtime2.camera === null ? null : cameraPayload(runtime2.camera, createCameraScratch()),
+      sceneUnderstanding: { ...runtime2.sceneUnderstanding },
+      render: { adaptiveResolution: runtime2.render.adaptiveResolution === true },
+      environmentLighting: { intensityExponent: runtime2.environmentLighting.intensityExponent },
+      debug: { modelView: runtime2.debug.modelView },
+      hostFunctions: runtime2.hostChannel.functions,
+      controllers: runtime2.input.controllers.all.map((controller) => controller.toJSON()),
       warnings: runtime2.warnings.slice(),
       errors: runtime2.errors.slice(),
       droppedErrors: runtime2.droppedErrors
@@ -23996,7 +25675,9 @@
       uuid: object.geometry.uuid,
       parameters: object.geometry.parameters ? { ...object.geometry.parameters } : null
     } : null;
-    const material = object.material ? materialSnapshot(object.material, runtime2.boundTextureIdFor, null) : null;
+    const material = Array.isArray(object.material) ? object.material.map(
+      (entry2) => entry2 ? materialSnapshot(entry2, runtime2.boundTextureIdFor, null) : null
+    ) : object.material ? materialSnapshot(object.material, runtime2.boundTextureIdFor, null) : null;
     const entry = {
       id,
       name: object.name,
@@ -24029,6 +25710,35 @@
     const kindEntry = entryForKind(kindFor(object));
     if (kindEntry !== null && typeof kindEntry.describe === "function") {
       kindEntry.describe(object, entry, runtime2);
+    }
+    if (object.isAudio === true) {
+      const audio = object.toJSON();
+      audio.playing = object.isPlaying;
+      audio.currentTime = object.currentTime;
+      audio.duration = object.duration;
+      entry.audio = audio;
+    }
+    if (object.isVideoScreen === true) {
+      const video = object.toJSON();
+      video.playing = object.isPlaying;
+      video.currentTime = object.currentTime;
+      video.duration = object.duration;
+      video.error = object.error;
+      entry.video = video;
+    }
+    if (object.characterController !== null && object.characterController !== void 0) {
+      const controller = object.characterController;
+      entry.characterController = controller.toJSON();
+      entry.isOnGround = controller.isOnGround;
+      entry.velocity = [controller.velocity.x, controller.velocity.y, controller.velocity.z];
+    }
+    if (object.isForceField === true) entry.forceField = object.toJSON();
+    if (object.accessibility !== null && object.accessibility !== void 0) {
+      entry.accessibility = accessibilityJSON(object.accessibility);
+    }
+    if (object.isAsset === true) {
+      entry.skeleton = object.skeleton === null || object.skeleton === void 0 ? null : object.skeleton.toJSON();
+      entry.blendShapes = object.blendShapes === null || object.blendShapes === void 0 ? null : object.blendShapes.toJSON();
     }
     if (object.rigidBody) {
       const body = object.rigidBody;
@@ -24075,38 +25785,6 @@
     "global",
     "imperative"
   ];
-
-  // src/runtime/payloads.js
-  function shallowJSONEquals(a, b) {
-    if (a === b) return true;
-    if (!a || !b) return false;
-    const keys = objectKeys(a);
-    if (keys.length !== objectKeys(b).length) return false;
-    for (const key of keys) {
-      const av = a[key];
-      const bv = b[key];
-      if (Array.isArray(av) && Array.isArray(bv)) {
-        if (av.length !== bv.length) return false;
-        for (let i = 0; i < av.length; i += 1) if (av[i] !== bv[i]) return false;
-      } else if (av !== bv) {
-        return false;
-      }
-    }
-    return true;
-  }
-  function copyLightSnapshot(source) {
-    return {
-      type: source.type,
-      color: source.color,
-      intensity: source.intensity,
-      distance: source.distance,
-      decay: source.decay,
-      angle: source.angle,
-      penumbra: source.penumbra,
-      castShadow: source.castShadow,
-      direction: source.direction
-    };
-  }
 
   // src/runtime/diff-object.js
   function diffObject(runtime2, object, parentId, parentDirty, frame, out) {
@@ -24371,7 +26049,26 @@
         snapshot.materialObject = object.material;
       }
       const material = snapshot.materialObject;
-      if (material !== void 0 && material !== null) {
+      if (Array.isArray(material)) {
+        const wanted = materialSlotsWanted(runtime2, object, material);
+        const previous = snapshot.material;
+        let changed2 = !Array.isArray(previous) || previous.length !== wanted;
+        const next = [];
+        for (let i = 0; i < wanted; i += 1) {
+          const entry = material[i < material.length ? i : material.length - 1];
+          if (entry === null || entry === void 0) {
+            next[i] = null;
+          } else {
+            next[i] = entry[MATERIAL_FRAME] === frame ? entry[MATERIAL_PAYLOAD] : runtime2.materialPayload(entry, frame);
+            runtime2.warnMaterial(entry);
+          }
+          if (!changed2 && previous[i] !== next[i]) changed2 = true;
+        }
+        if (changed2) {
+          snapshot.material = next;
+          push(out.object, ["material", id, next]);
+        }
+      } else if (material !== void 0 && material !== null) {
         const next = material[MATERIAL_FRAME] === frame ? material[MATERIAL_PAYLOAD] : runtime2.materialPayload(material, frame);
         if (next !== snapshot.material) {
           if (material[SUBSTITUTED] === "material") {
@@ -24503,6 +26200,11 @@
         }
       }
     }
+    if (snapshot.featureGate !== 0 || (dirty & (DIRTY_FEATURE | DIRTY_MATERIAL)) !== 0) {
+      snapshot.features = featuresFor(object);
+      snapshot.featureGate = snapshot.features | snapshot.emittedFeatures;
+      if (snapshot.featureGate !== 0) diffFeatures(runtime2, object, snapshot, id, out);
+    }
     if (snapshot.hasBody || (dirty & DIRTY_RIGIDBODY) !== 0) {
       const body = object.rigidBody;
       snapshot.hasBody = body !== null;
@@ -24514,15 +26216,99 @@
     }
     return snapshot;
   }
+  function materialSlotsWanted(runtime2, object, materials) {
+    const geometry = object.geometry;
+    const groups = geometry === null || geometry === void 0 ? null : geometry.groups;
+    if (!Array.isArray(groups) || groups.length === 0) return materials.length;
+    let highest = -1;
+    for (let i = 0; i < groups.length; i += 1) {
+      const index = groups[i] === null || groups[i] === void 0 ? 0 : groups[i].materialIndex | 0;
+      if (index > highest) highest = index;
+    }
+    if (highest < materials.length) return materials.length;
+    if (materials.length === 0) {
+      runtime2.warnOnce(
+        `material-groups:${object.uuid}`,
+        `${labelFor(object)} has ${groups.length} geometry groups and no materials; nothing can be drawn for them`
+      );
+      return 0;
+    }
+    runtime2.warnOnce(
+      `material-groups:${object.uuid}`,
+      `${labelFor(object)} has geometry groups asking for ${highest + 1} materials but carries ${materials.length}; the last material was repeated for the rest`
+    );
+    return highest + 1;
+  }
 
   // src/runtime/loading.js
   var DEFAULT_CAPABILITIES = {
     realitykit: {
-      macos: { hands: false, anchors: false, portals: true, particles: true, manipulation: false, hoverEffect: false, shadows: true },
-      visionos: { hands: true, anchors: true, portals: true, particles: true, manipulation: true, hoverEffect: true, shadows: true }
+      macos: {
+        hands: false,
+        anchors: false,
+        portals: true,
+        particles: true,
+        manipulation: false,
+        hoverEffect: false,
+        shadows: true,
+        // 14.14: true only where the consumer implements the feature with effect.
+        audio: true,
+        video: true,
+        camera: true,
+        characterController: true,
+        forceFields: true,
+        skeleton: true,
+        blendShapes: true,
+        shaderGraph: true,
+        sceneUnderstanding: false,
+        controllers: true,
+        hostFunctions: true,
+        accessibility: true
+      },
+      visionos: {
+        hands: true,
+        anchors: true,
+        portals: true,
+        particles: true,
+        manipulation: true,
+        hoverEffect: true,
+        shadows: true,
+        audio: true,
+        video: true,
+        camera: false,
+        characterController: true,
+        forceFields: true,
+        skeleton: true,
+        blendShapes: true,
+        shaderGraph: true,
+        sceneUnderstanding: true,
+        controllers: true,
+        hostFunctions: true,
+        accessibility: true
+      }
     },
     three: {
-      web: { hands: false, anchors: false, portals: true, particles: true, manipulation: true, hoverEffect: false, shadows: true }
+      web: {
+        hands: false,
+        anchors: false,
+        portals: true,
+        particles: true,
+        manipulation: true,
+        hoverEffect: false,
+        shadows: true,
+        audio: true,
+        video: true,
+        camera: true,
+        characterController: true,
+        forceFields: true,
+        skeleton: true,
+        blendShapes: true,
+        shaderGraph: false,
+        sceneUnderstanding: false,
+        controllers: true,
+        hostFunctions: true,
+        accessibility: true
+      }
     }
   };
   var SCRIPT_PARAMETERS = ["require", "module", "exports"];
@@ -24541,9 +26327,12 @@
       capabilities: { ...defaults, ...options.capabilities || {} }
     };
     runtime2.assetRoot = options.assetRoot === void 0 ? "" : String(options.assetRoot);
+    if (options.hostFunctions !== void 0) runtime2.hostChannel.setFunctions(options.hostFunctions);
+    runtime2.previousState = options.previousState === void 0 ? void 0 : options.previousState;
     const namespace2 = runtime2.namespace;
     const moduleObject = { exports: {} };
     const scriptThis = {};
+    scriptThis.on = (name, handler) => runtime2.hostChannel.on(name, handler);
     runtime2.script = scriptThis;
     const requireFn = (name) => {
       if (name === "spatial" || name === "Spatial") return namespace2;
@@ -24629,6 +26418,15 @@
         throw toLoadError(runtime2, error2, lineOffset);
       }
     }
+    if (runtime2.previousState !== void 0 && typeof runtime2.script.scriptChanged === "function") {
+      const previousState = runtime2.previousState;
+      runtime2.previousState = void 0;
+      try {
+        runtime2.script.scriptChanged(previousState);
+      } catch (error2) {
+        throw toLoadError(runtime2, error2, lineOffset);
+      }
+    }
     runtime2.loaded = true;
   }
   function reportLoadFailure(runtime2, error2) {
@@ -24685,6 +26483,7 @@
       const id = runtime2.objectIds.get(node);
       const snapshot = node[SNAPSHOT];
       if (id !== void 0 && snapshot !== void 0) {
+        if (node.isAudio === true) push(runtime2.pendingDestroys, ["audio", id, null]);
         push(runtime2.pendingDestroys, ["destroy", id]);
       }
       if (id !== void 0) {
@@ -24694,6 +26493,7 @@
       if (snapshot !== void 0) runtime2.releaseSnapshot(node, snapshot);
       if (id !== void 0) runtime2.releaseId(id);
       runtime2.extraRoots.delete(node);
+      runtime2.audioObjects.delete(node);
       runtime2.worldFlagged.delete(node);
       runtime2.shearedObjects.delete(node);
       runtime2.invalidTransforms.delete(node);
@@ -24710,6 +26510,361 @@
     return object;
   }
 
+  // src/runtime/resources.js
+  function referenceIdFor(runtime2, object) {
+    if (!object || isDestroyed(object)) return null;
+    return runtime2.idForObject(object);
+  }
+  function allocateId(runtime2) {
+    if (runtime2.freeIds.length > 0) return runtime2.freeIds.pop();
+    if (runtime2.nextId >= MAX_ID) {
+      runtime2.reportOnce({
+        name: "SpatialUnsupportedError",
+        message: `The scene has used every object id below ${MAX_ID}; new objects are not tracked`
+      });
+      return 0;
+    }
+    const id = runtime2.nextId;
+    runtime2.nextId += 1;
+    return id;
+  }
+  function releaseId(runtime2, id) {
+    if (id > 0 && id < MAX_ID) runtime2.freeIds.push(id);
+  }
+  function idForObject(runtime2, object) {
+    let id = runtime2.objectIds.get(object);
+    if (id === void 0) {
+      id = runtime2.allocateId();
+      if (id === 0) return 0;
+      runtime2.objectIds.set(object, id);
+      runtime2.idObjects.set(id, object);
+    }
+    return id;
+  }
+  function canCommand(runtime2, object, feature) {
+    if (!object) return false;
+    if (isDestroyed(object)) {
+      const label2 = object.name ? `"${object.name}"` : object.type;
+      runtime2.warnOnce(
+        `uncreated:${feature}`,
+        `${feature} on ${label2} was dropped: the object is not in the mounted scene`
+      );
+      return false;
+    }
+    if (object[SNAPSHOT] !== void 0) return true;
+    if (isAttached(runtime2, object)) return true;
+    const label = object.name ? `"${object.name}"` : object.type;
+    runtime2.warnOnce(
+      `uncreated:${feature}`,
+      `${feature} on ${label} was dropped: the object is not in the mounted scene`
+    );
+    return false;
+  }
+  function isAttached(runtime2, object) {
+    let node = object;
+    let depth = 0;
+    while (node !== null && node !== void 0 && depth <= MAX_DEPTH) {
+      if (node === runtime2.scene) return true;
+      if (runtime2.extraRoots.has(node)) return true;
+      if (node.parent === null || node.parent === void 0) return node.isScene === true;
+      node = node.parent;
+      depth += 1;
+    }
+    return false;
+  }
+  function objectForId(runtime2, id) {
+    const object = runtime2.idObjects.get(id);
+    return object === void 0 ? null : object;
+  }
+  function textureIdFor(runtime2, texture) {
+    let id = runtime2.textureIds.get(texture);
+    if (id === void 0) {
+      id = runtime2.allocateId();
+      if (id === 0) return 0;
+      runtime2.textureIds.set(texture, id);
+      runtime2.idTextures.set(id, texture);
+      if (texture.disposed !== true) runtime2.textures.add(texture);
+    }
+    return id;
+  }
+  function registerTexture(runtime2, texture) {
+    runtime2.textures.add(texture);
+    runtime2.textureIdFor(texture);
+  }
+  function textureIsReferenced(runtime2, texture, frame) {
+    for (const [object, snapshot] of runtime2.snapshots) {
+      if (snapshot.liveFrame !== frame) continue;
+      const material = snapshot.materialObject;
+      if (material !== null && material !== void 0) {
+        for (let i = 0; i < MATERIAL_MAP_SLOTS.length; i += 1) {
+          if (material[MATERIAL_MAP_SLOTS[i]] === texture) return true;
+        }
+      }
+      if (object.texture === texture) return true;
+    }
+    return false;
+  }
+  function diffTextureReleases(runtime2, frame, cRelease) {
+    if (runtime2.pendingTextureRelease.size === 0) return;
+    for (const texture of Array.from(runtime2.pendingTextureRelease)) {
+      if (textureIsReferenced(runtime2, texture, frame)) continue;
+      runtime2.pendingTextureRelease.delete(texture);
+      const id = runtime2.textureIds.get(texture);
+      if (id === void 0) continue;
+      runtime2.textureIds.delete(texture);
+      runtime2.idTextures.delete(id);
+      runtime2.releaseId(id);
+      cRelease.push(["texture", id, null]);
+    }
+  }
+  function disposeTexture(runtime2, texture) {
+    runtime2.textures.delete(texture);
+    runtime2.textureSnapshots.delete(texture);
+    if (!runtime2.textureIds.has(texture)) return;
+    runtime2.pendingTextureRelease.add(texture);
+  }
+  function jointIdFor(runtime2, joint) {
+    let id = runtime2.jointIds.get(joint);
+    if (id === void 0) {
+      id = runtime2.allocateId();
+      if (id === 0) return 0;
+      runtime2.jointIds.set(joint, id);
+    }
+    return id;
+  }
+  function diffTextures(runtime2, cTexture) {
+    for (const texture of runtime2.textures) {
+      const id = runtime2.textureIdFor(texture);
+      const next = textureSnapshot(texture, runtime2.boundResolveUrl);
+      const previous = runtime2.textureSnapshots.get(texture);
+      if (previous === void 0 || !textureSnapshotEquals(previous, next) || texture.needsUpdate) {
+        texture.needsUpdate = false;
+        runtime2.textureSnapshots.set(texture, next);
+        cTexture.push(["texture", id, next]);
+      }
+    }
+  }
+  function diffWorlds(runtime2, frame, framePortals, cWorld) {
+    const next = runtime2.worldScratch;
+    next.clear();
+    for (let i = 0; i < framePortals.length; i += 1) {
+      const world = framePortals[i].world;
+      if (world) next.add(world);
+    }
+    for (const world of next) {
+      const snapshot = world[SNAPSHOT];
+      if (snapshot === void 0 || snapshot.liveFrame !== frame || snapshot.world) continue;
+      snapshot.world = true;
+      cWorld.push(["world", snapshot.id, true]);
+    }
+    for (const world of runtime2.worldFlagged) {
+      if (next.has(world)) continue;
+      const snapshot = world[SNAPSHOT];
+      if (snapshot === void 0 || !snapshot.world) continue;
+      snapshot.world = false;
+      cWorld.push(["world", snapshot.id, false]);
+    }
+    runtime2.worldScratch = runtime2.worldFlagged;
+    runtime2.worldFlagged = next;
+  }
+  function diffPortals(runtime2, frame, framePortals, cPortal) {
+    for (let i = 0; i < framePortals.length; i += 1) {
+      const portal = framePortals[i];
+      const snapshot = portal[SNAPSHOT];
+      const world = portal.world;
+      if (world !== null && (world[SNAPSHOT] === void 0 || world[SNAPSHOT].liveFrame !== frame)) {
+        runtime2.warnOnce(
+          `portal-world:${portal.uuid}`,
+          `Portal ${portal.name ? `"${portal.name}"` : portal.type} has a world group that is not in the mounted scene; add it to the scene for the portal to render`
+        );
+        continue;
+      }
+      const next = portal.toJSON(runtime2.boundReferenceIdFor);
+      if (!portalJSONEquals(snapshot.portal, next)) {
+        snapshot.portal = next;
+        cPortal.push(["portal", snapshot.id, next]);
+      }
+    }
+  }
+  function diffJoints(runtime2, cJoint) {
+    const joints = runtime2.physics.joints;
+    if (joints.length === 0 && runtime2.jointSnapshots.size === 0) return;
+    const live = new Set(joints);
+    for (const joint of live) {
+      const id = runtime2.jointIdFor(joint);
+      const next = joint.toJSON();
+      const previous = runtime2.jointSnapshots.get(joint);
+      if (previous === void 0 || !jointJSONEquals(previous, next)) {
+        runtime2.jointSnapshots.set(joint, next);
+        cJoint.push(["joint", id, next]);
+      }
+    }
+    for (const joint of Array.from(runtime2.jointSnapshots.keys())) {
+      if (live.has(joint)) continue;
+      runtime2.jointSnapshots.delete(joint);
+      cJoint.push(["joint", runtime2.jointIdFor(joint), null]);
+    }
+  }
+
+  // src/skeleton.js
+  var Skeleton2 = class {
+    constructor(object, names) {
+      this.object = object;
+      this.joints = [];
+      for (let i = 0; i < names.length && i < MAX_SKELETON_JOINTS; i += 1) {
+        if (typeof names[i] === "string") push(this.joints, names[i]);
+      }
+      this._known = new Set(this.joints);
+      this._posed = /* @__PURE__ */ new Map();
+      this._synced = /* @__PURE__ */ new Map();
+      this._tracking = false;
+      this.generation = 0;
+    }
+    /** The joint's current transform: what the consumer reported, else the pose. */
+    getJointTransform(name) {
+      const synced = this._synced.get(name);
+      if (synced !== void 0) {
+        return { position: synced.position.clone(), quaternion: synced.quaternion.clone() };
+      }
+      const posed = this._posed.get(name);
+      if (posed !== void 0) {
+        return { position: posed.position.clone(), quaternion: posed.quaternion.clone() };
+      }
+      return null;
+    }
+    setJointRotation(name, quaternion) {
+      const pose = this._pose(name, "setJointRotation");
+      if (pose === null) return this;
+      pose.quaternion.set(quaternion.x, quaternion.y, quaternion.z, quaternion.w);
+      this._changed();
+      return this;
+    }
+    setJointPosition(name, position) {
+      const pose = this._pose(name, "setJointPosition");
+      if (pose === null) return this;
+      pose.position.set(position.x, position.y, position.z);
+      this._changed();
+      return this;
+    }
+    /** Drops every script pose; the asset returns to its authored rest pose. */
+    reset() {
+      if (this._posed.size === 0) return this;
+      this._posed.clear();
+      this._changed();
+      return this;
+    }
+    /** Asks the consumer to report joint transforms through syncSkeleton. */
+    track(enabled) {
+      const next = enabled !== false;
+      if (next === this._tracking) return this;
+      this._tracking = next;
+      this._changed();
+      return this;
+    }
+    get tracking() {
+      return this._tracking;
+    }
+    toJSON() {
+      const joints = {};
+      for (const [name, pose] of this._posed) {
+        joints[name] = [
+          pose.position.x,
+          pose.position.y,
+          pose.position.z,
+          pose.quaternion.x,
+          pose.quaternion.y,
+          pose.quaternion.z,
+          pose.quaternion.w
+        ];
+      }
+      return { joints, track: this._tracking };
+    }
+    /** Consumer to core: the transforms the rig actually has right now. */
+    _sync(joints) {
+      if (joints === null || typeof joints !== "object") return;
+      for (const name of Object.keys(joints)) {
+        if (!this._known.has(name)) continue;
+        const value = joints[name];
+        if (!value || value.length < 7) continue;
+        let record = this._synced.get(name);
+        if (record === void 0) {
+          record = { position: new Vector3(), quaternion: new Quaternion() };
+          this._synced.set(name, record);
+        }
+        record.position.set(value[0], value[1], value[2]);
+        record.quaternion.set(value[3], value[4], value[5], value[6]);
+      }
+    }
+    _pose(name, what) {
+      if (!this._known.has(name)) {
+        const runtime2 = hostOf(this.object);
+        if (runtime2) {
+          runtime2.warnOnce(
+            `skeleton-joint:${name}`,
+            `Skeleton.${what} was given "${name}", which this asset has no joint for; it was ignored`
+          );
+        }
+        return null;
+      }
+      let pose = this._posed.get(name);
+      if (pose === void 0) {
+        const known = this._synced.get(name);
+        pose = {
+          position: known === void 0 ? new Vector3() : known.position.clone(),
+          quaternion: known === void 0 ? new Quaternion() : known.quaternion.clone()
+        };
+        this._posed.set(name, pose);
+      }
+      return pose;
+    }
+    _changed() {
+      this.generation += 1;
+      if (this.object !== null) this.object[DIRTY] = this.object[DIRTY] | 0 | DIRTY_FEATURE;
+    }
+  };
+  var BlendShapes = class {
+    constructor(object, names) {
+      this.object = object;
+      this.names = [];
+      for (let i = 0; i < names.length && i < MAX_BLEND_SHAPES; i += 1) {
+        if (typeof names[i] === "string") push(this.names, names[i]);
+      }
+      this._known = new Set(this.names);
+      this._weights = /* @__PURE__ */ new Map();
+      this.generation = 0;
+    }
+    get(name) {
+      const weight = this._weights.get(name);
+      return weight === void 0 ? 0 : weight;
+    }
+    set(name, weight) {
+      if (!this._known.has(name)) {
+        const runtime2 = hostOf(this.object);
+        if (runtime2) {
+          runtime2.warnOnce(
+            `blend-shape:${name}`,
+            `BlendShapes.set was given "${name}", which this asset has no blend shape for; it was ignored`
+          );
+        }
+        return this;
+      }
+      const value = clamp2(weight, 0, 1, 0);
+      if (this._weights.get(name) === value) return this;
+      this._weights.set(name, value);
+      this.generation += 1;
+      if (this.object !== null) this.object[DIRTY] = this.object[DIRTY] | 0 | DIRTY_FEATURE;
+      return this;
+    }
+    toJSON() {
+      const out = {};
+      for (const [name, weight] of this._weights) out[name] = weight;
+      return out;
+    }
+  };
+  function hostOf() {
+    return host();
+  }
+
   // src/runtime/frame.js
   var syncMatrix = new Matrix4();
   var syncLocal = new Matrix4();
@@ -24719,15 +26874,50 @@
   var syncScratch = new Float64Array(10);
   function tick(runtime2, deltaTime) {
     if (runtime2.disposed) return [];
+    if (runtime2.active === false) return [];
     const dt = Number.isFinite(deltaTime) ? deltaTime : 0;
     runtime2.time.delta = dt;
     runtime2.time.elapsed += dt;
     runtime2.time.frame += 1;
+    promoteDeferredCommands(runtime2);
     applySync(runtime2);
+    applyMediaSync(runtime2);
     applyInputAndEvents(runtime2);
     runtime2.timers.run(runtime2.time.elapsed, (error2) => runtime2.reportError(error2));
     runCallbacks(runtime2, dt);
     return runtime2.flush();
+  }
+  function promoteDeferredCommands(runtime2) {
+    const deferred = runtime2.deferredCommands;
+    if (deferred.length === 0) return;
+    const frame = runtime2.time.frame;
+    const kept = [];
+    for (let i = 0; i < deferred.length; i += 1) {
+      const entry = deferred[i];
+      const object = entry.object;
+      const snapshot = object[SNAPSHOT];
+      if (isDestroyed(object) || snapshot === void 0 && !isAttached(runtime2, object)) {
+        runtime2.warnOnce(
+          `uncreated:${entry.command[0]}`,
+          `A ${entry.command[0]} command was dropped: the object is not in the mounted scene`
+        );
+        continue;
+      }
+      if (snapshot === void 0 || snapshot.liveFrame >= frame) {
+        entry.waited = (entry.waited | 0) + 1;
+        if (entry.waited > MAX_DEFERRED_FRAMES) {
+          runtime2.warnOnce(
+            `uncreated:${entry.command[0]}`,
+            `A ${entry.command[0]} command was dropped: the object is not in the mounted scene`
+          );
+          continue;
+        }
+        push(kept, entry);
+        continue;
+      }
+      push(runtime2.pendingCommands, entry.command);
+    }
+    runtime2.deferredCommands = kept;
   }
   function applySync(runtime2) {
     for (const records of runtime2.pendingSync) {
@@ -24813,6 +27003,54 @@
     }
     runtime2.pendingBodySync.length = 0;
   }
+  function applyMediaSync(runtime2) {
+    for (const records of runtime2.pendingAudioSync) {
+      for (let i = 0; i + 4 <= records.length; i += 4) {
+        const object = runtime2.idObjects.get(records[i]);
+        if (object === void 0 || object.isAudio !== true) continue;
+        const currentTime = records[i + 2];
+        const duration = records[i + 3];
+        if (!Number.isFinite(currentTime) || !Number.isFinite(duration)) {
+          reportSync(runtime2, object, "carried a non-finite playback time");
+          continue;
+        }
+        object._sync(records[i + 1] !== 0, currentTime, duration);
+      }
+    }
+    runtime2.pendingAudioSync.length = 0;
+    for (const records of runtime2.pendingVideoSync) {
+      for (let i = 0; i + 4 <= records.length; i += 4) {
+        const object = runtime2.idObjects.get(records[i]);
+        if (object === void 0 || object.isVideoScreen !== true) continue;
+        const currentTime = records[i + 2];
+        const duration = records[i + 3];
+        if (!Number.isFinite(currentTime) || !Number.isFinite(duration)) {
+          reportSync(runtime2, object, "carried a non-finite playback time");
+          continue;
+        }
+        object._sync(records[i + 1] !== 0, currentTime, duration);
+      }
+    }
+    runtime2.pendingVideoSync.length = 0;
+    for (const records of runtime2.pendingCharacterSync) {
+      for (let i = 0; i + 8 <= records.length; i += 8) {
+        const object = runtime2.idObjects.get(records[i]);
+        const controller = object === void 0 ? null : object.characterController;
+        if (!controller || object[SNAPSHOT] === void 0) continue;
+        let valid = true;
+        for (let k = 1; k <= 3; k += 1) if (!Number.isFinite(records[i + k])) valid = false;
+        for (let k = 5; k <= 7; k += 1) if (!Number.isFinite(records[i + k])) valid = false;
+        if (!valid) {
+          reportSync(runtime2, object, "carried a non-finite character state");
+          continue;
+        }
+        controller._sync(records[i + 4] !== 0, records[i + 5], records[i + 6], records[i + 7]);
+        syncPosition.set(records[i + 1], records[i + 2], records[i + 3]);
+        runtime2.applyWorldPosition(object, syncPosition);
+      }
+    }
+    runtime2.pendingCharacterSync.length = 0;
+  }
   function reportSync(runtime2, object, detail) {
     if (runtime2.syncedObjects.has(object)) return;
     runtime2.syncedObjects.add(object);
@@ -24826,9 +27064,26 @@
     );
   }
   function applyInputAndEvents(runtime2) {
-    runtime2.input.beginFrame(runtime2.pendingInput, runtime2.injectedKeys);
+    runtime2.input.beginFrame(runtime2.pendingInput, runtime2.injectedKeys, runtime2.time.elapsed);
     runtime2.pendingInput = null;
     runtime2.injectedKeys.length = 0;
+    const connections = runtime2.input.connectionEvents;
+    if (connections.length > 0) {
+      for (let i = 0; i < connections.length; i += 1) {
+        const entry = connections[i];
+        if (runtime2.scene === null) continue;
+        try {
+          dispatchBubbling(runtime2.scene, {
+            type: entry.type,
+            target: runtime2.scene,
+            controller: entry.controller
+          });
+        } catch (error2) {
+          runtime2.reportError(error2);
+        }
+      }
+      connections.length = 0;
+    }
     const queue = runtime2.eventQueue;
     runtime2.eventQueue = [];
     for (const entry of queue) {
@@ -24860,15 +27115,86 @@
       }
       return;
     }
-    const object = runtime2.idObjects.get(id);
+    if (type === "hostResult") {
+      runtime2.hostChannel.settle(id, entry.payload);
+      return;
+    }
+    if (type === "fetchResult") {
+      runtime2.fetchChannel.settle(id, entry.payload);
+      return;
+    }
+    if (type === "audioState") {
+      const state2 = entry.payload ? entry.payload.state : void 0;
+      if (state2 === "running" || state2 === "suspended") runtime2.audio._state = state2;
+      return;
+    }
+    const object = id === 0 ? runtime2.scene : runtime2.idObjects.get(id);
     if (!object) return;
     const payload = hydratePayload(runtime2, entry.payload);
+    if (type === "controllerconnected" || type === "controllerdisconnected") {
+      const controllers = runtime2.input.controllers;
+      const controllerId = typeof payload.id === "string" && payload.id.length > 0 ? payload.id : "controller-0";
+      let controller = controllers.get(controllerId);
+      if (type === "controllerconnected") {
+        if (controller === null) {
+          controller = new Controller(controllerId);
+          if (typeof payload.name === "string") controller.name = payload.name;
+          controllers._byId.set(controllerId, controller);
+          const all = [];
+          for (const entryController of controllers._byId.values()) push(all, entryController);
+          controllers.all = all;
+        }
+      } else if (controller !== null) {
+        controllers._byId.delete(controllerId);
+        const all = [];
+        for (const entryController of controllers._byId.values()) push(all, entryController);
+        controllers.all = all;
+        if (controllers.current === controller) controllers.current = null;
+      }
+      if (controller !== null) payload.controller = controller;
+    }
+    if (type === "ended" && object.isAudio === true) {
+      object._playing = false;
+      if (typeof object.onEnded === "function") {
+        try {
+          object.onEnded();
+        } catch (error2) {
+          runtime2.reportError(error2);
+        }
+      }
+    }
+    if (object.isVideoScreen === true) {
+      if (type === "loaded") {
+        const width = entry.payload ? entry.payload.width : void 0;
+        const height = entry.payload ? entry.payload.height : void 0;
+        if (Number.isFinite(width) && Number.isFinite(height) && height !== 0) {
+          object._applyAspect(width / height);
+        }
+        if (Number.isFinite(entry.payload && entry.payload.duration)) {
+          object._duration = entry.payload.duration;
+        }
+      } else if (type === "ended") {
+        object._playing = false;
+      } else if (type === "error") {
+        object.error = entry.payload && entry.payload.message || "the video failed to load";
+      }
+    }
     if (type === "anchored" || type === "unanchored") {
       if (object instanceof Anchor) object.isAnchored = type === "anchored";
     }
     if (type === "assetLoaded" && object instanceof AssetGroup) {
       object.loaded = true;
       object.animations = Array.isArray(payload.animations) ? payload.animations.slice() : [];
+      const joints = entry.payload ? entry.payload.joints : void 0;
+      if (Array.isArray(joints) && joints.length > 0) {
+        object.skeleton = new Skeleton2(object, joints);
+        object[DIRTY] = object[DIRTY] | 0 | DIRTY_FEATURE;
+      }
+      const shapes = entry.payload ? entry.payload.blendShapes : void 0;
+      if (Array.isArray(shapes) && shapes.length > 0) {
+        object.blendShapes = new BlendShapes(object, shapes);
+        object[DIRTY] = object[DIRTY] | 0 | DIRTY_FEATURE;
+      }
       if (Array.isArray(entry.payload.boundingBox) && entry.payload.boundingBox.length >= 6) {
         const b = entry.payload.boundingBox;
         object.boundingBox.min.set(b[0], b[1], b[2]);
@@ -25059,184 +27385,79 @@
     return parts.join(" ");
   }
 
-  // src/runtime/resources.js
-  function referenceIdFor(runtime2, object) {
-    if (!object || isDestroyed(object)) return null;
-    return runtime2.idForObject(object);
-  }
-  function allocateId(runtime2) {
-    if (runtime2.freeIds.length > 0) return runtime2.freeIds.pop();
-    if (runtime2.nextId >= MAX_ID) {
-      runtime2.reportOnce({
-        name: "SpatialUnsupportedError",
-        message: `The scene has used every object id below ${MAX_ID}; new objects are not tracked`
-      });
-      return 0;
+  // src/runtime/scene-state.js
+  var DEBUG_MODEL_VIEWS = ["normal", "uv", "baseColor", "roughness", "metallic", "occlusion", "emissive"];
+  var WEB_DEBUG_MODEL_VIEWS = ["normal", "uv"];
+  function diffSceneState(runtime2, out) {
+    const mixer = runtime2.audio;
+    if (mixer._revision !== runtime2.audioRevision) {
+      runtime2.audioRevision = mixer._revision;
+      push(out, ["audioMixer", 0, mixer.toJSON()]);
     }
-    const id = runtime2.nextId;
-    runtime2.nextId += 1;
-    return id;
-  }
-  function releaseId(runtime2, id) {
-    if (id > 0 && id < MAX_ID) runtime2.freeIds.push(id);
-  }
-  function idForObject(runtime2, object) {
-    let id = runtime2.objectIds.get(object);
-    if (id === void 0) {
-      id = runtime2.allocateId();
-      if (id === 0) return 0;
-      runtime2.objectIds.set(object, id);
-      runtime2.idObjects.set(id, object);
-    }
-    return id;
-  }
-  function canCommand(runtime2, object, feature) {
-    if (!object) return false;
-    if (isDestroyed(object) || object[SNAPSHOT] === void 0) {
-      const label = object.name ? `"${object.name}"` : object.type;
-      runtime2.warnOnce(
-        `uncreated:${feature}`,
-        `${feature} on ${label} was dropped: the object is not in the mounted scene`
-      );
-      return false;
-    }
-    return true;
-  }
-  function objectForId(runtime2, id) {
-    const object = runtime2.idObjects.get(id);
-    return object === void 0 ? null : object;
-  }
-  function textureIdFor(runtime2, texture) {
-    let id = runtime2.textureIds.get(texture);
-    if (id === void 0) {
-      id = runtime2.allocateId();
-      if (id === 0) return 0;
-      runtime2.textureIds.set(texture, id);
-      runtime2.idTextures.set(id, texture);
-      if (texture.disposed !== true) runtime2.textures.add(texture);
-    }
-    return id;
-  }
-  function registerTexture(runtime2, texture) {
-    runtime2.textures.add(texture);
-    runtime2.textureIdFor(texture);
-  }
-  function textureIsReferenced(runtime2, texture, frame) {
-    for (const [object, snapshot] of runtime2.snapshots) {
-      if (snapshot.liveFrame !== frame) continue;
-      const material = snapshot.materialObject;
-      if (material !== null && material !== void 0) {
-        for (let i = 0; i < MATERIAL_MAP_SLOTS.length; i += 1) {
-          if (material[MATERIAL_MAP_SLOTS[i]] === texture) return true;
-        }
-      }
-      if (object.texture === texture) return true;
-    }
-    return false;
-  }
-  function diffTextureReleases(runtime2, frame, cRelease) {
-    if (runtime2.pendingTextureRelease.size === 0) return;
-    for (const texture of Array.from(runtime2.pendingTextureRelease)) {
-      if (textureIsReferenced(runtime2, texture, frame)) continue;
-      runtime2.pendingTextureRelease.delete(texture);
-      const id = runtime2.textureIds.get(texture);
-      if (id === void 0) continue;
-      runtime2.textureIds.delete(texture);
-      runtime2.idTextures.delete(id);
-      runtime2.releaseId(id);
-      cRelease.push(["texture", id, null]);
-    }
-  }
-  function disposeTexture(runtime2, texture) {
-    runtime2.textures.delete(texture);
-    runtime2.textureSnapshots.delete(texture);
-    if (!runtime2.textureIds.has(texture)) return;
-    runtime2.pendingTextureRelease.add(texture);
-  }
-  function jointIdFor(runtime2, joint) {
-    let id = runtime2.jointIds.get(joint);
-    if (id === void 0) {
-      id = runtime2.allocateId();
-      if (id === 0) return 0;
-      runtime2.jointIds.set(joint, id);
-    }
-    return id;
-  }
-  function diffTextures(runtime2, cTexture) {
-    for (const texture of runtime2.textures) {
-      const id = runtime2.textureIdFor(texture);
-      const next = textureSnapshot(texture, runtime2.boundResolveUrl);
-      const previous = runtime2.textureSnapshots.get(texture);
-      if (previous === void 0 || !textureSnapshotEquals(previous, next) || texture.needsUpdate) {
-        texture.needsUpdate = false;
-        runtime2.textureSnapshots.set(texture, next);
-        cTexture.push(["texture", id, next]);
+    if (runtime2.camera !== null || runtime2.cameraSnapshot !== null) {
+      const camera = runtime2.camera;
+      const next = cameraPayload(camera, runtime2.cameraScratch);
+      const id = camera === null ? 0 : runtime2.idForObject(camera);
+      if (id !== runtime2.cameraId || !cameraPayloadEquals(runtime2.cameraSnapshot, next)) {
+        runtime2.cameraId = id;
+        runtime2.cameraSnapshot = copyCameraPayload(next);
+        push(out, ["camera", id, runtime2.cameraSnapshot]);
       }
     }
-  }
-  function diffWorlds(runtime2, frame, framePortals, cWorld) {
-    const next = runtime2.worldScratch;
-    next.clear();
-    for (let i = 0; i < framePortals.length; i += 1) {
-      const world = framePortals[i].world;
-      if (world) next.add(world);
-    }
-    for (const world of next) {
-      const snapshot = world[SNAPSHOT];
-      if (snapshot === void 0 || snapshot.liveFrame !== frame || snapshot.world) continue;
-      snapshot.world = true;
-      cWorld.push(["world", snapshot.id, true]);
-    }
-    for (const world of runtime2.worldFlagged) {
-      if (next.has(world)) continue;
-      const snapshot = world[SNAPSHOT];
-      if (snapshot === void 0 || !snapshot.world) continue;
-      snapshot.world = false;
-      cWorld.push(["world", snapshot.id, false]);
-    }
-    runtime2.worldScratch = runtime2.worldFlagged;
-    runtime2.worldFlagged = next;
-  }
-  function diffPortals(runtime2, frame, framePortals, cPortal) {
-    for (let i = 0; i < framePortals.length; i += 1) {
-      const portal = framePortals[i];
-      const snapshot = portal[SNAPSHOT];
-      const world = portal.world;
-      if (world !== null && (world[SNAPSHOT] === void 0 || world[SNAPSHOT].liveFrame !== frame)) {
+    const understanding = runtime2.sceneUnderstanding;
+    const previousUnderstanding = runtime2.sceneUnderstandingSnapshot;
+    if (previousUnderstanding === null ? understanding.collision || understanding.occlusion || understanding.physics || understanding.shadows : previousUnderstanding.collision !== understanding.collision || previousUnderstanding.occlusion !== understanding.occlusion || previousUnderstanding.physics !== understanding.physics || previousUnderstanding.shadows !== understanding.shadows) {
+      const payload = {
+        collision: understanding.collision === true,
+        occlusion: understanding.occlusion === true,
+        physics: understanding.physics === true,
+        shadows: understanding.shadows === true
+      };
+      runtime2.sceneUnderstandingSnapshot = payload;
+      if (runtime2.env.platform !== "visionos") {
         runtime2.warnOnce(
-          `portal-world:${portal.uuid}`,
-          `Portal ${portal.name ? `"${portal.name}"` : portal.type} has a world group that is not in the mounted scene; add it to the scene for the portal to render`
+          "scene-understanding",
+          "Spatial.sceneUnderstanding has no effect outside visionOS; the state is kept and reported"
         );
-        continue;
       }
-      const next = portal.toJSON(runtime2.boundReferenceIdFor);
-      if (!portalJSONEquals(snapshot.portal, next)) {
-        snapshot.portal = next;
-        cPortal.push(["portal", snapshot.id, next]);
-      }
+      push(out, ["sceneUnderstanding", 0, payload]);
     }
-  }
-  function diffJoints(runtime2, cJoint) {
-    const joints = runtime2.physics.joints;
-    if (joints.length === 0 && runtime2.jointSnapshots.size === 0) return;
-    const live = new Set(joints);
-    for (const joint of live) {
-      const id = runtime2.jointIdFor(joint);
-      const next = joint.toJSON();
-      const previous = runtime2.jointSnapshots.get(joint);
-      if (previous === void 0 || !jointJSONEquals(previous, next)) {
-        runtime2.jointSnapshots.set(joint, next);
-        cJoint.push(["joint", id, next]);
-      }
+    const adaptive = runtime2.render.adaptiveResolution === true;
+    const exponent = clamp2(runtime2.environmentLighting.intensityExponent, 0, 16, 1);
+    let debugModelView = runtime2.debug.modelView === void 0 ? null : runtime2.debug.modelView;
+    if (debugModelView !== null && DEBUG_MODEL_VIEWS.indexOf(debugModelView) === -1) {
+      runtime2.warnOnce(
+        `debug-model-view:${String(debugModelView)}`,
+        `Spatial.debug.modelView must be one of ${DEBUG_MODEL_VIEWS.join(", ")} or null; "${String(debugModelView)}" was ignored`
+      );
+      debugModelView = null;
     }
-    for (const joint of Array.from(runtime2.jointSnapshots.keys())) {
-      if (live.has(joint)) continue;
-      runtime2.jointSnapshots.delete(joint);
-      cJoint.push(["joint", runtime2.jointIdFor(joint), null]);
+    if (debugModelView !== null && runtime2.env.backend === "three" && WEB_DEBUG_MODEL_VIEWS.indexOf(debugModelView) === -1) {
+      runtime2.warnOnce(
+        "debug-model-view-web",
+        `The three.js backend has no debug material for "${debugModelView}"; the object renders normally`
+      );
+    }
+    const previousOptions = runtime2.renderOptionsSnapshot;
+    if (previousOptions === null ? adaptive || exponent !== 1 || debugModelView !== null : previousOptions.adaptiveResolution !== adaptive || previousOptions.environmentIntensityExponent !== exponent || previousOptions.debugModelView !== debugModelView) {
+      const payload = {
+        adaptiveResolution: adaptive,
+        environmentIntensityExponent: exponent,
+        debugModelView
+      };
+      runtime2.renderOptionsSnapshot = payload;
+      if (adaptive && runtime2.env.platform !== "visionos") {
+        runtime2.warnOnce(
+          "adaptive-resolution",
+          "Spatial.render.adaptiveResolution has no effect outside visionOS; the state is kept and reported"
+        );
+      }
+      push(out, ["renderOptions", 0, payload]);
     }
   }
 
   // src/runtime/flush.js
+  var SCENE_LEVEL_OPCODES = /* @__PURE__ */ new Set(["hostEvent", "hostCall", "fetch", "controllerRumble"]);
   function flush(runtime2) {
     try {
       return flushInner(runtime2);
@@ -25311,12 +27532,14 @@
         push(out.global, ["environment", 0, environmentJSON]);
       }
     }
+    diffSceneState(runtime2, out.global);
     let imperative = runtime2.pendingCommands;
     runtime2.pendingCommands = [];
     if (out.destroy.length > 0 && imperative.length > 0) {
       const destroyed = /* @__PURE__ */ new Set();
       for (let i = 0; i < out.destroy.length; i += 1) destroyed.add(out.destroy[i][1]);
       imperative = imperative.filter((command) => {
+        if (SCENE_LEVEL_OPCODES.has(command[0])) return true;
         if (!destroyed.has(command[1])) return true;
         runtime2.warnOnce(
           `imperative-destroyed:${command[0]}`,
@@ -25434,7 +27657,7 @@
           dirtyFlags = runtime2.walkDirty;
         }
         stack[top] = root;
-        parents[top] = -1;
+        parents[top] = 0;
         dirtyFlags[top] = 0;
         top += 1;
         if (top > highWater) highWater = top;
@@ -25466,22 +27689,426 @@
     return size;
   }
 
-  // src/runtime.js
+  // src/urls.js
+  var SCHEME = /^([a-zA-Z][a-zA-Z0-9+.-]*:)/;
+  function normalizeSegments(path) {
+    const parts = path.split("/");
+    const out = [];
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = parts[i];
+      if (part === "" || part === ".") continue;
+      if (part === "..") {
+        if (out.length === 0) return null;
+        out.pop();
+        continue;
+      }
+      push(out, part);
+    }
+    return out.join("/");
+  }
+  function resolveUrl(raw, assetRoot) {
+    if (typeof raw !== "string" || raw.length === 0) return { url: raw, warning: null };
+    const match = SCHEME.exec(raw);
+    if (match !== null) {
+      const scheme = match[1].toLowerCase();
+      if (ALLOWED_URL_SCHEMES.indexOf(scheme) === -1) {
+        return {
+          url: null,
+          warning: `The url scheme "${scheme}" is not allowed; "${short(raw)}" was dropped`
+        };
+      }
+      if (scheme === "data:" || scheme === "blob:") return { url: raw, warning: null };
+      const rest = raw.slice(scheme.length);
+      if (!rest.startsWith("//")) {
+        const contained3 = normalizeSegments(rest);
+        if (contained3 === null) {
+          return { url: null, warning: `"${short(raw)}" escapes its root and was dropped` };
+        }
+        return { url: contained3 === rest ? raw : `${scheme}${contained3}`, warning: null };
+      }
+      const authorityEnd = indexOfAny(rest, 2, "/?#");
+      const authority = rest.slice(2, authorityEnd);
+      const tail = rest.slice(authorityEnd);
+      const at = authority.lastIndexOf("@");
+      let warning = null;
+      let host2 = authority;
+      if (at !== -1) {
+        host2 = authority.slice(at + 1);
+        warning = `Credentials were stripped from "${short(raw)}" before it reached the consumer`;
+      }
+      const pathEnd = indexOfAny(tail, 0, "?#");
+      const path = tail.slice(0, pathEnd);
+      const query = tail.slice(pathEnd);
+      const contained2 = normalizeSegments(path);
+      if (contained2 === null) {
+        return { url: null, warning: `"${short(raw)}" escapes its root and was dropped` };
+      }
+      const rebuilt = `${scheme}//${host2}${contained2.length > 0 ? `/${contained2}` : path === "/" ? "/" : ""}${query}`;
+      if (scheme === "file:" && assetRoot) {
+        const root2 = normalizeSegments(assetRoot);
+        if (root2 !== null && root2.length > 0 && !contained2.startsWith(root2)) {
+          return {
+            url: null,
+            warning: `"${short(raw)}" is outside the asset root and was dropped`
+          };
+        }
+      }
+      return { url: rebuilt, warning };
+    }
+    const absoluteRoot = typeof assetRoot === "string" && assetRoot.startsWith("/");
+    const joined = assetRoot ? `${trimSlashes(assetRoot)}/${raw}` : raw;
+    const contained = normalizeSegments(joined);
+    if (contained === null) {
+      return { url: null, warning: `"${short(raw)}" escapes the asset root and was dropped` };
+    }
+    const root = assetRoot ? normalizeSegments(assetRoot) : null;
+    if (root !== null && root.length > 0 && !contained.startsWith(root)) {
+      return { url: null, warning: `"${short(raw)}" escapes the asset root and was dropped` };
+    }
+    return { url: absoluteRoot ? `/${contained}` : contained, warning: null };
+  }
+  function indexOfAny(text, from, characters) {
+    for (let i = from; i < text.length; i += 1) {
+      if (characters.indexOf(text[i]) !== -1) return i;
+    }
+    return text.length;
+  }
+  function trimSlashes(text) {
+    let start = 0;
+    let end = text.length;
+    while (start < end && text[start] === "/") start += 1;
+    while (end > start && text[end - 1] === "/") end -= 1;
+    return text.slice(start, end);
+  }
+  function short(url) {
+    return url.length > 80 ? `${cut(url, 80)}\u2026` : url;
+  }
+
+  // src/runtime/queries.js
   var ASSET_KEYS = ["usdz", "reality", "glb", "gltf"];
+  function resolveUrl2(runtime2, url) {
+    const result = resolveUrl(url, runtime2.assetRoot);
+    if (result.warning !== null) runtime2.warnOnce(`url:${url}`, result.warning);
+    return result.url;
+  }
+  function environmentPayload(runtime2) {
+    const environment = runtime2.environment;
+    if (!environment || typeof environment.toJSON !== "function") return null;
+    const json = environment.toJSON();
+    if (json === null || json === void 0) return null;
+    const url = runtime2.resolveUrl(json.url);
+    if (url === null) {
+      runtime2.warnOnce(
+        `environment-url:${json.url}`,
+        "Spatial.environment was dropped because its url was refused"
+      );
+      return null;
+    }
+    if (url === json.url) return json;
+    json.url = url;
+    return json;
+  }
+  function raycast(runtime2, origin, direction, options = {}) {
+    const maxDistance = options.maxDistance === void 0 ? Infinity : options.maxDistance;
+    const recursive = options.recursive !== false;
+    const native = globalThis.__spatialNative;
+    if (native && typeof native.raycast === "function") {
+      const flat = native.raycast(
+        origin.x,
+        origin.y,
+        origin.z,
+        direction.x,
+        direction.y,
+        direction.z,
+        Number.isFinite(maxDistance) ? maxDistance : -1,
+        recursive
+      );
+      const hits = [];
+      if (flat && flat.length) {
+        for (let i = 0; i + 8 <= flat.length; i += 8) {
+          const understanding = flat[i] === 0;
+          const object = understanding ? null : runtime2.objectForId(flat[i]);
+          if (!understanding && !object) continue;
+          push(hits, {
+            object,
+            point: new Vector3(flat[i + 1], flat[i + 2], flat[i + 3]),
+            normal: new Vector3(flat[i + 4], flat[i + 5], flat[i + 6]),
+            distance: flat[i + 7],
+            sceneUnderstanding: understanding
+          });
+        }
+      }
+      hits.sort((a, b) => a.distance - b.distance);
+      return hits;
+    }
+    if (!runtime2.scene) return [];
+    refreshWorldMatrices(runtime2.scene, (object, error2) => runtime2.skipObject(object, error2));
+    runtime2.raycaster.set(origin, direction.clone().normalize());
+    runtime2.raycaster.near = 0;
+    runtime2.raycaster.far = Number.isFinite(maxDistance) ? maxDistance : Infinity;
+    const targets = [];
+    if (recursive) {
+      runtime2.scene.traverseVisible((object) => {
+        if (object.isMesh === true) push(targets, object);
+      });
+    } else {
+      const children = runtime2.scene.children;
+      for (let i = 0; i < children.length; i += 1) {
+        if (children[i].isMesh === true && children[i].visible !== false) push(targets, children[i]);
+      }
+    }
+    const intersections = runtime2.raycaster.intersectObjects(targets, false);
+    const results = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const hit of intersections) {
+      if (seen.has(hit.object)) continue;
+      seen.add(hit.object);
+      const normal = new Vector3(0, 0, 1);
+      if (hit.normal) normal.copy(hit.normal);
+      else if (hit.face) worldNormal(hit.object, hit.face.normal, normal);
+      push(results, {
+        object: hit.object,
+        point: hit.point.clone(),
+        normal,
+        distance: hit.distance,
+        sceneUnderstanding: false
+      });
+    }
+    results.sort((a, b) => a.distance - b.distance);
+    return results;
+  }
+  function loadAsset(runtime2, urls = {}) {
+    const contained = {};
+    const refused = [];
+    for (let i = 0; i < ASSET_KEYS.length; i += 1) {
+      const key = ASSET_KEYS[i];
+      const raw = urls[key];
+      if (raw === void 0 || raw === null || raw === "") continue;
+      const url = runtime2.resolveUrl(raw);
+      if (url === null) push(refused, key);
+      else contained[key] = url;
+    }
+    const group = new AssetGroup(contained);
+    const backend = runtime2.env.backend;
+    const needed = backend === "realitykit" ? ["usdz", "reality"] : ["glb", "gltf"];
+    if (!needed.some((key) => group.urls[key])) {
+      const reason = refused.length > 0 ? `loadAsset refused ${refused.join(" and ")}: the url leaves the asset root or uses a scheme that is not allowed` : `loadAsset needs one of ${needed.join(" or ")} for the ${backend} backend`;
+      return Promise.reject(new SpatialUnsupportedError(reason, "loadAsset", group));
+    }
+    runtime2.extraRoots.add(group);
+    const promise = new Promise((resolve, reject) => {
+      group._resolve = resolve;
+      group._reject = reject;
+    });
+    group.promise = promise;
+    return promise;
+  }
+
+  // src/runtime/inactive.js
+  var INACTIVE_CHANNELS = {
+    sync: "pendingSync",
+    syncBodies: "pendingBodySync",
+    syncAudio: "pendingAudioSync",
+    syncVideo: "pendingVideoSync",
+    syncCharacter: "pendingCharacterSync"
+  };
+  function acceptSync(runtime2, channel, pending, records, stride) {
+    if (!records || !records.length) return;
+    if (runtime2.active !== false) {
+      push(pending, records);
+      return;
+    }
+    let latest = runtime2.inactiveSync.get(channel);
+    if (latest === void 0) {
+      latest = { stride, byId: /* @__PURE__ */ new Map() };
+      runtime2.inactiveSync.set(channel, latest);
+    }
+    for (let i = 0; i + stride <= records.length; i += stride) {
+      const id = records[i];
+      let slot = latest.byId.get(id);
+      if (slot === void 0) {
+        if (latest.byId.size >= MAX_INACTIVE_SYNC_OBJECTS) {
+          runtime2.warnOnce(
+            `inactive-sync:${channel}`,
+            `More than ${MAX_INACTIVE_SYNC_OBJECTS} objects were synced while the scene was inactive; further ${channel} records were dropped`
+          );
+          break;
+        }
+        slot = new Float64Array(stride);
+        latest.byId.set(id, slot);
+      }
+      for (let k = 0; k < stride; k += 1) slot[k] = records[i + k];
+    }
+  }
+  function drainInactiveSync(runtime2) {
+    if (runtime2.inactiveSync.size === 0) return;
+    for (const [channel, latest] of runtime2.inactiveSync) {
+      const stride = latest.stride;
+      const flat = new Float32Array(latest.byId.size * stride);
+      let at = 0;
+      for (const slot of latest.byId.values()) {
+        for (let k = 0; k < stride; k += 1) flat[at + k] = slot[k];
+        at += stride;
+      }
+      if (flat.length === 0) continue;
+      push(runtime2[INACTIVE_CHANNELS[channel]], flat);
+    }
+    runtime2.inactiveSync.clear();
+  }
+
+  // src/runtime/phase2.js
+  var worldMatrix = new Matrix4();
+  var localPosition = new Vector3();
+  function registerAudio(runtime2, audio) {
+    if (isDestroyed(audio)) return;
+    runtime2.audioObjects.add(audio);
+    if (audio.parent === null && !runtime2.extraRoots.has(audio)) runtime2.extraRoots.add(audio);
+  }
+  function setCamera(runtime2, value) {
+    if (value === null || value === void 0) {
+      releaseAdoptedCamera(runtime2);
+      runtime2.camera = null;
+      return null;
+    }
+    if (!isCamera(value)) {
+      throw new TypeError("Spatial.camera expects a PerspectiveCamera, an OrthographicCamera or null");
+    }
+    if (runtime2.env.platform === "visionos") {
+      runtime2.warnOnce(
+        "camera-visionos",
+        "On visionOS the user is the camera; Spatial.camera is kept and reported but has no effect"
+      );
+    }
+    if (runtime2.camera !== value) releaseAdoptedCamera(runtime2);
+    runtime2.camera = value;
+    if (value.parent === null && !runtime2.extraRoots.has(value)) {
+      runtime2.extraRoots.add(value);
+      runtime2.cameraAdopted = value;
+    }
+    return value;
+  }
+  function releaseAdoptedCamera(runtime2) {
+    const adopted = runtime2.cameraAdopted;
+    if (adopted === null || adopted === void 0) return;
+    runtime2.cameraAdopted = null;
+    if (adopted.parent === null) runtime2.extraRoots.delete(adopted);
+  }
+  function rayFromPoint(runtime2, x, y) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      throw new TypeError("Spatial.rayFromPoint expects two finite numbers");
+    }
+    if (runtime2.env.platform === "visionos") return null;
+    const native = globalThis.__spatialNative;
+    if (!native || typeof native.rayFromPoint !== "function") {
+      runtime2.warnOnce(
+        "ray-from-point",
+        "Spatial.rayFromPoint needs the consumer's rayFromPoint hook; it returned null"
+      );
+      return null;
+    }
+    let flat;
+    try {
+      flat = native.rayFromPoint(x, y);
+    } catch (error2) {
+      runtime2.reportOnce(error2);
+      return null;
+    }
+    if (!flat || flat.length < 6) return null;
+    for (let i = 0; i < 6; i += 1) if (!Number.isFinite(flat[i])) return null;
+    return {
+      origin: new Vector3(flat[0], flat[1], flat[2]),
+      direction: new Vector3(flat[3], flat[4], flat[5])
+    };
+  }
+  function applyWorldPosition(runtime2, object, world) {
+    const parent = object.parent;
+    if (parent !== null) {
+      parent.updateWorldMatrix(true, false);
+      worldMatrix.copy(parent.matrixWorld).invert();
+      localPosition.copy(world).applyMatrix4(worldMatrix);
+    } else {
+      localPosition.copy(world);
+    }
+    if (!Number.isFinite(localPosition.x) || !Number.isFinite(localPosition.y) || !Number.isFinite(localPosition.z)) {
+      return;
+    }
+    object.position.copy(localPosition);
+    const snapshot = object[SNAPSHOT];
+    if (snapshot === void 0) return;
+    const trs = runtime2.trs;
+    const base = snapshot.slot * 10;
+    trs[base] = localPosition.x;
+    trs[base + 1] = localPosition.y;
+    trs[base + 2] = localPosition.z;
+    object.matrixWorldNeedsUpdate = true;
+    if (object.matrixAutoUpdate) object.updateMatrix();
+    runtime2.storeMatrix(snapshot, object);
+  }
+  function syncSkeleton(runtime2, id, joints) {
+    const object = runtime2.idObjects.get(id);
+    if (object === void 0 || object.skeleton === null || object.skeleton === void 0) return;
+    object.skeleton._sync(joints);
+  }
+  function setActive(runtime2, value) {
+    const next = value !== false;
+    if (next === runtime2.active) return;
+    runtime2.active = next;
+    if (next) runtime2.drainInactiveSync();
+    const script = runtime2.script;
+    const hook = next ? "didActivate" : "willDeactivate";
+    if (script && typeof script[hook] === "function") {
+      try {
+        script[hook]();
+      } catch (error2) {
+        runtime2.reportError(error2);
+      }
+    }
+  }
+  function captureState(runtime2) {
+    const script = runtime2.script;
+    if (!script || script.state === void 0 || script.state === null) return null;
+    const report2 = [];
+    let state2;
+    try {
+      state2 = jsonSafe(script.state, report2);
+    } catch (error2) {
+      runtime2.reportOnce(error2);
+      return null;
+    }
+    if (report2.length > 0) {
+      const named = [];
+      for (let i = 0; i < report2.length && i < 8; i += 1) {
+        push(named, `${report2[i].path} (${report2[i].reason})`);
+      }
+      runtime2.recordWarning(
+        `this.state did not survive JSON unchanged: ${named.join("; ")}` + (report2.length > 8 ? `, and ${report2.length - 8} more` : "")
+      );
+    }
+    let size = 0;
+    try {
+      size = safeStringify(state2).length;
+    } catch (error2) {
+      size = 0;
+    }
+    if (size > MAX_STATE_BYTES) {
+      runtime2.recordWarning(
+        `this.state is ${size} bytes, past the ${MAX_STATE_BYTES} byte limit; no state was preserved`
+      );
+      return null;
+    }
+    return state2;
+  }
+
+  // src/runtime.js
   var AsyncFunction2 = Object.getPrototypeOf(async function asyncProbe2() {
   }).constructor;
-  var trsScratch = new Float64Array(10);
-  var syncMatrix2 = new Matrix4();
-  var syncLocal2 = new Matrix4();
-  var syncPosition2 = new Vector3();
-  var syncQuaternion2 = new Quaternion();
-  var syncScale2 = new Vector3();
-  var syncScratch2 = new Float64Array(10);
   var Runtime = class {
     constructor() {
       installObjectExtensions(Light);
       installMaterialTracking();
       installGeometryTracking(BufferGeometry);
+      installCameraTracking(PerspectiveCamera);
+      installCharacterController();
       this.version = "0.1.0";
       this.reset();
     }
@@ -25525,6 +28152,7 @@
       this.injectedKeys = [];
       this.eventQueue = [];
       this.pendingCommands = [];
+      this.deferredCommands = [];
       this.logQueue = [];
       this.suppressedLogs = 0;
       this.warnings = [];
@@ -25536,6 +28164,33 @@
       this.gravitySnapshot = null;
       this.environment = null;
       this.environmentSnapshot = null;
+      this.audio = new AudioMixer();
+      this.audioRevision = 0;
+      this.camera = null;
+      this.cameraScratch = createCameraScratch();
+      this.cameraSnapshot = null;
+      this.cameraId = 0;
+      this.cameraAdopted = null;
+      this.sceneUnderstanding = { collision: false, occlusion: false, physics: false, shadows: false };
+      this.sceneUnderstandingSnapshot = null;
+      this.render = { adaptiveResolution: false };
+      this.environmentLighting = { intensityExponent: 1 };
+      this.debug = { modelView: null };
+      this.renderOptionsSnapshot = null;
+      if (this.hostChannel === void 0) {
+        this.hostChannel = new HostChannel(this);
+        this.fetchChannel = new FetchChannel(this);
+      } else {
+        this.hostChannel.reset();
+        this.fetchChannel.reset();
+      }
+      this.active = true;
+      this.previousState = void 0;
+      this.pendingAudioSync = [];
+      this.pendingVideoSync = [];
+      this.pendingCharacterSync = [];
+      this.inactiveSync = /* @__PURE__ */ new Map();
+      this.audioObjects = /* @__PURE__ */ new Set();
       this.input = new InputState();
       this.timers = new TimerQueue((key, message) => this.warnOnce(key, message));
       this.time = { delta: 0, elapsed: 0, frame: 0 };
@@ -25605,7 +28260,24 @@
     jointIdFor(joint) {
       return jointIdFor(this, joint);
     }
-    queueCommand(command) {
+    /**
+     * An imperative command for `object`. One issued before the object's first
+     * flush waits for the frame after its `create`, in order, rather than being
+     * dropped: a script that acts on an object it just built is normal, and the
+     * consumer must not be told about an id it has never seen (SPEC 5).
+     */
+    queueCommand(command, object) {
+      if (object !== void 0 && object !== null && object[SNAPSHOT] === void 0) {
+        if (this.deferredCommands.length >= MAX_DEFERRED_COMMANDS) {
+          this.warnOnce(
+            "deferred-commands",
+            `More than ${MAX_DEFERRED_COMMANDS} commands are waiting for an object's first flush; the ${command[0]} command was dropped`
+          );
+          return;
+        }
+        push(this.deferredCommands, { object, command });
+        return;
+      }
       push(this.pendingCommands, command);
     }
     now() {
@@ -25654,15 +28326,28 @@
     }
     // ------------------------------------------------------------- consumer in
     sync(records) {
-      if (records && records.length) push(this.pendingSync, records);
+      this.acceptSync("sync", this.pendingSync, records, 11);
     }
     syncBodies(records) {
-      if (records && records.length) push(this.pendingBodySync, records);
+      this.acceptSync("syncBodies", this.pendingBodySync, records, 8);
+    }
+    acceptSync(channel, pending, records, stride) {
+      acceptSync(this, channel, pending, records, stride);
+    }
+    drainInactiveSync() {
+      drainInactiveSync(this);
     }
     setInput(state2) {
       this.pendingInput = state2;
     }
     dispatch(type, id, payload) {
+      if (this.active === false && this.eventQueue.length >= MAX_INACTIVE_EVENTS) {
+        this.warnOnce(
+          "inactive-events",
+          `More than ${MAX_INACTIVE_EVENTS} events arrived while the scene was inactive; the rest were dropped`
+        );
+        return;
+      }
       push(this.eventQueue, { type, id, payload: payload === void 0 ? {} : payload });
     }
     // ---------------------------------------------------------------- the tick
@@ -25798,124 +28483,64 @@
       }
     }
     resolveUrl(url) {
-      const result = resolveUrl(url, this.assetRoot);
-      if (result.warning !== null) this.warnOnce(`url:${url}`, result.warning);
-      return result.url;
+      return resolveUrl2(this, url);
     }
-    /**
-     * The environment payload the command stream carries, with its url contained
-     * the same way a texture url is. A refused url means no environment at all
-     * rather than one the consumer would resolve against its own file system.
-     */
     environmentPayload() {
-      const environment = this.environment;
-      if (!environment || typeof environment.toJSON !== "function") return null;
-      const json = environment.toJSON();
-      if (json === null || json === void 0) return null;
-      const url = this.resolveUrl(json.url);
-      if (url === null) {
-        this.warnOnce(
-          `environment-url:${json.url}`,
-          "Spatial.environment was dropped because its url was refused"
-        );
-        return null;
-      }
-      if (url === json.url) return json;
-      json.url = url;
-      return json;
+      return environmentPayload(this);
     }
-    raycast(origin, direction, options = {}) {
-      const maxDistance = options.maxDistance === void 0 ? Infinity : options.maxDistance;
-      const recursive = options.recursive !== false;
-      const native = globalThis.__spatialNative;
-      if (native && typeof native.raycast === "function") {
-        const flat = native.raycast(
-          origin.x,
-          origin.y,
-          origin.z,
-          direction.x,
-          direction.y,
-          direction.z,
-          Number.isFinite(maxDistance) ? maxDistance : -1,
-          recursive
-        );
-        const hits = [];
-        if (flat && flat.length) {
-          for (let i = 0; i + 8 <= flat.length; i += 8) {
-            const object = this.objectForId(flat[i]);
-            if (!object) continue;
-            push(hits, {
-              object,
-              point: new Vector3(flat[i + 1], flat[i + 2], flat[i + 3]),
-              normal: new Vector3(flat[i + 4], flat[i + 5], flat[i + 6]),
-              distance: flat[i + 7]
-            });
-          }
-        }
-        hits.sort((a, b) => a.distance - b.distance);
-        return hits;
-      }
-      if (!this.scene) return [];
-      refreshWorldMatrices(this.scene, (object, error2) => this.skipObject(object, error2));
-      this.raycaster.set(origin, direction.clone().normalize());
-      this.raycaster.near = 0;
-      this.raycaster.far = Number.isFinite(maxDistance) ? maxDistance : Infinity;
-      const targets = [];
-      if (recursive) {
-        this.scene.traverseVisible((object) => {
-          if (object.isMesh === true) push(targets, object);
-        });
-      } else {
-        const children = this.scene.children;
-        for (let i = 0; i < children.length; i += 1) {
-          if (children[i].isMesh === true && children[i].visible !== false) push(targets, children[i]);
-        }
-      }
-      const intersections = this.raycaster.intersectObjects(targets, false);
-      const results = [];
-      const seen = /* @__PURE__ */ new Set();
-      for (const hit of intersections) {
-        if (seen.has(hit.object)) continue;
-        seen.add(hit.object);
-        const normal = new Vector3(0, 0, 1);
-        if (hit.normal) normal.copy(hit.normal);
-        else if (hit.face) worldNormal(hit.object, hit.face.normal, normal);
-        push(results, { object: hit.object, point: hit.point.clone(), normal, distance: hit.distance });
-      }
-      results.sort((a, b) => a.distance - b.distance);
-      return results;
+    raycast(origin, direction, options) {
+      return raycast(this, origin, direction, options);
     }
-    loadAsset(urls = {}) {
-      const contained = {};
-      const refused = [];
-      for (let i = 0; i < ASSET_KEYS.length; i += 1) {
-        const key = ASSET_KEYS[i];
-        const raw = urls[key];
-        if (raw === void 0 || raw === null || raw === "") continue;
-        const url = this.resolveUrl(raw);
-        if (url === null) push(refused, key);
-        else contained[key] = url;
-      }
-      const group = new AssetGroup(contained);
-      const backend = this.env.backend;
-      const needed = backend === "realitykit" ? ["usdz", "reality"] : ["glb", "gltf"];
-      if (!needed.some((key) => group.urls[key])) {
-        const reason = refused.length > 0 ? `loadAsset refused ${refused.join(" and ")}: the url leaves the asset root or uses a scheme that is not allowed` : `loadAsset needs one of ${needed.join(" or ")} for the ${backend} backend`;
-        return Promise.reject(new SpatialUnsupportedError(reason, "loadAsset", group));
-      }
-      this.extraRoots.add(group);
-      const promise = new Promise((resolve, reject) => {
-        group._resolve = resolve;
-        group._reject = reject;
-      });
-      group.promise = promise;
-      return promise;
+    loadAsset(urls) {
+      return loadAsset(this, urls);
+    }
+    // -------------------------------------------------------------- phase 2
+    registerAudio(audio) {
+      registerAudio(this, audio);
+    }
+    setCamera(value) {
+      return setCamera(this, value);
+    }
+    rayFromPoint(x, y) {
+      return rayFromPoint(this, x, y);
+    }
+    applyWorldPosition(object, world) {
+      applyWorldPosition(this, object, world);
+    }
+    fetchText(url) {
+      return this.fetchChannel.request(url, "text");
+    }
+    fetchJSON(url) {
+      return this.fetchChannel.request(url, "json");
+    }
+    syncAudio(records) {
+      this.acceptSync("syncAudio", this.pendingAudioSync, records, 4);
+    }
+    syncVideo(records) {
+      this.acceptSync("syncVideo", this.pendingVideoSync, records, 4);
+    }
+    syncCharacter(records) {
+      this.acceptSync("syncCharacter", this.pendingCharacterSync, records, 8);
+    }
+    syncSkeleton(id, joints) {
+      syncSkeleton(this, id, joints);
+    }
+    setActive(value) {
+      setActive(this, value);
+    }
+    hostEvent(name, payload) {
+      this.hostChannel.deliver(name, payload);
+    }
+    captureState() {
+      return captureState(this);
     }
     dump(options) {
       return buildDump(this, options);
     }
     dispose() {
       if (this.disposed) return [];
+      this.hostChannel.clearPending("the scene was disposed");
+      this.fetchChannel.clearPending("the scene was disposed");
       const script = this.script;
       if (script && typeof script.willRemove === "function") {
         try {
@@ -25926,6 +28551,14 @@
       }
       const commands = this.logQueue;
       this.logQueue = [];
+      if (this.cameraSnapshot !== null) push(commands, ["camera", 0, { kind: null, fov: null, near: null, far: null, left: null, right: null, top: null, bottom: null }]);
+      if (this.audioRevision !== 0) push(commands, ["audioMixer", 0, { masterVolume: 1, groups: {}, state: "suspended" }]);
+      if (this.sceneUnderstandingSnapshot !== null) {
+        push(commands, ["sceneUnderstanding", 0, { collision: false, occlusion: false, physics: false, shadows: false }]);
+      }
+      if (this.renderOptionsSnapshot !== null) {
+        push(commands, ["renderOptions", 0, { adaptiveResolution: false, environmentIntensityExponent: 1, debugModelView: null }]);
+      }
       for (const joint of this.jointSnapshots.keys()) {
         push(commands, ["joint", this.jointIdFor(joint), null]);
       }
@@ -26197,6 +28830,170 @@
     }
   };
 
+  // src/force-fields.js
+  var FALLOFFS = ["none", "linear", "inverseSquare"];
+  var ForceField = class extends Object3D {
+    constructor(kind, options = {}) {
+      super();
+      if (options === null || typeof options !== "object") {
+        throw new TypeError(`${kind} expects an options object`);
+      }
+      this.type = kind;
+      this.isForceField = true;
+      this.kind = kind;
+      this._enabled = options.enabled !== false;
+      this._radius = atLeast(options.radius, 0, 1);
+      this._mask = Number.isFinite(options.mask) ? options.mask | 0 : -1;
+    }
+    get enabled() {
+      return this._enabled;
+    }
+    set enabled(value) {
+      this._enabled = value !== false;
+      this._touch();
+    }
+    get radius() {
+      return this._radius;
+    }
+    set radius(value) {
+      this._radius = atLeast(value, 0, this._radius);
+      this._touch();
+    }
+    get mask() {
+      return this._mask;
+    }
+    set mask(value) {
+      this._mask = Number.isFinite(value) ? value | 0 : -1;
+      this._touch();
+    }
+    _touch() {
+      this[DIRTY] = this[DIRTY] | 0 | DIRTY_FEATURE;
+    }
+    _base() {
+      return { kind: this.kind, enabled: this._enabled, radius: this._radius, mask: this._mask };
+    }
+    toJSON() {
+      return this._base();
+    }
+  };
+  var ConstantForceField = class extends ForceField {
+    constructor(options = {}) {
+      super("ConstantForceField", options);
+      this.force = new Vector3();
+      if (options.force) this.force.copy(options.force);
+    }
+    toJSON() {
+      const json = this._base();
+      json.force = vector3Array(this.force);
+      return json;
+    }
+  };
+  var RadialForceField = class extends ForceField {
+    constructor(options = {}) {
+      super("RadialForceField", options);
+      this._strength = finite(options.strength, 1);
+      this._minimumDistance = atLeast(options.minimumDistance, 0, 0.01);
+      this._falloff = FALLOFFS.indexOf(options.falloff) === -1 ? "inverseSquare" : options.falloff;
+    }
+    get strength() {
+      return this._strength;
+    }
+    set strength(value) {
+      this._strength = finite(value, this._strength);
+      this._touch();
+    }
+    get minimumDistance() {
+      return this._minimumDistance;
+    }
+    set minimumDistance(value) {
+      this._minimumDistance = atLeast(value, 0, this._minimumDistance);
+      this._touch();
+    }
+    get falloff() {
+      return this._falloff;
+    }
+    set falloff(value) {
+      if (FALLOFFS.indexOf(value) === -1) {
+        throw new TypeError(`RadialForceField.falloff must be one of ${FALLOFFS.join(", ")}`);
+      }
+      this._falloff = value;
+      this._touch();
+    }
+    toJSON() {
+      const json = this._base();
+      json.strength = this._strength;
+      json.minimumDistance = this._minimumDistance;
+      json.falloff = this._falloff;
+      return json;
+    }
+  };
+  var VortexForceField = class extends ForceField {
+    constructor(options = {}) {
+      super("VortexForceField", options);
+      this._strength = finite(options.strength, 1);
+      this.axis = new Vector3(0, 1, 0);
+      if (options.axis) this.axis.copy(options.axis);
+    }
+    get strength() {
+      return this._strength;
+    }
+    set strength(value) {
+      this._strength = finite(value, this._strength);
+      this._touch();
+    }
+    toJSON() {
+      const json = this._base();
+      json.strength = this._strength;
+      json.axis = vector3Array(this.axis, 0, 1, 0);
+      return json;
+    }
+  };
+  var DragForceField = class extends ForceField {
+    constructor(options = {}) {
+      super("DragForceField", options);
+      this._coefficient = atLeast(options.coefficient, 0, 1);
+    }
+    get coefficient() {
+      return this._coefficient;
+    }
+    set coefficient(value) {
+      this._coefficient = atLeast(value, 0, this._coefficient);
+      this._touch();
+    }
+    toJSON() {
+      const json = this._base();
+      json.coefficient = this._coefficient;
+      return json;
+    }
+  };
+  var TurbulenceForceField = class extends ForceField {
+    constructor(options = {}) {
+      super("TurbulenceForceField", options);
+      this._strength = finite(options.strength, 1);
+      this._noiseScale = atLeast(options.noiseScale, 1e-4, 1);
+    }
+    get strength() {
+      return this._strength;
+    }
+    set strength(value) {
+      this._strength = finite(value, this._strength);
+      this._touch();
+    }
+    get noiseScale() {
+      return this._noiseScale;
+    }
+    set noiseScale(value) {
+      this._noiseScale = atLeast(value, 1e-4, this._noiseScale);
+      this._touch();
+    }
+    toJSON() {
+      const json = this._base();
+      json.strength = this._strength;
+      json.noiseScale = this._noiseScale;
+      return json;
+    }
+  };
+
   // src/inject.js
   function createInject(runtime2) {
     const resolve = (target) => {
@@ -26241,6 +29038,17 @@
       },
       key(code, down) {
         push(runtime2.injectedKeys, { code: String(code), down: down === true });
+      },
+      /**
+       * Controller state for the coming frame (SPEC 14.14 verification). Takes
+       * one record or an array of them, in the `setInput.controllers` shape.
+       */
+      controller(state2) {
+        if (state2 === null || state2 === void 0) {
+          runtime2.input._injectedControllers = [];
+          return;
+        }
+        runtime2.input._injectedControllers = Array.isArray(state2) ? state2 : [state2];
       }
     };
   }
@@ -26326,6 +29134,26 @@
       ParticleEmitter,
       Anchor,
       Portal,
+      // 14.1 audio
+      AudioLoader: AudioLoader2,
+      AudioBuffer,
+      Audio: Audio2,
+      PositionalAudio: PositionalAudio2,
+      AmbientAudio,
+      // 14.2 video
+      VideoScreen,
+      // 14.3 cameras
+      PerspectiveCamera,
+      OrthographicCamera,
+      // 14.4 character controller and force effects
+      CharacterController,
+      ConstantForceField,
+      RadialForceField,
+      VortexForceField,
+      DragForceField,
+      TurbulenceForceField,
+      // 14.6 shader graph materials
+      ShaderGraphMaterial,
       // constants
       FrontSide,
       BackSide,
@@ -26373,6 +29201,17 @@
       dispose() {
         return runtime2.dispose();
       },
+      // 14.3 pointer queries
+      rayFromPoint(x, y) {
+        return runtime2.rayFromPoint(x, y);
+      },
+      // 14.11 consumer-performed requests
+      fetchText(url) {
+        return runtime2.fetchText(url);
+      },
+      fetchJSON(url) {
+        return runtime2.fetchJSON(url);
+      },
       inject: createInject(runtime2)
     };
     const readOnly = (name, get) => Object.defineProperty(namespace2, name, { enumerable: true, get });
@@ -26381,6 +29220,42 @@
     readOnly("env", () => runtime2.env);
     readOnly("physics", () => runtime2.physics);
     readOnly("input", () => runtime2.input);
+    readOnly("audio", () => runtime2.audio);
+    readOnly("host", () => runtime2.hostChannel);
+    readOnly("isActive", () => runtime2.active);
+    readOnly("render", () => runtime2.render);
+    readOnly("environmentLighting", () => runtime2.environmentLighting);
+    readOnly("debug", () => runtime2.debug);
+    Object.defineProperty(namespace2, "camera", {
+      enumerable: true,
+      get() {
+        return runtime2.camera;
+      },
+      set(value) {
+        runtime2.setCamera(value);
+      }
+    });
+    Object.defineProperty(namespace2, "sceneUnderstanding", {
+      enumerable: true,
+      get() {
+        return runtime2.sceneUnderstanding;
+      },
+      set(value) {
+        if (value === null || value === void 0) {
+          runtime2.sceneUnderstanding = { collision: false, occlusion: false, physics: false, shadows: false };
+          return;
+        }
+        if (typeof value !== "object") {
+          throw new TypeError("Spatial.sceneUnderstanding expects an object or null");
+        }
+        runtime2.sceneUnderstanding = {
+          collision: value.collision === true,
+          occlusion: value.occlusion === true,
+          physics: value.physics === true,
+          shadows: value.shadows === true
+        };
+      }
+    });
     Object.defineProperty(namespace2, "environment", {
       enumerable: true,
       get() {
@@ -26437,9 +29312,14 @@
     installGlobals() {
       installGlobals(runtime, namespace);
     },
-    load(source, options) {
+    /**
+     * `load(source, options)`; a hot reload that preserves state passes it as
+     * `options.previousState` or as a third argument (SPEC 14.10).
+     */
+    load(source, options, extra) {
       installGlobals(runtime, namespace);
-      return runtime.load(source, options);
+      const merged = extra === void 0 || extra === null ? options : { ...options || {}, ...extra };
+      return runtime.load(source, merged);
     },
     /**
      * Resolves once an async script body has settled and the auto-mount check
@@ -26463,6 +29343,35 @@
     },
     setInput(state2) {
       runtime.setInput(state2);
+    },
+    // ---------------------------------------------------------------- phase 2
+    syncAudio(records) {
+      runtime.syncAudio(records);
+    },
+    syncVideo(records) {
+      runtime.syncVideo(records);
+    },
+    syncCharacter(records) {
+      runtime.syncCharacter(records);
+    },
+    syncSkeleton(id, joints) {
+      runtime.syncSkeleton(id, joints);
+    },
+    /** The view appeared or went away; ticks pause while inactive. */
+    setActive(active) {
+      runtime.setActive(active);
+    },
+    /** Host to script: delivers to `Spatial.host.on(name)` handlers. */
+    hostEvent(name, payload) {
+      runtime.hostEvent(name, payload);
+    },
+    /** The functions the app registered, as `Module.function` names. */
+    setHostFunctions(names) {
+      runtime.hostChannel.setFunctions(names);
+    },
+    /** `this.state` as JSON, for a reload that preserves it. */
+    captureState() {
+      return runtime.captureState();
     },
     dump(options) {
       return runtime.dump(options);

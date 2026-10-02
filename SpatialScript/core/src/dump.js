@@ -9,6 +9,8 @@ import { interactiveFlags, refreshWorldMatrices } from "./object-extensions.js";
 import { ParticleEmitter } from "./particles.js";
 import { kindFor, entryForKind } from "./kinds.js";
 import { Portal } from "./portal.js";
+import { accessibilityJSON } from "./runtime/features.js";
+import { cameraPayload, createCameraScratch } from "./camera.js";
 
 const worldPosition = new Vector3();
 
@@ -87,7 +89,9 @@ export function buildDump(runtime, options) {
     if (seen.has(root)) continue;
     const parent = root.parent;
     // 0 is the mounted scene root; dump never mints an id for the Scene.
-    let parentId = -1;
+    // An adopted root reports the native root as its parent, the same as the
+    // `["parent", id, 0]` the consumer was sent (SPEC 14.13).
+    let parentId = 0;
     if (parent === scene && scene !== null) parentId = 0;
     else if (parent !== null && runtime.objectIds.has(parent)) parentId = runtime.objectIds.get(parent);
     push(stack, root);
@@ -115,6 +119,18 @@ export function buildDump(runtime, options) {
     joints,
     gravity: [gravity.x, gravity.y, gravity.z],
     environment: runtime.environmentPayload(),
+    // Phase 2 scene-level state (SPEC 14).
+    isActive: runtime.active,
+    audioMixer: runtime.audio.toJSON(),
+    // The live value, not the last flushed one (P2-B-45): null means the
+    // consumer's built-in camera.
+    camera: runtime.camera === null ? null : cameraPayload(runtime.camera, createCameraScratch()),
+    sceneUnderstanding: { ...runtime.sceneUnderstanding },
+    render: { adaptiveResolution: runtime.render.adaptiveResolution === true },
+    environmentLighting: { intensityExponent: runtime.environmentLighting.intensityExponent },
+    debug: { modelView: runtime.debug.modelView },
+    hostFunctions: runtime.hostChannel.functions,
+    controllers: runtime.input.controllers.all.map((controller) => controller.toJSON()),
     warnings: runtime.warnings.slice(),
     errors: runtime.errors.slice(),
     droppedErrors: runtime.droppedErrors,
@@ -179,9 +195,14 @@ function describe(runtime, object, id, parentId, worlds) {
       }
     : null;
 
-  const material = object.material
-    ? materialSnapshot(object.material, runtime.boundTextureIdFor, null)
-    : null;
+  // A mesh may carry one material or one per geometry group (SPEC 14.12).
+  const material = Array.isArray(object.material)
+    ? object.material.map((entry) =>
+        entry ? materialSnapshot(entry, runtime.boundTextureIdFor, null) : null,
+      )
+    : object.material
+      ? materialSnapshot(object.material, runtime.boundTextureIdFor, null)
+      : null;
 
   const entry = {
     id,
@@ -216,6 +237,38 @@ function describe(runtime, object, id, parentId, worlds) {
   const kindEntry = entryForKind(kindFor(object));
   if (kindEntry !== null && typeof kindEntry.describe === "function") {
     kindEntry.describe(object, entry, runtime);
+  }
+
+  // Phase 2 state (SPEC 14), reported only on the objects that carry it.
+  if (object.isAudio === true) {
+    const audio = object.toJSON();
+    audio.playing = object.isPlaying;
+    audio.currentTime = object.currentTime;
+    audio.duration = object.duration;
+    entry.audio = audio;
+  }
+  if (object.isVideoScreen === true) {
+    const video = object.toJSON();
+    video.playing = object.isPlaying;
+    video.currentTime = object.currentTime;
+    video.duration = object.duration;
+    video.error = object.error;
+    entry.video = video;
+  }
+  if (object.characterController !== null && object.characterController !== undefined) {
+    const controller = object.characterController;
+    entry.characterController = controller.toJSON();
+    entry.isOnGround = controller.isOnGround;
+    entry.velocity = [controller.velocity.x, controller.velocity.y, controller.velocity.z];
+  }
+  if (object.isForceField === true) entry.forceField = object.toJSON();
+  if (object.accessibility !== null && object.accessibility !== undefined) {
+    entry.accessibility = accessibilityJSON(object.accessibility);
+  }
+  if (object.isAsset === true) {
+    entry.skeleton = object.skeleton === null || object.skeleton === undefined ? null : object.skeleton.toJSON();
+    entry.blendShapes =
+      object.blendShapes === null || object.blendShapes === undefined ? null : object.blendShapes.toJSON();
   }
   if (object.rigidBody) {
     const body = object.rigidBody;
