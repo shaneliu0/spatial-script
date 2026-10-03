@@ -52,8 +52,8 @@ export function createHost({ native, backend = "realitykit", platform = "macos" 
     spatial,
     logs,
     frames,
-    load(source, options = {}) {
-      spatial.load(source, { backend, platform, ...options });
+    load(source, options = {}, extra) {
+      spatial.load(source, { backend, platform, ...options }, extra);
     },
     tick(dt = FRAME) {
       const commands = spatial.tick(dt);
