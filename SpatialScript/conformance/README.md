@@ -74,9 +74,58 @@ loaded with, and are then also compared. The default is
                   "mouse": { "position": [120, 80], "buttons": [true, false, false], "delta": [2, -1] },
                   "hands": { "left": null, "right": null } } },
 
-  { "dispose": true }                                        // tear the scene down
+  { "dispose": true },                                       // tear the scene down
+
+  // ---- phase 2 (SPEC 14) --------------------------------------------------
+
+  // Playback state the consumer owns. `target` is an object name.
+  { "syncAudio": [{ "target": "chime", "playing": true, "currentTime": 1.5, "duration": 4 }] },
+  { "syncVideo": [{ "target": "screen", "playing": true, "currentTime": 2, "duration": 12 }] },
+  { "syncCharacter": [{ "target": "player", "position": [0, 1, 0],
+                        "isOnGround": true, "velocity": [0, -1.5, 0] }] },
+  { "syncSkeleton": { "target": "robot", "joints": { "head": [0, 1.6, 0, 0, 0, 0, 1] } } },
+
+  { "setActive": false },                                    // the view went away
+  { "hostEvent": { "name": "score", "payload": { "value": 7 } } },   // host to script
+  { "hostFunctions": ["MyApp.save"] },                       // what the app registered
+  { "inject": "controller", "state": { "id": "pad-1", "buttons": { "a": 1 } } },
+
+  // An answer to something the script asked for. `call` names the host
+  // function and `fetch` the url, and the runner resolves the id from the
+  // recorded `hostCall` / `fetch` command.
+  { "dispatch": { "type": "hostResult", "call": "MyApp.save", "payload": { "value": 1 } } },
+  { "dispatch": { "type": "fetchResult", "fetch": "assets/data/notes.txt",
+                  "payload": { "text": "hello" } } },
+
+  // Media events. `ended`, `loaded` and `error` name an object like any event.
+  { "dispatch": { "type": "loaded", "target": "screen",
+                  "payload": { "width": 1920, "height": 1080, "duration": 12 } } },
+  { "dispatch": { "type": "ended", "target": "chime" } },
+
+  // A dispatch with no target addresses id 0 (the scene). A consumer that
+  // reports controller connections this way rather than through setInput
+  // names the controller in the payload, and the core hands the listener the
+  // Controller object it built from it.
+  { "dispatch": { "type": "audioState", "payload": { "state": "running" } } },
+  { "dispatch": { "type": "controllerconnected", "payload": { "id": "pad-9", "name": "Reported" } } },
+
+  // A hot reload on the same host: the outgoing script's `this.state` is
+  // captured and handed to the new script's `scriptChanged(previousState)`
+  // after load and before its first frame. `preserveState` defaults to true;
+  // with it false the hook is not called at all. The backend, platform and
+  // asset root of the case are kept.
+  { "reload": "const S = require(\"spatial\"); ...", "preserveState": true }
 ]
 ```
+
+The `camera` command names the camera object's own id (SPEC 14.13), so a
+runner that inspects the stream must not assume id 0; `["camera", 0, { kind:
+null }]` is the form that hands the viewport back.
+
+An expectation may also carry a top-level `"hostFunctions": ["MyApp.save"]`.
+The runner registers those before the script loads, the way an app registers
+its functions at startup, and the same key is then compared against
+`dump().hostFunctions`.
 
 `run-node.mjs` awaits a microtask between steps so promise callbacks inside the
 script (`loadAsset`, `TextureLoader.loadAsync`, a top-level `await`) run before

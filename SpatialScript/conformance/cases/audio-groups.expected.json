@@ -1,0 +1,20 @@
+{
+  "audioMixer": {
+    "masterVolume": 0.9,
+    "groups": { "music": 0.25, "sfx": 0.8 }
+  },
+  "objects": [
+    { "name": "narration", "audio": { "group": "master" } },
+    { "name": "theme", "audio": { "group": "music" } },
+    { "name": "sting", "audio": { "group": "music" } },
+    { "name": "step", "audio": { "group": "sfx" } },
+    { "name": "odd", "audio": { "group": "master" } },
+    {
+      "name": "probe",
+      "userData": {
+        "groups": ["master", "music", "music", "sfx", "master"],
+        "mixerGroups": ["music", "sfx"]
+      }
+    }
+  ]
+}

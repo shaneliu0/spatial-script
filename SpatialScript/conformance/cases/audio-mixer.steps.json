@@ -1,0 +1,5 @@
+[
+  { "frames": 1 },
+  { "dispatch": { "type": "audioState", "payload": { "state": "suspended" } } },
+  { "frames": 1 }
+]

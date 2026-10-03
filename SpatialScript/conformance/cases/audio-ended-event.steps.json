@@ -1,0 +1,5 @@
+[
+  { "frames": 1 },
+  { "dispatch": { "type": "ended", "target": "chime" } },
+  { "frames": 1 }
+]

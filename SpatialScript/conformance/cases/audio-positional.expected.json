@@ -1,0 +1,38 @@
+{
+  "objects": [
+    {
+      "name": "source",
+      "type": "PositionalAudio",
+      "position": [0.3, 0.1, -0.2],
+      "audio": {
+        "url": "assets/sounds/engine.wav",
+        "spatial": true,
+        "ambient": false,
+        "refDistance": 2,
+        "rolloff": 0.5,
+        "distanceModel": "linear",
+        "cone": [30, 90, 0.1],
+        "reverbLevel": -6,
+        "playing": false
+      },
+      "userData": {
+        "clampedReverb": -80,
+        "getters": [2, 0.5, "linear"],
+        "chained": true,
+        "modelError": "TypeError"
+      }
+    },
+    {
+      "name": "cone",
+      "type": "PositionalAudio",
+      "audio": {
+        "spatial": true,
+        "cone": [0, 5, 1],
+        "refDistance": 1,
+        "rolloff": 1,
+        "distanceModel": "inverse",
+        "reverbLevel": 0
+      }
+    }
+  ]
+}

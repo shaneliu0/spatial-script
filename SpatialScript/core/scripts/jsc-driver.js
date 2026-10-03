@@ -70,6 +70,20 @@
     throw new Error('no asset command recorded for url "' + url + '"');
   }
 
+  function callIdForFunction(recorded, name) {
+    for (var i = 0; i < recorded.length; i += 1) {
+      if (recorded[i][0] === "hostCall" && recorded[i][2] === name) return recorded[i][1];
+    }
+    throw new Error('no hostCall command recorded for "' + name + '"');
+  }
+
+  function fetchIdForUrl(recorded, url) {
+    for (var i = 0; i < recorded.length; i += 1) {
+      if (recorded[i][0] === "fetch" && recorded[i][2] && recorded[i][2].url === url) return recorded[i][1];
+    }
+    throw new Error('no fetch command recorded for url "' + url + '"');
+  }
+
   function runCase(entry) {
     var logs = [];
     var recorded = [];
@@ -86,6 +100,8 @@
       recordCommands(spatial.tick(dt), recorded, logs);
       drain();
     }
+
+    if (entry.hostFunctions && entry.hostFunctions.length) spatial.setHostFunctions(entry.hostFunctions);
 
     var loadError = null;
     try {
@@ -145,6 +161,8 @@
           );
         } else if (step.inject === "key") {
           inject.key(step.code, step.down !== false);
+        } else if (step.inject === "controller") {
+          inject.controller(step.state === undefined ? {} : step.state);
         } else {
           throw new Error('unknown inject "' + step.inject + '"');
         }
@@ -154,6 +172,9 @@
         var id;
         if (step.dispatch.texture !== undefined) id = textureIdForUrl(recorded, step.dispatch.texture);
         else if (step.dispatch.asset !== undefined) id = assetIdForUrl(recorded, step.dispatch.asset);
+        else if (step.dispatch.call !== undefined) id = callIdForFunction(recorded, step.dispatch.call);
+        else if (step.dispatch.fetch !== undefined) id = fetchIdForUrl(recorded, step.dispatch.fetch);
+        else if (step.dispatch.target === undefined) id = 0;
         else id = idFor(step.dispatch.target);
         var payload = {};
         var source = step.dispatch.payload || {};
@@ -189,6 +210,66 @@
       }
       if (step.setInput) {
         spatial.setInput(step.setInput);
+        return;
+      }
+      // ---- phase 2 consumer channels (SPEC 14.13) --------------------------
+      if (step.syncAudio || step.syncVideo) {
+        var media = step.syncAudio || step.syncVideo;
+        var mediaFlat = [];
+        for (i = 0; i < media.length; i += 1) {
+          var record = media[i];
+          mediaFlat = mediaFlat.concat([
+            idFor(record.target),
+            record.playing ? 1 : 0,
+            record.currentTime || 0,
+            record.duration || 0,
+          ]);
+        }
+        if (step.syncAudio) spatial.syncAudio(new Float32Array(mediaFlat));
+        else spatial.syncVideo(new Float32Array(mediaFlat));
+        return;
+      }
+      if (step.syncCharacter) {
+        var characters = [];
+        for (i = 0; i < step.syncCharacter.length; i += 1) {
+          var character = step.syncCharacter[i];
+          characters = characters.concat(
+            [idFor(character.target)],
+            character.position || [0, 0, 0],
+            [character.isOnGround ? 1 : 0],
+            character.velocity || [0, 0, 0],
+          );
+        }
+        spatial.syncCharacter(new Float32Array(characters));
+        return;
+      }
+      if (step.syncSkeleton) {
+        spatial.syncSkeleton(idFor(step.syncSkeleton.target), step.syncSkeleton.joints || {});
+        return;
+      }
+      if (step.setActive !== undefined) {
+        spatial.setActive(step.setActive !== false);
+        return;
+      }
+      if (step.hostEvent) {
+        spatial.hostEvent(step.hostEvent.name, step.hostEvent.payload);
+        return;
+      }
+      if (step.hostFunctions) {
+        spatial.setHostFunctions(step.hostFunctions);
+        return;
+      }
+      // A hot reload on the same host (SPEC 14.10).
+      if (step.reload !== undefined) {
+        var preserve = step.preserveState !== false;
+        var previousState = preserve ? spatial.captureState() : undefined;
+        var reloadOptions = {
+          backend: entry.backend,
+          platform: entry.platform,
+          assetRoot: entry.assetRoot,
+        };
+        if (preserve) reloadOptions.previousState = previousState;
+        spatial.load(step.reload, reloadOptions);
         return;
       }
       if (step.dispose) {

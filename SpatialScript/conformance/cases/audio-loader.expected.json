@@ -1,0 +1,35 @@
+{
+  "objects": [
+    {
+      "name": "probe",
+      "userData": {
+        "chainedPath": true,
+        "url": "assets/sounds/chime.wav",
+        "error": null,
+        "durationBeforeSync": 0,
+        "callbacks": [
+          "progress",
+          "load"
+        ],
+        "loadedUrl": "assets/sounds/chime.wav",
+        "sameHandle": true,
+        "refusedUrl": null,
+        "refusedError": "the url was refused",
+        "refusedMessage": "AudioLoader could not load \"../escape.wav\": the url was refused",
+        "asyncUrl": "assets/sounds/loop.wav",
+        "typeError": "TypeError"
+      }
+    },
+    {
+      "name": "player",
+      "type": "Audio",
+      "audio": {
+        "url": "assets/sounds/chime.wav",
+        "spatial": false,
+        "ambient": false,
+        "playing": false,
+        "duration": 0
+      }
+    }
+  ]
+}

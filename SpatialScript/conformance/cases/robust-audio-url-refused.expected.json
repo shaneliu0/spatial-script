@@ -1,0 +1,35 @@
+{
+  "errors": [],
+  "warnings": [
+    "escapes the asset root and was dropped",
+    "PositionalAudio was given a buffer whose url was refused",
+    "PositionalAudio.play() was called without a playable buffer"
+  ],
+  "objects": [
+    {
+      "name": "chime",
+      "type": "PositionalAudio",
+      "audio": {
+        "url": null,
+        "spatial": true,
+        "playing": false,
+        "loop": true,
+        "volume": 0.8,
+        "currentTime": 0,
+        "duration": 0,
+        "group": "master"
+      }
+    },
+    {
+      "name": "probe",
+      "userData": {
+        "bufferUrl": null,
+        "bufferError": "the url was refused",
+        "loadErrorSaysRefused": true,
+        "playing": false,
+        "currentTime": 0,
+        "duration": 0
+      }
+    }
+  ]
+}

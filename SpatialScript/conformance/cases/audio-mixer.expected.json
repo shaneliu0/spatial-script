@@ -1,0 +1,27 @@
+{
+  "audioMixer": {
+    "masterVolume": 0.4,
+    "groups": {
+      "music": 0.5,
+      "sfx": 1,
+      "voice": 0,
+      "master": 0.75
+    },
+    "state": "suspended"
+  },
+  "objects": [
+    {
+      "name": "probe",
+      "userData": {
+        "stateBefore": "suspended",
+        "groupsBefore": [],
+        "master": 0.4,
+        "groups": ["music", "sfx", "voice", "master"],
+        "chained": true,
+        "resumed": true,
+        "stateAfterResume": "running",
+        "seen": ["running", "suspended"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "objects": [
+    {
+      "name": "chime",
+      "audio": {
+        "playing": false,
+        "currentTime": 3.25,
+        "duration": 4
+      },
+      "userData": {
+        "seen": [
+          [true, 0, 0],
+          [true, 1.5, 4],
+          [false, 3.25, 4]
+        ],
+        "bufferDuration": 4
+      }
+    },
+    {
+      "name": "silent",
+      "audio": {
+        "playing": false,
+        "currentTime": 0,
+        "duration": 0
+      }
+    }
+  ]
+}

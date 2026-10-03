@@ -1,0 +1,11 @@
+{
+  "objects": [
+    {
+      "name": "marker",
+      "userData": { "playingAfterDispose": false, "dropped": 1 }
+    },
+    { "name": "hum", "absent": true },
+    { "name": "chime", "absent": true }
+  ],
+  "errors": []
+}

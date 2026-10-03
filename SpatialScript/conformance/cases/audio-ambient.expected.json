@@ -1,0 +1,27 @@
+{
+  "audioMixer": {
+    "groups": { "ambience": 0.6 }
+  },
+  "objects": [
+    {
+      "name": "room",
+      "type": "AmbientAudio",
+      "position": [0, 1.2, 0],
+      "audio": {
+        "url": "assets/sounds/room.wav",
+        "spatial": false,
+        "ambient": true,
+        "loop": true,
+        "volume": 0.3,
+        "group": "ambience",
+        "playing": true,
+        "cone": null
+      },
+      "userData": {
+        "isObject3D": true,
+        "isAudio": true,
+        "spatialSetter": "undefined"
+      }
+    }
+  ]
+}

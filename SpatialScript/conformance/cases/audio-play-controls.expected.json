@@ -1,0 +1,41 @@
+{
+  "objects": [
+    {
+      "name": "chime",
+      "type": "Audio",
+      "audio": {
+        "url": "assets/sounds/chime.wav",
+        "spatial": false,
+        "ambient": false,
+        "loop": true,
+        "volume": 0.5,
+        "rate": 1.5,
+        "group": "music",
+        "playing": true,
+        "currentTime": 0,
+        "duration": 0
+      },
+      "userData": {
+        "chained": true,
+        "getVolume": 0.5,
+        "log": [false, true, false, 2.5, false, 0]
+      }
+    },
+    {
+      "name": "quiet",
+      "audio": {
+        "loop": true,
+        "volume": 1,
+        "rate": 0.01,
+        "group": "master",
+        "playing": false
+      },
+      "userData": {
+        "rate": 0.01,
+        "volume": 1,
+        "loop": true
+      }
+    }
+  ],
+  "warnings": ["without a playable buffer"]
+}

@@ -1,0 +1,18 @@
+[
+  { "frames": 1 },
+  {
+    "dispatch": {
+      "type": "loaded",
+      "target": "screen",
+      "payload": { "width": 1000, "height": 500, "duration": 12 }
+    }
+  },
+  {
+    "dispatch": {
+      "type": "loaded",
+      "target": "fixed",
+      "payload": { "width": 1000, "height": 500, "duration": 12 }
+    }
+  },
+  { "frames": 1 }
+]

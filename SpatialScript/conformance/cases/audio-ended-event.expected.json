@@ -1,0 +1,18 @@
+{
+  "scene": {
+    "userData": { "bubbled": 1 }
+  },
+  "objects": [
+    {
+      "name": "chime",
+      "audio": { "playing": false },
+      "userData": {
+        "order": ["callback", "event"],
+        "playingInCallback": false,
+        "playingInEvent": false,
+        "eventType": "ended",
+        "eventTarget": "chime"
+      }
+    }
+  ]
+}

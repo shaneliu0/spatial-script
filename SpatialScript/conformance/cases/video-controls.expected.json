@@ -1,0 +1,32 @@
+{
+  "objects": [
+    {
+      "name": "screen",
+      "video": {
+        "volume": 0.25,
+        "muted": true,
+        "loop": true,
+        "rate": 2,
+        "playing": true,
+        "currentTime": 0
+      },
+      "userData": {
+        "chainedPlay": true,
+        "chainedPause": true,
+        "log": [false, true, false, 4.5, 0]
+      }
+    },
+    {
+      "name": "clamped",
+      "video": {
+        "volume": 1,
+        "rate": 8,
+        "muted": false,
+        "loop": false
+      },
+      "userData": {
+        "values": [1, 8, false, false]
+      }
+    }
+  ]
+}

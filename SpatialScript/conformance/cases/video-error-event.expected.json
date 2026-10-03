@@ -1,0 +1,22 @@
+{
+  "objects": [
+    {
+      "name": "screen",
+      "video": {
+        "url": "assets/videos/missing.mp4",
+        "error": "the file could not be decoded",
+        "playing": false
+      },
+      "userData": {
+        "errorBefore": null,
+        "events": 1,
+        "message": "the file could not be decoded",
+        "errorInHandler": "the file could not be decoded"
+      }
+    },
+    {
+      "name": "bare",
+      "video": { "error": "the video failed to load" }
+    }
+  ]
+}

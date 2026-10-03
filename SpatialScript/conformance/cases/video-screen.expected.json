@@ -1,0 +1,96 @@
+{
+  "objects": [
+    {
+      "name": "screen",
+      "type": "VideoScreen",
+      "position": [
+        0,
+        1.5,
+        -2
+      ],
+      "geometry": {
+        "type": "PlaneGeometry",
+        "parameters": {
+          "width": 1.6,
+          "height": 0.9
+        }
+      },
+      "video": {
+        "url": "assets/videos/clip.mp4",
+        "width": 1.6,
+        "height": 0.9,
+        "loop": true,
+        "muted": true,
+        "autoplay": true,
+        "docking": true,
+        "volume": 1,
+        "rate": 1,
+        "playing": true,
+        "currentTime": 0,
+        "duration": 0,
+        "error": null
+      },
+      "userData": {
+        "width": 1.6,
+        "height": 0.9,
+        "docking": true,
+        "url": "assets/videos/clip.mp4",
+        "isMesh": true,
+        "autoplaying": true,
+        "raycastHit": "screen"
+      }
+    },
+    {
+      "name": "plain",
+      "video": {
+        "url": "assets/videos/plain.mp4",
+        "width": 1,
+        "height": 0.5625,
+        "loop": false,
+        "muted": false,
+        "autoplay": false,
+        "docking": false,
+        "playing": false
+      }
+    },
+    {
+      "name": "blank",
+      "video": {
+        "url": null,
+        "width": 1,
+        "height": 1
+      }
+    },
+    {
+      "name": "encodings",
+      "video": {
+        "url": {
+          "mp4": "assets/videos/clip.mp4",
+          "webm": "assets/videos/clip.webm"
+        },
+        "width": 1.2
+      },
+      "userData": {
+        "url": {
+          "mp4": "assets/videos/clip.mp4",
+          "webm": "assets/videos/clip.webm"
+        }
+      }
+    },
+    {
+      "name": "sourceless",
+      "video": {
+        "url": null
+      },
+      "userData": {
+        "error": "VideoScreen has no playable source: no url survived containment"
+      }
+    }
+  ],
+  "warnings": [
+    "docking is visionOS only",
+    "escapes the asset root",
+    "hls url was refused and dropped",
+    "mp4 and webm urls were refused and dropped"
+  ]
+}

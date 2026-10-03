@@ -1,0 +1,7 @@
+[
+  { "frames": 1 },
+  { "syncAudio": [{ "target": "chime", "playing": true, "currentTime": 1.5, "duration": 4 }] },
+  { "frames": 1 },
+  { "syncAudio": [{ "target": "chime", "playing": false, "currentTime": 3.25, "duration": 4 }] },
+  { "frames": 1 }
+]

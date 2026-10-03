@@ -61,6 +61,8 @@ export function buildManifest() {
       backend,
       platform: expected.platform || (backend === "realitykit" ? "macos" : "web"),
       assetRoot: "assets",
+      // Registered before load, the way an app registers its functions.
+      hostFunctions: Array.isArray(expected.hostFunctions) ? expected.hostFunctions : null,
     });
   }
 

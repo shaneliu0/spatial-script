@@ -1,0 +1,12 @@
+[
+  { "frames": 1 },
+  {
+    "dispatch": {
+      "type": "error",
+      "target": "screen",
+      "payload": { "message": "the file could not be decoded" }
+    }
+  },
+  { "dispatch": { "type": "error", "target": "bare" } },
+  { "frames": 1 }
+]

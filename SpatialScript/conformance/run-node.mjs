@@ -69,6 +69,20 @@ export function createHost(bundleSource) {
       }
       throw new Error(`no texture command recorded for url "${url}"`);
     },
+    /** Finds a pending host call id from the recorded `hostCall` commands. */
+    callIdForFunction(name) {
+      for (const command of recorded) {
+        if (command[0] === "hostCall" && command[2] === name) return command[1];
+      }
+      throw new Error(`no hostCall command recorded for "${name}"`);
+    },
+    /** Finds a fetch request id from the recorded `fetch` commands by url. */
+    fetchIdForUrl(url) {
+      for (const command of recorded) {
+        if (command[0] === "fetch" && command[2] && command[2].url === url) return command[1];
+      }
+      throw new Error(`no fetch command recorded for url "${url}"`);
+    },
     /** Finds an asset id from the recorded `asset` commands by any of its urls. */
     assetIdForUrl(url) {
       for (const command of recorded) {
@@ -82,7 +96,7 @@ export function createHost(bundleSource) {
   };
 }
 
-function applyStep(host, step) {
+function applyStep(host, step, context) {
   if (typeof step.frames === "number") {
     for (let i = 0; i < step.frames; i += 1) host.tick(FRAME);
     return;
@@ -104,6 +118,9 @@ function applyStep(host, step) {
       case "key":
         inject.key(step.code, step.down !== false);
         break;
+      case "controller":
+        inject.controller(step.state === undefined ? {} : step.state);
+        break;
       default:
         throw new Error(`unknown inject "${step.inject}"`);
     }
@@ -111,10 +128,13 @@ function applyStep(host, step) {
   }
 
   if (step.dispatch) {
-    const { type, target, texture, asset, payload } = step.dispatch;
+    const { type, target, texture, asset, call, fetch, payload } = step.dispatch;
     let id;
     if (texture !== undefined) id = host.textureIdForUrl(texture);
     else if (asset !== undefined) id = host.assetIdForUrl(asset);
+    else if (call !== undefined) id = host.callIdForFunction(call);
+    else if (fetch !== undefined) id = host.fetchIdForUrl(fetch);
+    else if (target === undefined) id = 0;
     else id = host.idFor(target);
     const resolved = { ...(payload || {}) };
     if (typeof resolved.other === "string") resolved.other = host.idFor(resolved.other);
@@ -150,6 +170,74 @@ function applyStep(host, step) {
     return;
   }
 
+  // ---- phase 2 consumer channels (SPEC 14.13) -------------------------------
+
+  if (step.syncAudio || step.syncVideo) {
+    const records = step.syncAudio || step.syncVideo;
+    const flat = [];
+    for (const record of records) {
+      flat.push(
+        host.idFor(record.target),
+        record.playing ? 1 : 0,
+        record.currentTime || 0,
+        record.duration || 0,
+      );
+    }
+    const packed = new Float32Array(flat);
+    if (step.syncAudio) host.spatial.syncAudio(packed);
+    else host.spatial.syncVideo(packed);
+    return;
+  }
+
+  if (step.syncCharacter) {
+    const flat = [];
+    for (const record of step.syncCharacter) {
+      const position = record.position || [0, 0, 0];
+      const velocity = record.velocity || [0, 0, 0];
+      flat.push(host.idFor(record.target), ...position, record.isOnGround ? 1 : 0, ...velocity);
+    }
+    host.spatial.syncCharacter(new Float32Array(flat));
+    return;
+  }
+
+  if (step.syncSkeleton) {
+    host.spatial.syncSkeleton(host.idFor(step.syncSkeleton.target), step.syncSkeleton.joints || {});
+    return;
+  }
+
+  if (step.setActive !== undefined) {
+    host.spatial.setActive(step.setActive !== false);
+    return;
+  }
+
+  if (step.hostEvent) {
+    host.spatial.hostEvent(step.hostEvent.name, step.hostEvent.payload);
+    return;
+  }
+
+  if (step.hostFunctions) {
+    host.spatial.setHostFunctions(step.hostFunctions);
+    return;
+  }
+
+  /**
+   * A hot reload on the same host (SPEC 14.10): the outgoing script's
+   * `this.state` is captured and handed to the new script's `scriptChanged`.
+   * Without `preserveState` the hook is not called at all.
+   */
+  if (step.reload !== undefined) {
+    const preserve = step.preserveState !== false;
+    const previousState = preserve ? host.spatial.captureState() : undefined;
+    const options = {
+      backend: context.backend,
+      platform: context.platform,
+      assetRoot: context.assetRoot,
+    };
+    if (preserve) options.previousState = previousState;
+    host.spatial.load(step.reload, options);
+    return;
+  }
+
   if (step.dispose) {
     host.dispose();
     return;
@@ -163,9 +251,16 @@ export async function runCase(bundleSource, caseName, source, expected, steps, o
   const backend = options.backend || expected.backend || "realitykit";
   const platform = options.platform || expected.platform || (backend === "realitykit" ? "macos" : "web");
 
+  // The app registers its functions before the script runs (SPEC 14.10); the
+  // same key is then compared against `dump().hostFunctions`.
+  if (Array.isArray(expected.hostFunctions)) host.spatial.setHostFunctions(expected.hostFunctions);
+
+  const assetRoot = options.assetRoot || "assets";
+  const context = { backend, platform, assetRoot };
+
   let loadError = null;
   try {
-    host.spatial.load(source, { backend, platform, assetRoot: options.assetRoot || "assets" });
+    host.spatial.load(source, { backend, platform, assetRoot });
   } catch (error) {
     loadError = error;
   }
@@ -175,7 +270,7 @@ export async function runCase(bundleSource, caseName, source, expected, steps, o
     const plan = steps && steps.length ? steps : [{ frames: 3 }];
     for (const step of plan) {
       try {
-        applyStep(host, step);
+        applyStep(host, step, context);
       } catch (error) {
         tickErrors.push(`${error.name || "Error"}: ${error.message}`);
       }

@@ -1,0 +1,8 @@
+[
+  { "frames": 1 },
+  { "syncVideo": [{ "target": "screen", "playing": true, "currentTime": 2, "duration": 12 }] },
+  { "frames": 1 },
+  { "syncVideo": [{ "target": "screen", "playing": true, "currentTime": 12, "duration": 12 }] },
+  { "dispatch": { "type": "ended", "target": "screen" } },
+  { "frames": 1 }
+]
