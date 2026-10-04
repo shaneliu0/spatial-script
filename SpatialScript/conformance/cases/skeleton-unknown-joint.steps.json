@@ -1,0 +1,11 @@
+[
+  { "frames": 1 },
+  {
+    "dispatch": {
+      "type": "assetLoaded",
+      "asset": "assets/robot.usdz",
+      "payload": { "joints": ["root", "head"], "blendShapes": ["smile", "blink"] }
+    }
+  },
+  { "frames": 2 }
+]

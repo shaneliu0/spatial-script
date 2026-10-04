@@ -1,0 +1,22 @@
+{
+  "warnings": [
+    "which this asset has no joint for",
+    "which this asset has no blend shape for"
+  ],
+  "scene": {
+    "userData": {
+      "tail": null,
+      "frown": 0,
+      "posedHead": [0, 0, 0.3827, 0.9239],
+      "afterReset": null,
+      "joints": ["root", "head"]
+    }
+  },
+  "objects": [
+    {
+      "name": "robot",
+      "skeleton": { "joints": {}, "track": false },
+      "blendShapes": {}
+    }
+  ]
+}

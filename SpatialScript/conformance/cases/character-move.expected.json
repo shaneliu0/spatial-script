@@ -1,0 +1,21 @@
+{
+  "scene": {
+    "userData": {
+      "afterMove": [0, 0, 0],
+      "afterTeleport": [0.5, 0.9, 1],
+      "moveError": "TypeError",
+      "teleportError": "TypeError",
+      "chained": true
+    }
+  },
+  "objects": [
+    {
+      "name": "player",
+      "position": [0.5, 0.9, 1],
+      "worldPosition": [1, 0.9, 1],
+      "characterController": { "radius": 0.25, "height": 1.6 },
+      "isOnGround": false,
+      "velocity": [0, 0, 0]
+    }
+  ]
+}

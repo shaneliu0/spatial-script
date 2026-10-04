@@ -1,0 +1,14 @@
+[
+  { "frames": 1 },
+  {
+    "syncCharacter": [
+      {
+        "target": "player",
+        "position": [1, 0.9, 1],
+        "isOnGround": true,
+        "velocity": [0, -1.5, 0]
+      }
+    ]
+  },
+  { "frames": 2 }
+]

@@ -1,0 +1,42 @@
+{
+  "camera": {
+    "kind": "orthographic",
+    "fov": null,
+    "near": 0.1,
+    "far": 20,
+    "left": -1,
+    "right": 1,
+    "top": 0.75,
+    "bottom": -0.75
+  },
+  "objects": [
+    {
+      "name": "camera",
+      "type": "OrthographicCamera",
+      "quaternion": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "userData": {}
+    },
+    {
+      "name": "probe",
+      "userData": {
+        "frustum": [
+          -1,
+          1,
+          0.75,
+          -0.75
+        ],
+        "clip": [
+          0.1,
+          20
+        ],
+        "isOrthographic": true,
+        "hasFov": true
+      }
+    }
+  ]
+}

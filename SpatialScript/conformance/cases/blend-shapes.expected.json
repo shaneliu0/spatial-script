@@ -1,0 +1,21 @@
+{
+  "scene": {
+    "userData": {
+      "names": ["smile", "blink", "frown"],
+      "before": 0,
+      "smile": 0.75,
+      "blink": 1,
+      "frown": 0,
+      "noSkeleton": true,
+      "chained": true
+    }
+  },
+  "objects": [
+    {
+      "name": "robot",
+      "loaded": true,
+      "skeleton": null,
+      "blendShapes": { "smile": 0.75, "blink": 1, "frown": 0 }
+    }
+  ]
+}

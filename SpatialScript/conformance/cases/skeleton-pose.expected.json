@@ -1,0 +1,27 @@
+{
+  "scene": {
+    "userData": {
+      "joints": ["root", "head"],
+      "shapes": ["smile", "blink"],
+      "headRotation": [0, 0.7071, 0, 0.7071],
+      "headPosition": [0, 0, 0],
+      "unknown": null,
+      "tracking": false
+    }
+  },
+  "objects": [
+    {
+      "name": "robot",
+      "type": "Asset",
+      "loaded": true,
+      "skeleton": {
+        "joints": {
+          "head": [0, 0, 0, 0, 0.7071, 0, 0.7071],
+          "root": [0, 0.1, 0, 0, 0, 0, 1]
+        },
+        "track": false
+      },
+      "blendShapes": {}
+    }
+  ]
+}

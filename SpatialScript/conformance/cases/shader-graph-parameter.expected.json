@@ -1,0 +1,29 @@
+{
+  "scene": {
+    "userData": {
+      "nameError": "TypeError",
+      "fallbackRoughness": 0.6,
+      "intensity": 5,
+      "generation": 3
+    }
+  },
+  "objects": [
+    {
+      "name": "glowing",
+      "material": {
+        "type": "ShaderGraphMaterial",
+        "name": "Glow",
+        "generation": 3,
+        "parameters": {
+          "intensity": 5,
+          "roughness": 0.6,
+          "tint": [0, 0, 1]
+        },
+        "fallback": {
+          "type": "MeshStandardMaterial",
+          "roughness": 0.6
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "scene": {
+    "userData": { "noiseScale": 0.5 }
+  },
+  "objects": [
+    {
+      "name": "storm",
+      "type": "TurbulenceForceField",
+      "forceField": {
+        "kind": "TurbulenceForceField",
+        "enabled": true,
+        "radius": 5,
+        "mask": -1,
+        "strength": 1.5,
+        "noiseScale": 0.25
+      }
+    },
+    {
+      "name": "gust",
+      "forceField": {
+        "kind": "TurbulenceForceField",
+        "radius": 1,
+        "strength": 3,
+        "noiseScale": 0.5
+      }
+    }
+  ]
+}

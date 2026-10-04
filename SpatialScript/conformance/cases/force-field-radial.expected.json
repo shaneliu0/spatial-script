@@ -1,0 +1,34 @@
+{
+  "scene": {
+    "userData": {
+      "defaultFalloff": "inverseSquare",
+      "falloffError": "TypeError",
+      "strength": -3
+    }
+  },
+  "objects": [
+    {
+      "name": "push",
+      "type": "RadialForceField",
+      "forceField": {
+        "kind": "RadialForceField",
+        "enabled": true,
+        "radius": 2,
+        "mask": -1,
+        "strength": 5,
+        "minimumDistance": 0.2,
+        "falloff": "linear"
+      }
+    },
+    {
+      "name": "pull",
+      "forceField": {
+        "kind": "RadialForceField",
+        "radius": 1,
+        "strength": -3,
+        "minimumDistance": 0.5,
+        "falloff": "none"
+      }
+    }
+  ]
+}

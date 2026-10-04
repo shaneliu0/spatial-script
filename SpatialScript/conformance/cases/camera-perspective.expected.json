@@ -1,0 +1,42 @@
+{
+  "camera": {
+    "kind": "perspective",
+    "fov": 50,
+    "near": 0.1,
+    "far": 50,
+    "left": null,
+    "right": null,
+    "top": null,
+    "bottom": null
+  },
+  "objects": [
+    {
+      "name": "camera",
+      "type": "PerspectiveCamera",
+      "parent": 2,
+      "position": [
+        0,
+        0.25,
+        3
+      ],
+      "worldPosition": [
+        0.5,
+        0.25,
+        3
+      ]
+    },
+    {
+      "name": "probe",
+      "userData": {
+        "beforeAssign": null,
+        "isSameObject": true,
+        "isCamera": true,
+        "typeError": "TypeError",
+        "stillAssigned": true
+      }
+    }
+  ],
+  "warnings": [
+    "aspect is managed by the consumer"
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "backend": "realitykit",
+  "platform": "visionos",
+  "errors": [],
+  "warnings": [
+    "On visionOS the user is the camera"
+  ],
+  "camera": {
+    "kind": "perspective",
+    "fov": 50,
+    "near": 0.01,
+    "far": 20,
+    "left": null,
+    "right": null,
+    "top": null,
+    "bottom": null
+  },
+  "objects": [
+    {
+      "name": "probe",
+      "userData": {
+        "before": null,
+        "assigned": true,
+        "cameraCapability": false,
+        "ray": null,
+        "rayIsNull": true,
+        "scenePosition": null
+      }
+    },
+    {
+      "name": "cube"
+    }
+  ]
+}

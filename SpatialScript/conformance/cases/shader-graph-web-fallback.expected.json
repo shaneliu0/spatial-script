@@ -1,0 +1,27 @@
+{
+  "backend": "three",
+  "platform": "web",
+  "warnings": ["the fallback material is rendered"],
+  "scene": {
+    "userData": {
+      "missingFallback": "TypeError",
+      "fallbackRoughness": 0.6,
+      "capability": false
+    }
+  },
+  "objects": [
+    {
+      "name": "mesh",
+      "material": {
+        "type": "ShaderGraphMaterial",
+        "source": "assets/materials/glow.usda",
+        "name": "Glow",
+        "parameters": { "roughness": 0.6 },
+        "fallback": {
+          "type": "MeshStandardMaterial",
+          "roughness": 0.6
+        }
+      }
+    }
+  ]
+}

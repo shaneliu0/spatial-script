@@ -1,0 +1,16 @@
+{
+  "frame": 3,
+  "camera": null,
+  "objects": [
+    {
+      "name": "probe",
+      "userData": {
+        "seen": [
+          "camera",
+          null,
+          null
+        ]
+      }
+    }
+  ]
+}

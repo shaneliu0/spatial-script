@@ -1,0 +1,47 @@
+{
+  "scene": {
+    "userData": {
+      "sharedError": "SpatialUnsupportedError",
+      "typeError": "TypeError",
+      "onGround": false,
+      "velocity": [0, 0, 0],
+      "ownedByPlayer": true
+    }
+  },
+  "objects": [
+    {
+      "name": "player",
+      "characterController": {
+        "radius": 0.3,
+        "height": 1.8,
+        "slopeLimit": 0.6,
+        "stepLimit": 0.4,
+        "gravity": false
+      },
+      "isOnGround": false,
+      "velocity": [0, 0, 0]
+    },
+    {
+      "name": "walker",
+      "characterController": {
+        "radius": 0.2,
+        "height": 1,
+        "slopeLimit": 0.785,
+        "stepLimit": 0.3,
+        "gravity": true
+      }
+    },
+    {
+      "name": "clamped",
+      "characterController": {
+        "radius": 0.001,
+        "height": 0.001,
+        "slopeLimit": 1.5707963,
+        "stepLimit": 0,
+        "gravity": true
+      }
+    },
+    { "name": "ghost", "characterController": null },
+    { "name": "detached", "characterController": null }
+  ]
+}

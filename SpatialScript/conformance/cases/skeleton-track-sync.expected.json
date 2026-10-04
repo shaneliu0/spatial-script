@@ -1,0 +1,18 @@
+{
+  "scene": {
+    "userData": {
+      "head": [0, 1.6, 0],
+      "headRotation": [0, 0, 0, 1],
+      "tracking": true
+    }
+  },
+  "objects": [
+    {
+      "name": "robot",
+      "skeleton": {
+        "track": true,
+        "joints": { "head": [0, 0, 0, 0, 0, 0, 1] }
+      }
+    }
+  ]
+}

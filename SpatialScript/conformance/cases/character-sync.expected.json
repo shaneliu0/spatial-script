@@ -1,0 +1,18 @@
+{
+  "scene": {
+    "userData": {
+      "onGround": true,
+      "velocity": [0, -1.5, 0],
+      "position": [1, 0.9, 1]
+    }
+  },
+  "objects": [
+    {
+      "name": "player",
+      "position": [1, 0.9, 1],
+      "worldPosition": [1, 0.9, 1],
+      "isOnGround": true,
+      "velocity": [0, -1.5, 0]
+    }
+  ]
+}
