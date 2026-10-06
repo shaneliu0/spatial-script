@@ -1,0 +1,15 @@
+{
+  "objects": [
+    {
+      "name": "button",
+      "accessibility": null,
+      "userData": { "accessibility": null }
+    },
+    {
+      "name": "walker",
+      "characterController": null,
+      "userData": { "controller": null }
+    }
+  ],
+  "errors": []
+}

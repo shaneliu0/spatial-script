@@ -1,0 +1,11 @@
+[
+  { "hostEvent": { "name": "score", "payload": { "value": 7 } } },
+  { "hostEvent": { "name": "ping", "payload": null } },
+  { "hostEvent": { "name": "once", "payload": {} } },
+  { "hostEvent": { "name": "once", "payload": {} } },
+  { "hostEvent": { "name": "later", "payload": {} } },
+  { "hostEvent": { "name": "score", "payload": { "value": 9 } } },
+  { "hostEvent": { "name": "ping", "payload": {} } },
+  { "hostEvent": { "name": "unheard", "payload": {} } },
+  { "frames": 1 }
+]

@@ -1,0 +1,22 @@
+{
+  "backend": "realitykit",
+  "platform": "macos",
+  "warnings": ["Spatial.sceneUnderstanding has no effect outside visionOS"],
+  "sceneUnderstanding": {
+    "collision": true,
+    "occlusion": true,
+    "physics": false,
+    "shadows": false
+  },
+  "objects": [
+    {
+      "name": "marker",
+      "userData": {
+        "afterFirst": [true, false, true, false],
+        "afterNull": [false, false],
+        "typeError": "TypeError",
+        "capability": false
+      }
+    }
+  ]
+}

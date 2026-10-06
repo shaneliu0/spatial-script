@@ -1,0 +1,13 @@
+{
+  "controllers": [],
+  "scene": {
+    "userData": {
+      "connected": ["pad-1", "pad-2"],
+      "disconnected": ["pad-1", "pad-2"],
+      "connectType": "controllerconnected",
+      "counts": [0, 1, 2, 0],
+      "ids": [],
+      "current": null
+    }
+  }
+}

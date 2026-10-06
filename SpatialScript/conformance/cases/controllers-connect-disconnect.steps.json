@@ -1,0 +1,15 @@
+[
+  { "frames": 1 },
+  { "inject": "controller", "state": { "id": "pad-1", "name": "First" } },
+  { "frames": 1 },
+  {
+    "inject": "controller",
+    "state": [
+      { "id": "pad-1", "name": "First" },
+      { "id": "pad-2", "name": "Second", "current": true }
+    ]
+  },
+  { "frames": 1 },
+  { "inject": "controller", "state": [] },
+  { "frames": 1 }
+]

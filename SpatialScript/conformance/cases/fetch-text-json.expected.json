@@ -1,0 +1,16 @@
+{
+  "scene": {
+    "userData": {
+      "text": "two lines\nof notes",
+      "config": { "level": 3, "tags": ["a", "b"] },
+      "inline": { "from": "text" },
+      "brokenName": "SpatialUnsupportedError",
+      "brokenFeature": "fetch",
+      "brokenMessage": "assets/data/broken.json: the response was not JSON",
+      "goneMessage": "assets/data/gone.txt: 404",
+      "refusedName": "SpatialUnsupportedError",
+      "refusedFeature": "fetch",
+      "typeError": "TypeError"
+    }
+  }
+}

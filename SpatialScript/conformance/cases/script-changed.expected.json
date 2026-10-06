@@ -1,0 +1,11 @@
+{
+  "scene": {
+    "userData": {
+      "hookRan": true,
+      "restored": { "score": 12, "run": "first", "path": [1, 2, 3] }
+    }
+  },
+  "loadGeneration": 2,
+  "objects": [{ "name": "marker" }],
+  "errors": []
+}

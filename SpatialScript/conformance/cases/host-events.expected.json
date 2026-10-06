@@ -1,0 +1,13 @@
+{
+  "scene": {
+    "userData": {
+      "scores": [7, 9],
+      "pings": 2,
+      "once": 1,
+      "returnsHandler": true,
+      "chainedSend": true,
+      "sendError": "TypeError",
+      "onError": "TypeError"
+    }
+  }
+}

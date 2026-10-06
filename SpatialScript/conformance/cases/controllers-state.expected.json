@@ -1,0 +1,50 @@
+{
+  "controllers": [
+    {
+      "id": "pad-1",
+      "name": "Wireless Pad",
+      "leftThumbstick": [0.5, -1],
+      "rightThumbstick": [0, 0.25],
+      "leftTrigger": 0.75,
+      "rightTrigger": 0,
+      "buttons": {
+        "a": 0,
+        "b": 1,
+        "x": 0.5,
+        "y": 0,
+        "leftShoulder": 1,
+        "rightShoulder": 0,
+        "dpadUp": 1,
+        "dpadDown": 0,
+        "dpadLeft": 0,
+        "dpadRight": 0,
+        "menu": 0,
+        "options": 1
+      }
+    }
+  ],
+  "objects": [
+    {
+      "name": "probe",
+      "userData": {
+        "connected": 1,
+        "currentId": "pad-1",
+        "byId": true,
+        "missing": null,
+        "name": "Wireless Pad",
+        "sticks": [[0.5, -1], [0, 0.25]],
+        "triggers": [0.75, 0],
+        "dpad": [true, false, false, false],
+        "shoulders": [true, false],
+        "system": [false, true],
+        "xy": [0.5, 0, 1],
+        "rumbleChains": true,
+        "a": [
+          null,
+          [true, true, false, 1],
+          [false, false, true, 0]
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "backend": "three",
+  "platform": "web",
+  "objects": [
+    {
+      "name": "marker",
+      "userData": {
+        "audio": true,
+        "video": true,
+        "camera": true,
+        "characterController": true,
+        "forceFields": true,
+        "skeleton": true,
+        "blendShapes": true,
+        "shaderGraph": false,
+        "sceneUnderstanding": false,
+        "controllers": true,
+        "hostFunctions": true,
+        "accessibility": true,
+        "keys": [
+          "accessibility",
+          "anchors",
+          "audio",
+          "blendShapes",
+          "camera",
+          "characterController",
+          "controllers",
+          "forceFields",
+          "hands",
+          "hostFunctions",
+          "hoverEffect",
+          "manipulation",
+          "particles",
+          "portals",
+          "sceneUnderstanding",
+          "shaderGraph",
+          "shadows",
+          "skeleton",
+          "video"
+        ]
+      }
+    }
+  ]
+}

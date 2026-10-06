@@ -1,0 +1,14 @@
+{
+  "objects": [
+    {
+      "name": "probe",
+      "userData": {
+        "keyboard": [false, true, true, false],
+        "mouse": [false, true, true, false],
+        "down": [],
+        "isDown": false,
+        "wasPressed": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+[
+  {
+    "inject": "controller",
+    "state": {}
+  },
+  {
+    "frames": 2
+  },
+  {
+    "inject": "controller",
+    "state": [
+      {},
+      {
+        "id": "pad-1",
+        "leftThumbstick": [
+          0.4
+        ]
+      }
+    ]
+  },
+  {
+    "frames": 2
+  }
+]

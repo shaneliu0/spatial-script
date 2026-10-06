@@ -1,0 +1,16 @@
+{
+  "hostFunctions": ["MyApp.save", "MyApp.fail"],
+  "scene": {
+    "userData": {
+      "functions": ["MyApp.save", "MyApp.fail"],
+      "functionsAreCopies": true,
+      "saved": { "ok": true, "slot": 1 },
+      "failedName": "SpatialUnsupportedError",
+      "failedFeature": "host-function",
+      "failedMessage": "MyApp.fail: the disk was full",
+      "missingName": "SpatialUnsupportedError",
+      "missingFeature": "host-function",
+      "nameError": "TypeError"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "backend": "realitykit",
+  "platform": "macos",
+  "warnings": [
+    "Spatial.render.adaptiveResolution has no effect outside visionOS",
+    "Spatial.debug.modelView must be one of"
+  ],
+  "render": { "adaptiveResolution": true },
+  "environmentLighting": { "intensityExponent": 1.5 },
+  "debug": { "modelView": "uv" },
+  "objects": [
+    {
+      "name": "marker",
+      "userData": {
+        "adaptive": true,
+        "exponent": 1.5,
+        "modelView": "normal"
+      }
+    }
+  ]
+}

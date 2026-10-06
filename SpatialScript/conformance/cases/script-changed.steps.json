@@ -1,0 +1,12 @@
+[
+  {
+    "frames": 2
+  },
+  {
+    "reload": "const S = require(\"spatial\");\n\nconst scene = new S.Scene();\nconst marker = new S.Mesh(new S.BoxGeometry(0.1, 0.1, 0.1), new S.MeshStandardMaterial());\nmarker.name = \"marker\";\nscene.add(marker);\n\nscene.userData.hookRan = false;\nscene.userData.restored = null;\n\n// SPEC 14.10: called after load and before the first frame, with the state\n// the previous script held.\nthis.scriptChanged = (previous) => {\n  scene.userData.hookRan = true;\n  scene.userData.restored = previous;\n  this.state = previous;\n};\n\nS.mount(scene);",
+    "preserveState": true
+  },
+  {
+    "frames": 2
+  }
+]

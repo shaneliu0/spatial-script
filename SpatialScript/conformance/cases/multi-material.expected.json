@@ -1,0 +1,35 @@
+{
+  "scene": {
+    "userData": {
+      "count": 2,
+      "isArray": true,
+      "singleIsArray": false,
+      "groups": [[0, 18, 0], [18, 18, 1]]
+    }
+  },
+  "objects": [
+    {
+      "name": "two-tone",
+      "geometry": { "type": "BoxGeometry" },
+      "material": [
+        {
+          "type": "MeshStandardMaterial",
+          "color": [1, 0, 0],
+          "roughness": 0.3
+        },
+        {
+          "type": "MeshStandardMaterial",
+          "color": [0, 1, 0],
+          "metalness": 0.8
+        }
+      ]
+    },
+    {
+      "name": "single",
+      "material": {
+        "type": "MeshStandardMaterial",
+        "color": [0, 1, 0]
+      }
+    }
+  ]
+}

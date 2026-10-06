@@ -1,0 +1,23 @@
+{
+  "frame": 6,
+  "errors": [],
+  "hostFunctions": [],
+  "isActive": true,
+  "objects": [
+    {
+      "name": "probe",
+      "userData": {
+        "registered": [],
+        "settled": "rejected",
+        "errorName": "SpatialUnsupportedError",
+        "feature": "host-function",
+        "isUnsupported": true,
+        "namesTheFunction": true,
+        "frames": 6
+      }
+    },
+    {
+      "name": "cube"
+    }
+  ]
+}

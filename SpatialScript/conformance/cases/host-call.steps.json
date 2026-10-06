@@ -1,0 +1,19 @@
+[
+  { "frames": 1 },
+  {
+    "dispatch": {
+      "type": "hostResult",
+      "call": "MyApp.save",
+      "payload": { "value": { "ok": true, "slot": 1 } }
+    }
+  },
+  {
+    "dispatch": {
+      "type": "hostResult",
+      "call": "MyApp.fail",
+      "payload": { "error": "the disk was full" }
+    }
+  },
+  { "frames": 1 },
+  { "frames": 1 }
+]

@@ -1,0 +1,21 @@
+{
+  "objects": [
+    {
+      "name": "screen",
+      "video": { "url": "blob:https://example.com/9f5c-4a7d", "error": null }
+    },
+    {
+      "name": "sound",
+      "audio": { "url": "blob:https://example.com/audio-1" }
+    },
+    {
+      "name": "panel",
+      "userData": {
+        "textureUrl": "blob:https://example.com/tex-1",
+        "videoUrl": "blob:https://example.com/9f5c-4a7d"
+      }
+    }
+  ],
+  "warnings": [],
+  "errors": []
+}

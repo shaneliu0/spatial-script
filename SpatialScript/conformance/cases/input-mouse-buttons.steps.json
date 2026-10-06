@@ -1,0 +1,26 @@
+[
+  {
+    "setInput": {
+      "mouse": { "position": [10, 10], "buttons": [false, false, false], "delta": [0, 0] }
+    }
+  },
+  { "frames": 1 },
+  {
+    "setInput": {
+      "mouse": { "position": [10, 10], "buttons": [true, true, true], "delta": [0, 0] }
+    }
+  },
+  { "frames": 1 },
+  {
+    "setInput": {
+      "mouse": { "position": [10, 10], "buttons": [false, false, false], "delta": [0, 0] }
+    }
+  },
+  { "frames": 1 },
+  {
+    "setInput": {
+      "mouse": { "position": [10, 10], "buttons": [true, false, false], "delta": [0, 0] }
+    }
+  },
+  { "frames": 2 }
+]

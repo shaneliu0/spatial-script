@@ -1,0 +1,26 @@
+[
+  { "frames": 1 },
+  {
+    "setInput": {
+      "mouse": {
+        "position": [120, 80],
+        "scenePosition": [0.25, 0.5, -1.5],
+        "buttons": [false, false, false],
+        "delta": [4, 2],
+        "scroll": [3, -7],
+        "connected": true
+      }
+    }
+  },
+  { "frames": 1 },
+  {
+    "setInput": {
+      "mouse": {
+        "position": [120, 80],
+        "buttons": [false, false, false],
+        "connected": true
+      }
+    }
+  },
+  { "frames": 1 }
+]

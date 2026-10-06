@@ -1,0 +1,27 @@
+{
+  "scene": {
+    "userData": { "capability": true }
+  },
+  "objects": [
+    {
+      "name": "button",
+      "accessibility": {
+        "label": "Start",
+        "value": "off",
+        "hint": "Begins the run",
+        "isButton": true
+      }
+    },
+    {
+      "name": "label",
+      "accessibility": {
+        "label": "Score",
+        "value": "12",
+        "hint": "",
+        "isButton": false
+      }
+    },
+    { "name": "plain", "accessibility": null },
+    { "name": "cleared", "accessibility": null }
+  ]
+}

@@ -1,0 +1,17 @@
+[
+  { "frames": 1 },
+  {
+    "setInput": {
+      "keyboard": { "down": ["KeyA"], "pressed": [], "connected": true },
+      "mouse": { "position": [4, 4], "buttons": [false, false, false], "connected": true }
+    }
+  },
+  { "frames": 2 },
+  {
+    "setInput": {
+      "keyboard": { "down": [], "pressed": [], "connected": false },
+      "mouse": { "position": null, "buttons": [false, false, false], "connected": false }
+    }
+  },
+  { "frames": 1 }
+]

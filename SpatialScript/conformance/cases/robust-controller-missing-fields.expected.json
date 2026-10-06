@@ -1,0 +1,115 @@
+{
+  "errors": [],
+  "controllers": [
+    {
+      "id": "controller-0",
+      "name": "",
+      "leftThumbstick": [
+        0,
+        0
+      ],
+      "rightThumbstick": [
+        0,
+        0
+      ],
+      "leftTrigger": 0,
+      "rightTrigger": 0,
+      "buttons": {
+        "a": 0,
+        "b": 0,
+        "x": 0,
+        "y": 0,
+        "leftShoulder": 0,
+        "rightShoulder": 0,
+        "dpadUp": 0,
+        "dpadDown": 0,
+        "dpadLeft": 0,
+        "dpadRight": 0,
+        "menu": 0,
+        "options": 0
+      }
+    },
+    {
+      "id": "pad-1",
+      "name": "",
+      "leftThumbstick": [
+        0.4,
+        0
+      ],
+      "rightThumbstick": [
+        0,
+        0
+      ],
+      "leftTrigger": 0,
+      "rightTrigger": 0,
+      "buttons": {
+        "a": 0,
+        "b": 0,
+        "x": 0,
+        "y": 0,
+        "leftShoulder": 0,
+        "rightShoulder": 0,
+        "dpadUp": 0,
+        "dpadDown": 0,
+        "dpadLeft": 0,
+        "dpadRight": 0,
+        "menu": 0,
+        "options": 0
+      }
+    }
+  ],
+  "objects": [
+    {
+      "name": "probe",
+      "userData": {
+        "connected": 2,
+        "currentId": "pad-1",
+        "foundById": true,
+        "missingById": null,
+        "connectedEvents": 2,
+        "firstSeenId": "pad-1",
+        "readings": [
+          {
+            "id": "controller-0",
+            "name": "",
+            "leftThumbstick": [
+              0,
+              0
+            ],
+            "rightThumbstick": [
+              0,
+              0
+            ],
+            "leftTrigger": 0,
+            "rightTrigger": 0,
+            "missingButtons": 0,
+            "anyDown": false,
+            "anyPressed": false,
+            "anyReleased": false,
+            "totalValue": 0
+          },
+          {
+            "id": "pad-1",
+            "name": "",
+            "leftThumbstick": [
+              0.4,
+              0
+            ],
+            "rightThumbstick": [
+              0,
+              0
+            ],
+            "leftTrigger": 0,
+            "rightTrigger": 0,
+            "missingButtons": 0,
+            "anyDown": false,
+            "anyPressed": false,
+            "anyReleased": false,
+            "totalValue": 0
+          }
+        ],
+        "currentBeforeUse": null
+      }
+    }
+  ]
+}

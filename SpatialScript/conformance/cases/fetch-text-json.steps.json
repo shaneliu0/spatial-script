@@ -1,0 +1,40 @@
+[
+  { "frames": 1 },
+  {
+    "dispatch": {
+      "type": "fetchResult",
+      "fetch": "assets/data/notes.txt",
+      "payload": { "text": "two lines\nof notes" }
+    }
+  },
+  {
+    "dispatch": {
+      "type": "fetchResult",
+      "fetch": "assets/data/config.json",
+      "payload": { "json": { "level": 3, "tags": ["a", "b"] } }
+    }
+  },
+  {
+    "dispatch": {
+      "type": "fetchResult",
+      "fetch": "assets/data/inline.json",
+      "payload": { "text": "{\"from\":\"text\"}" }
+    }
+  },
+  {
+    "dispatch": {
+      "type": "fetchResult",
+      "fetch": "assets/data/broken.json",
+      "payload": { "text": "<html>nope</html>" }
+    }
+  },
+  {
+    "dispatch": {
+      "type": "fetchResult",
+      "fetch": "assets/data/gone.txt",
+      "payload": { "error": "404" }
+    }
+  },
+  { "frames": 1 },
+  { "frames": 1 }
+]

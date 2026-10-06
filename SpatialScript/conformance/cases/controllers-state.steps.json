@@ -1,0 +1,28 @@
+[
+  { "frames": 1 },
+  {
+    "inject": "controller",
+    "state": {
+      "id": "pad-1",
+      "name": "Wireless Pad",
+      "leftThumbstick": [0.5, -3],
+      "rightThumbstick": [0, 0.25],
+      "leftTrigger": 0.75,
+      "rightTrigger": -2,
+      "buttons": { "a": true, "leftShoulder": 1, "dpadUp": 1 }
+    }
+  },
+  { "frames": 1 },
+  {
+    "inject": "controller",
+    "state": {
+      "id": "pad-1",
+      "name": "Wireless Pad",
+      "leftThumbstick": [0.5, -3],
+      "rightThumbstick": [0, 0.25],
+      "leftTrigger": 0.75,
+      "buttons": { "b": 1, "x": 0.5, "leftShoulder": 1, "dpadUp": 1, "options": true }
+    }
+  },
+  { "frames": 1 }
+]

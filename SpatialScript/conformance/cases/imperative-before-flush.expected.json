@@ -1,0 +1,28 @@
+{
+  "scene": {
+    "userData": {
+      "frame": 3,
+      "dropped": [
+        "ParticleEmitter.burst on \"loose\" was dropped: the object is not in the mounted scene"
+      ],
+      "velocityApplied": true,
+      "deferredCalls": 3
+    }
+  },
+  "objects": [
+    {
+      "name": "ball",
+      "rigidBody": {
+        "type": "dynamic",
+        "mass": 1
+      }
+    },
+    {
+      "name": "fx"
+    },
+    {
+      "name": "loose",
+      "absent": true
+    }
+  ]
+}

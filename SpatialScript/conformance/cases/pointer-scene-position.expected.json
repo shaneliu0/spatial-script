@@ -1,0 +1,23 @@
+{
+  "objects": [
+    {
+      "name": "probe",
+      "userData": {
+        "rayIsUsable": true,
+        "rayTypeError": "TypeError",
+        "position": [120, 80],
+        "delta": [0, 0],
+        "scene": [
+          null,
+          [0.25, 0.5, -1.5],
+          null
+        ],
+        "scroll": [
+          [0, 0],
+          [3, -7],
+          [0, 0]
+        ]
+      }
+    }
+  ]
+}
