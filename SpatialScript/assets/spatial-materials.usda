@@ -1,0 +1,36 @@
+#usda 1.0
+(
+    defaultPrim = "Root"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "Root"
+{
+    def Material "Glow"
+    {
+        prepend token outputs:mtlx:surface.connect = </Root/Glow/Surface.outputs:out>
+        color3f inputs:glowColor = (1, 0.35, 0.1) (
+            colorSpace = "srgb_texture"
+        )
+        float inputs:glowAmount = 1
+
+        def Shader "Amount"
+        {
+            uniform token info:id = "ND_multiply_color3FA"
+            color3f inputs:in1.connect = </Root/Glow.inputs:glowColor>
+            float inputs:in2.connect = </Root/Glow.inputs:glowAmount>
+            color3f outputs:out
+        }
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "ND_UsdPreviewSurface_surfaceshader"
+            color3f inputs:diffuseColor.connect = </Root/Glow.inputs:glowColor>
+            color3f inputs:emissiveColor.connect = </Root/Glow/Amount.outputs:out>
+            float inputs:metallic = 0
+            float inputs:roughness = 0.35
+            token outputs:out
+        }
+    }
+}
