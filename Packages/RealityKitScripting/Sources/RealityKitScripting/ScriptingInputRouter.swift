@@ -45,6 +45,18 @@ public final class ScriptingInputRouter {
     private var mousePosition: CGPoint?
     private var previousMousePosition: CGPoint?
     private var mouseButtons: [Bool] = [false, false, false]
+    /// SPEC 14.9 per-button edges and click counts, indexed left, right, middle.
+    private var mouseButtonStates = [ScriptingButtonState(), ScriptingButtonState(), ScriptingButtonState()]
+    /// SPEC 14.9 scroll, accumulated within a frame and cleared by `beginFrame`.
+    private var scrollDelta = SIMD2<Double>.zero
+    /// SPEC 14.8. Set by `ScriptingRuntime.setup(inputOptions:)`.
+    var providesGamepad = true
+    var providesHandTracking = true
+    /// True once the macOS event monitor is watching, which is the only way
+    /// this consumer knows a keyboard is attached to it.
+    private var hasKeyboardMonitor = false
+    /// Last world point under the pointer, refreshed by `updatePointer`.
+    private var scenePositionCache: [Double]?
     private var frameSnapshot: [String: Any]?
     private var consumedThisFrame: Set<UUID> = []
 #if os(macOS)
@@ -159,6 +171,7 @@ public final class ScriptingInputRouter {
     public func updatePointer(location: CGPoint?) {
         mousePosition = location
         guard let location, let ray = pointerRayProvider?(location) else {
+            scenePositionCache = nil
             endHover()
             return
         }
@@ -169,6 +182,7 @@ public final class ScriptingInputRouter {
                 nearest = (scene, hit.id, hit.distance)
             }
         }
+        recordScenePosition(ray: ray, hitDistance: nearest?.distance)
         guard let nearest else {
             endHover()
             return
@@ -182,6 +196,44 @@ public final class ScriptingInputRouter {
         nearest.scene.dispatch(type: "hoverenter", id: nearest.id, payload: nil)
     }
 
+    /// SPEC 14.3 `Spatial.input.mouse.scenePosition`: the world point under
+    /// the pointer on the first hit mesh, or on the plane through the origin
+    /// facing the camera when nothing is hit.
+    ///
+    /// Computed by `updatePointer`, which already casts the hover ray, and
+    /// cached: casting again once per frame would materialise every deferred
+    /// collider in the scene and cost more than the frame itself.
+    private func recordScenePosition(
+        ray: (origin: SIMD3<Float>, direction: SIMD3<Float>),
+        hitDistance: Float?
+    ) {
+        let distance: Float
+        if let hitDistance {
+            distance = hitDistance
+        } else {
+            // The plane through the origin whose normal faces the camera: the
+            // ray meets it wherever the projection along the view direction
+            // cancels the origin's own offset.
+            let denominator = simd_dot(ray.direction, ray.direction)
+            guard denominator > 1e-6 else { scenePositionCache = nil; return }
+            let t = -simd_dot(ray.origin, ray.direction) / denominator
+            guard t > 0 else { scenePositionCache = nil; return }
+            distance = t
+        }
+        let point = ray.origin + ray.direction * distance
+        scenePositionCache = [Double(point.x), Double(point.y), Double(point.z)]
+    }
+
+    /// SPEC 14.3 `Spatial.rayFromPoint(x, y)`, in world space. Nil where there
+    /// is no view camera to project through.
+    func rayFromPoint(x: Double, y: Double) -> [Double]? {
+        guard let ray = pointerRayProvider?(CGPoint(x: x, y: y)) else { return nil }
+        return [
+            Double(ray.origin.x), Double(ray.origin.y), Double(ray.origin.z),
+            Double(ray.direction.x), Double(ray.direction.y), Double(ray.direction.z),
+        ]
+    }
+
     private func endHover() {
         if let scene = hoveredScene, let id = hoveredID {
             scene.dispatch(type: "hoverexit", id: id, payload: nil)
@@ -193,6 +245,31 @@ public final class ScriptingInputRouter {
     public func setMouseButton(_ index: Int, down: Bool) {
         guard index >= 0, index < mouseButtons.count else { return }
         mouseButtons[index] = down
+        mouseButtonStates[index].update(
+            down: down,
+            value: down ? 1 : 0,
+            now: Date().timeIntervalSinceReferenceDate
+        )
+    }
+
+    /// SPEC 14.9 `mouse.scroll`, in view points, summed within the frame.
+    public func addScroll(x: Double, y: Double) {
+        scrollDelta += SIMD2(x, y)
+    }
+
+    /// What the native dump reports under `controllers` (SPEC 14.13).
+    func controllerSnapshot() -> [[String: Any]] {
+        providesGamepad ? ScriptingGameControllerHub.shared.normalizedJSON() : []
+    }
+
+    /// SPEC 14.13a: while a parity plan runs, the core sees only injected
+    /// input, so a plan is deterministic and does not drift with whatever the
+    /// pointer happened to be doing.
+    var suppressesLiveInput = false
+
+    /// SPEC 14.14: drives `Spatial.input.controllers` without hardware.
+    public func injectControllers(_ states: [[String: Any]]?) {
+        ScriptingGameControllerHub.shared.inject(states)
     }
 
     // MARK: - Polled state
@@ -214,22 +291,75 @@ public final class ScriptingInputRouter {
         }
         previousMousePosition = mousePosition
 
-        let snapshot: [String: Any] = [
+        // SPEC 14.9: `connected` is a device fact, so it is only true once a
+        // real keyboard or pointer is driving this process. A headless host
+        // (the conformance runner) reports neither.
+#if os(macOS)
+        // A test or headless host is not a regular application and no key
+        // events can reach it, whatever monitors are installed in-process.
+        let keyboardConnected = hasKeyboardMonitor
+            && NSApplication.shared.activationPolicy() == .regular
+#else
+        let keyboardConnected = hasKeyboardMonitor
+#endif
+        let mouseConnected = mousePosition != nil
+
+        if suppressesLiveInput { return injectedOnlySnapshot(for: sceneID) }
+
+        var mouse: [String: Any] = [
+            "position": mousePosition.map { [Double($0.x), Double($0.y)] } as Any,
+            "buttons": mouseButtons,
+            "delta": delta,
+            "scroll": [scrollDelta.x, scrollDelta.y],
+            "connected": mouseConnected,
+            "scenePosition": (mousePosition == nil ? nil : scenePositionCache) as Any? ?? NSNull(),
+        ]
+        for (index, name) in ["left", "right", "middle"].enumerated() {
+            mouse[name] = mouseButtonStates[index].json
+        }
+
+        var snapshot: [String: Any] = [
             "keyboard": [
                 "down": Array(keysDown),
                 "pressed": Array(keysPressed),
+                "connected": keyboardConnected,
             ],
-            "mouse": [
-                "position": mousePosition.map { [Double($0.x), Double($0.y)] } as Any,
-                "buttons": mouseButtons,
-                "delta": delta,
-            ],
-            "hands": [
+            "mouse": mouse,
+            "hands": providesHandTracking ? [
                 "left": ScriptingHandTracking.shared.handJSON(chirality: .left) as Any,
                 "right": ScriptingHandTracking.shared.handJSON(chirality: .right) as Any,
-            ],
+            ] : ["left": NSNull(), "right": NSNull()],
         ]
+        if providesGamepad {
+            snapshot["controllers"] = ScriptingGameControllerHub.shared.json()
+        } else {
+            snapshot["controllers"] = [[String: Any]]()
+        }
         keysPressed.removeAll()
+        frameSnapshot = snapshot
+        consumedThisFrame = [sceneID]
+        return snapshot
+    }
+
+    /// The input a parity plan sees: nothing live, only what was injected.
+    private func injectedOnlySnapshot(for sceneID: UUID) -> [String: Any] {
+        var snapshot: [String: Any] = [
+            "keyboard": ["down": [String](), "pressed": [String](), "connected": false],
+            "mouse": [
+                "position": NSNull(),
+                "buttons": [false, false, false],
+                "delta": [0.0, 0.0],
+                "scroll": [0.0, 0.0],
+                "connected": false,
+                "scenePosition": NSNull(),
+                "left": ScriptingButtonState().json,
+                "right": ScriptingButtonState().json,
+                "middle": ScriptingButtonState().json,
+            ],
+            "hands": ["left": NSNull(), "right": NSNull()],
+        ]
+        // An injected controller is scripted input, so it still counts.
+        snapshot["controllers"] = ScriptingGameControllerHub.shared.injectedJSON()
         frameSnapshot = snapshot
         consumedThisFrame = [sceneID]
         return snapshot
@@ -239,6 +369,20 @@ public final class ScriptingInputRouter {
     func beginFrame() {
         frameSnapshot = nil
         consumedThisFrame.removeAll(keepingCapacity: true)
+        scrollDelta = .zero
+        for index in mouseButtonStates.indices { mouseButtonStates[index].clearEdges() }
+        if providesGamepad {
+            let hub = ScriptingGameControllerHub.shared
+            hub.clearEdges()
+            hub.sample(now: Date().timeIntervalSinceReferenceDate)
+        }
+    }
+
+    /// Connect and disconnect notices the system turns into scene events.
+    func drainControllerChanges() -> (connected: [[String: Any]], disconnected: [String]) {
+        guard providesGamepad else { return ([], []) }
+        let hub = ScriptingGameControllerHub.shared
+        return (hub.drainConnects(), hub.drainDisconnects())
     }
 
     // MARK: - Keyboard and mouse monitors
@@ -250,7 +394,9 @@ public final class ScriptingInputRouter {
             .leftMouseDown, .leftMouseUp,
             .rightMouseDown, .rightMouseUp,
             .otherMouseDown, .otherMouseUp,
+            .scrollWheel,
         ]
+        hasKeyboardMonitor = true
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { event in
             MainActor.assumeIsolated {
                 ScriptingInputRouter.shared.handle(event: event)
@@ -279,12 +425,13 @@ public final class ScriptingInputRouter {
                     keysDown.remove(code)
                 }
             }
-        case .leftMouseDown: mouseButtons[0] = true
-        case .leftMouseUp: mouseButtons[0] = false
-        case .rightMouseDown: mouseButtons[1] = true
-        case .rightMouseUp: mouseButtons[1] = false
-        case .otherMouseDown: mouseButtons[2] = true
-        case .otherMouseUp: mouseButtons[2] = false
+        case .leftMouseDown: setMouseButton(0, down: true)
+        case .leftMouseUp: setMouseButton(0, down: false)
+        case .rightMouseDown: setMouseButton(1, down: true)
+        case .rightMouseUp: setMouseButton(1, down: false)
+        case .otherMouseDown: setMouseButton(2, down: true)
+        case .otherMouseUp: setMouseButton(2, down: false)
+        case .scrollWheel: addScroll(x: Double(event.scrollingDeltaX), y: Double(event.scrollingDeltaY))
         default: break
         }
     }

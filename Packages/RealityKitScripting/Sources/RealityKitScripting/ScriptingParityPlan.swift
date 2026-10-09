@@ -61,9 +61,16 @@ public enum ScriptingParityPlan {
         var frames = 0
         var errors: [String] = []
         let plan = steps.isEmpty ? [["frames": 3]] : steps
+        // SPEC 14.13a: a plan sees only injected input, so the pointer the
+        // developer happens to be holding cannot change the result.
+        ScriptingInputRouter.shared.suppressesLiveInput = true
 
         for step in plan {
             if let count = intValue(step["frames"]) {
+                // SPEC 14.10: an inactive scene does not tick, so a plan that
+                // deactivated it is asking for time that deliberately does not
+                // pass. That is the step doing its job, not a stalled window.
+                guard scene.isActive else { continue }
                 let applied = await advance(scene, frames: max(0, count))
                 frames += applied
                 if applied < max(0, count) {
@@ -72,123 +79,20 @@ public enum ScriptingParityPlan {
                 continue
             }
 
-            if let inject = step["inject"] as? String {
-                let target = step["target"] as? String ?? ""
-                switch inject {
-                case "tap":
-                    scene.injectTap(target: target, point: vector(step["point"]))
-                case "hover":
-                    scene.injectHover(target: target, entering: step["entering"] as? Bool ?? true)
-                case "drag":
-                    scene.injectDrag(
-                        target: target,
-                        translation: vector(step["translation"]) ?? .zero,
-                        steps: intValue(step["steps"]) ?? 1
-                    )
-                case "key":
-                    scene.injectKey(
-                        code: step["code"] as? String ?? target,
-                        down: step["down"] as? Bool ?? true
-                    )
-                default:
-                    errors.append("Error: unknown inject \"\(inject)\"")
-                }
-                continue
-            }
-
-            if let dispatch = step["dispatch"] as? [String: Any] {
-                let type = dispatch["type"] as? String ?? ""
-                let id: Int?
-                if let texture = dispatch["texture"] as? String {
-                    id = scene.textureID(forURL: texture)
-                } else if let asset = dispatch["asset"] as? String {
-                    id = scene.assetID(forURL: asset)
-                } else {
-                    id = scene.objectID(named: dispatch["target"] as? String ?? "")
-                }
-                guard let id else {
-                    errors.append("Error: no target for dispatch \(dispatch)")
-                    continue
-                }
-                var payload = dispatch["payload"] as? [String: Any] ?? [:]
-                if let other = payload["other"] as? String {
-                    payload["other"] = scene.objectID(named: other) ?? 0
-                }
-                scene.dispatch(type: type, id: id, payload: payload)
-                continue
-            }
-
-            if let sync = step["sync"] as? [[String: Any]] {
-                var flat: [Float] = []
-                for record in sync {
-                    guard let id = scene.objectID(named: record["target"] as? String ?? "") else {
-                        errors.append("Error: no object named \(record["target"] ?? "")")
-                        continue
-                    }
-                    let position = floats(record["position"]) ?? [0, 0, 0]
-                    let quaternion = floats(record["quaternion"]) ?? [0, 0, 0, 1]
-                    let scale = floats(record["scale"]) ?? [1, 1, 1]
-                    flat.append(Float(id))
-                    flat.append(contentsOf: position)
-                    flat.append(contentsOf: quaternion)
-                    flat.append(contentsOf: scale)
-                    scene.setNativeWorldTransform(
-                        id: id,
-                        position: SIMD3(position[0], position[1], position[2]),
-                        rotation: simd_quatf(
-                            ix: quaternion[0],
-                            iy: quaternion[1],
-                            iz: quaternion[2],
-                            r: quaternion[3]
-                        ),
-                        scale: SIMD3(scale[0], scale[1], scale[2])
-                    )
-                }
-                scene.sync(records: flat)
-                continue
-            }
-
-            if let syncBodies = step["syncBodies"] as? [[String: Any]] {
-                var flat: [Float] = []
-                for record in syncBodies {
-                    guard let id = scene.objectID(named: record["target"] as? String ?? "") else { continue }
-                    flat.append(Float(id))
-                    flat.append(contentsOf: floats(record["linear"]) ?? [0, 0, 0])
-                    flat.append(contentsOf: floats(record["angular"]) ?? [0, 0, 0])
-                    flat.append(record["sleeping"] as? Bool == true ? 1 : 0)
-                }
-                scene.syncBodies(records: flat)
-                continue
-            }
-
-            if let input = step["setInput"] as? [String: Any] {
-                scene.setInput(input)
-                continue
-            }
-
-            if step["dispose"] != nil {
-                scene.dispose()
-                continue
-            }
+            // Every other step kind is the conformance vocabulary, applied by
+            // the interpreter both runners share.
+            if ScriptingSceneStep.apply(step, to: scene, errors: &errors) { continue }
 
             errors.append("Error: unknown step \(step)")
         }
 
         ScriptingRuntime.isPaused = true
         scene.allowPlanFrames(0)
+        ScriptingInputRouter.shared.suppressesLiveInput = false
         return Outcome(frames: frames, errors: errors)
     }
 
-    static func vector(_ value: Any?) -> SIMD3<Float>? {
-        guard let values = floats(value), values.count >= 3 else { return nil }
-        return SIMD3(values[0], values[1], values[2])
-    }
-
-    static func floats(_ value: Any?) -> [Float]? {
-        (value as? [Any])?.compactMap { ($0 as? NSNumber)?.floatValue }
-    }
-
     static func intValue(_ value: Any?) -> Int? {
-        (value as? NSNumber)?.intValue
+        ScriptingSceneStep.intValue(value)
     }
 }

@@ -312,12 +312,18 @@ extension ScriptingCommandApplier {
                 record.assetContainer = loaded
                 record.entity.addChild(loaded)
                 let bounds = loaded.visualBounds(relativeTo: record.entity)
+                // SPEC 14.5: the skeleton and blend shapes the script can
+                // address come with the load, so `asset.skeleton` and
+                // `asset.blendShapes` are non-null only when they exist.
+                let rig = indexSkeleton(for: record)
                 dispatch?("assetLoaded", id, [
                     "animations": loaded.availableAnimations.compactMap(\.name),
                     "boundingBox": [
                         bounds.min.x, bounds.min.y, bounds.min.z,
                         bounds.max.x, bounds.max.y, bounds.max.z,
                     ],
+                    "joints": rig.joints,
+                    "blendShapes": rig.blendShapes,
                 ])
             } catch {
                 guard isCurrent(generation), records[id] != nil else { return }

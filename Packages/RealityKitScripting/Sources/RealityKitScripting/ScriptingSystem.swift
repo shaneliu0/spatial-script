@@ -65,8 +65,10 @@ final class ScriptingSystem: System {
                         rootEntity: entity,
                         source: component.source,
                         assetRoot: ScriptingRuntime.assetRoot,
-                        logListener: ScriptingRuntime.logListener
+                        logListener: ScriptingRuntime.logListener,
+                        previousState: component.previousState
                     )
+                    if !ScriptingRuntime.isActive { scene.setActive(false) }
                     entries[key] = Entry(componentID: component.id, scene: scene)
                     ScriptingRuntime.register(scene: scene, for: entity)
                 } catch {

@@ -59,6 +59,10 @@ extension ScriptingCommandApplier {
                     deltaTime: dt
                 )
             }
+            if !record.hasObservedMotion, let previous = record.previousWorldPosition,
+               simd_distance(position, previous) > 1e-6 {
+                record.hasObservedMotion = true
+            }
             record.previousWorldPosition = position
             record.previousWorldOrientation = orientation
 
@@ -89,6 +93,12 @@ extension ScriptingCommandApplier {
     func bodyVelocitySyncRecords() -> [Float] {
         var values: [Float] = []
         for record in records.values where record.bodyType == "dynamic" {
+            // Velocity here is measured, not read back from RealityKit. Until
+            // a body has actually moved there is nothing to measure, and
+            // reporting the zero would erase a velocity or impulse the script
+            // set imperatively. Once it has moved the readback owns the value,
+            // including the zero it settles at.
+            guard record.hasObservedMotion else { continue }
             values.append(Float(record.id))
             values.append(contentsOf: [
                 record.linearVelocity.x, record.linearVelocity.y, record.linearVelocity.z,

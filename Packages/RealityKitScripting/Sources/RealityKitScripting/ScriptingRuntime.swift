@@ -30,10 +30,21 @@ public final class ScriptingRuntime {
     }
 
     private static var didRegister = false
+    /// What `setup` was called with, for the capability report.
+    public private(set) static var activeInputOptions: InputOptions = .all
     private static var scenesByEntity: [ObjectIdentifier: JavaScriptScene] = [:]
 
     /// Root the consumer resolves relative texture and asset paths against.
     public static var assetRoot: URL?
+
+    /// The viewport's width over its height (SPEC 14.3). An orthographic
+    /// camera's visible width follows it, because RealityKit's orthographic
+    /// camera takes only a height. Set by the view that owns the RealityView.
+    public static var viewportAspect: Double = 1
+
+    /// The view's own camera on macOS (SPEC 14.3). It is switched off while a
+    /// script owns `Spatial.camera`, so RealityKit renders through exactly one.
+    public static weak var defaultCameraEntity: Entity?
 
     /// Receives console output from every scene.
     public static var logListener: ScriptingLogListener?
@@ -44,6 +55,9 @@ public final class ScriptingRuntime {
 
     /// Forces every tick to use exactly this delta, for deterministic replay.
     public static var fixedDeltaTime: TimeInterval?
+
+    /// Scenes start inactive when the view that owns them is not on screen.
+    public static var isActive = true
 
     /// Called when a script fails to load, with the position when one is known.
     public static var loadFailureListener: (@MainActor (JavaScriptScene.ScriptError) -> Void)?
@@ -58,7 +72,17 @@ public final class ScriptingRuntime {
             ScriptingSystem.registerSystem()
             didRegister = true
         }
-        _ = inputOptions
+        // SPEC 14.8: an omitted provider is not started and the matching
+        // capability is reported false.
+        activeInputOptions = inputOptions
+        let router = ScriptingInputRouter.shared
+        router.providesGamepad = inputOptions.contains(.gamepad)
+        router.providesHandTracking = inputOptions.contains(.ar)
+        if inputOptions.contains(.gamepad) {
+            ScriptingGameControllerHub.shared.start()
+        } else {
+            ScriptingGameControllerHub.shared.stop()
+        }
         return ScriptingRuntime()
     }
 
@@ -122,6 +146,96 @@ public final class ScriptingRuntime {
             "jit": isJITEnabled,
             "watchdog": watchdogStatus,
         ]
+    }
+
+    // MARK: - Host channel (SPEC 14.10)
+
+    /// A function an embedding app registers for scripts to call.
+    public enum HostFunction {
+        case synchronous(@MainActor ([String: Any]) throws -> Any?)
+        case asynchronous(@MainActor ([String: Any]) async throws -> Any?)
+        /// The app answers later, through the completion it is handed.
+        case deferred(@MainActor ([String: Any], @escaping @MainActor (Any?, String?) -> Void) -> Void)
+    }
+
+    private static var hostFunctions: [String: HostFunction] = [:]
+    /// Registration order, which is the order `Spatial.host.functions` lists.
+    private static var hostFunctionOrder: [String] = []
+    private static var hostEventHandlers: [String: [(@MainActor (String, [String: Any]) -> Void)]] = [:]
+
+    /// `ScriptingRuntime.register(module: "MyApp", function: "save") { args in ... }`.
+    /// Scripts reach it as `await Spatial.host.call("MyApp.save", args)`.
+    public static func register(
+        module: String,
+        function: String,
+        body: @escaping @MainActor ([String: Any]) throws -> Any?
+    ) {
+        setHostFunction("\(module).\(function)", .synchronous(body))
+    }
+
+    public static func register(
+        module: String,
+        function: String,
+        asyncBody: @escaping @MainActor ([String: Any]) async throws -> Any?
+    ) {
+        setHostFunction("\(module).\(function)", .asynchronous(asyncBody))
+    }
+
+    /// Registers a function the app answers later, for a call that has to wait
+    /// on the user or on work the app schedules itself.
+    public static func register(
+        module: String,
+        function: String,
+        deferredBody: @escaping @MainActor ([String: Any], @escaping @MainActor (Any?, String?) -> Void) -> Void
+    ) {
+        setHostFunction("\(module).\(function)", .deferred(deferredBody))
+    }
+
+    private static func setHostFunction(_ name: String, _ function: HostFunction) {
+        if hostFunctions[name] == nil { hostFunctionOrder.append(name) }
+        hostFunctions[name] = function
+        publishHostFunctions()
+    }
+
+    /// SPEC 14.13: a registration made after a script has loaded still has to
+    /// show up in `Spatial.host.functions`, so every live scene is told.
+    static func publishHostFunctions() {
+        let names = hostFunctionNames
+        for scene in scenesByEntity.values { scene.setHostFunctions(names) }
+    }
+
+    public static func unregister(module: String, function: String) {
+        let name = "\(module).\(function)"
+        hostFunctions[name] = nil
+        hostFunctionOrder.removeAll { $0 == name }
+        publishHostFunctions()
+    }
+
+    static func hostFunction(named name: String) -> HostFunction? {
+        hostFunctions[name]
+    }
+
+    /// What `Spatial.host.functions` reports.
+    public static var hostFunctionNames: [String] {
+        hostFunctionOrder.filter { hostFunctions[$0] != nil }
+    }
+
+    /// Listens for `Spatial.host.send(name, payload)` from any scene.
+    public static func on(
+        _ name: String,
+        handler: @escaping @MainActor (String, [String: Any]) -> Void
+    ) {
+        hostEventHandlers[name, default: []].append(handler)
+    }
+
+    public static func removeHostEventHandlers(for name: String) {
+        hostEventHandlers[name] = nil
+    }
+
+    static func deliverHostEvent(name: String, payload: [String: Any], from scene: JavaScriptScene) {
+        for handler in hostEventHandlers[name] ?? [] { handler(name, payload) }
+        for handler in hostEventHandlers["*"] ?? [] { handler(name, payload) }
+        _ = scene
     }
 
     public static func validateScript(_ script: String) throws {

@@ -14,7 +14,14 @@ extension ScriptingCommandApplier {
     /// light parameters RealityKit stores are read back off the entities;
     /// descriptive fields the engine does not keep (the three.js class names,
     /// the geometry parameters) are echoed from the command that produced them.
-    func nativeDump(platform: String, frame: Int, elapsed: Double, errors: [String], logs: [String]) -> [String: Any] {
+    func nativeDump(
+        platform: String,
+        frame: Int,
+        elapsed: Double,
+        errors: [String],
+        logs: [String],
+        isActive: Bool = true
+    ) -> [String: Any] {
         var objects: [[String: Any]] = []
         for record in records.values.sorted(by: { $0.id < $1.id }) where isAttached(record.entity) {
             objects.append(describe(record))
@@ -48,7 +55,7 @@ extension ScriptingCommandApplier {
             "errors": errors,
             "logs": logs,
             "placeholder": false,
-        ]
+        ].merging(phase2SceneDump(isActive: isActive)) { current, _ in current }
     }
 
     private func isAttached(_ entity: Entity) -> Bool {
@@ -68,7 +75,7 @@ extension ScriptingCommandApplier {
         var object: [String: Any] = [
             "id": record.id,
             "name": entity.name,
-            "type": Self.dumpType(for: record),
+            "type": dumpType(for: record),
             "parent": parentIdentifier(of: entity),
             "visible": entity.isEnabled,
             "position": [transform.translation.x, transform.translation.y, transform.translation.z],
@@ -101,9 +108,22 @@ extension ScriptingCommandApplier {
             object["geometry"] = NSNull()
         } else {
             let parameters: Any = record.geometryParameters.isEmpty ? NSNull() : record.geometryParameters
-            object["geometry"] = ["type": record.geometryType, "parameters": parameters] as [String: Any]
+            var geometry: [String: Any] = ["type": record.geometryType, "parameters": parameters]
+            // SPEC 14.12: how the mesh is split, and how many parts it draws.
+            if let raw = record.geometryRawGroupCount {
+                geometry["groupCount"] = raw
+                geometry["parts"] = record.geometryGroups ?? 1
+            }
+            object["geometry"] = geometry
         }
-        object["material"] = materialDump(record) ?? NSNull()
+        for (key, value) in phase2Dump(record) { object[key] = value }
+        // SPEC 14.12: a mesh with a material per part dumps an array, the way
+        // the core does, and a single material stays a single object.
+        if let specs = record.materialSpecs, specs.count > 1 {
+            object["material"] = specs.indices.map { materialDump(record, index: $0) }
+        } else {
+            object["material"] = materialDump(record) ?? NSNull()
+        }
         object["light"] = lightDump(record) ?? NSNull()
         object["rigidBody"] = bodyDump(record) ?? NSNull()
 
@@ -120,8 +140,48 @@ extension ScriptingCommandApplier {
         return object
     }
 
+    private func materialDump(_ record: Record, index: Int) -> [String: Any] {
+        guard let specs = record.materialSpecs, specs.indices.contains(index) else { return [:] }
+        return materialDump(record, spec: specs[index], material: materialSlot(record, index: index))
+    }
+
+    private func materialSlot(_ record: Record, index: Int) -> (any RealityKit.Material)? {
+        let materials = (record.entity as? ModelEntity)?.model?.materials ?? []
+        return materials.indices.contains(index) ? materials[index] : nil
+    }
+
     private func materialDump(_ record: Record) -> [String: Any]? {
+        // SPEC 14.6: a shader graph reports itself, with its fallback nested.
+        if let shader = record.extras?.shaderGraph {
+            var dump: [String: Any] = [
+                "type": "ShaderGraphMaterial",
+                "source": shader.source,
+                "name": shader.name,
+                "parameters": shader.parameters,
+                "generation": shader.generation,
+                "loaded": shader.loaded,
+                "nativeType": record.nativeMaterial is ShaderGraphMaterial
+                    ? "ShaderGraphMaterial"
+                    : "fallback",
+            ]
+            if let spec = record.materialSpec {
+                dump["fallback"] = materialDump(record, spec: spec, material: record.nativeMaterial)
+            }
+            return dump
+        }
         guard let spec = record.materialSpec else { return nil }
+        return materialDump(
+            record,
+            spec: spec,
+            material: (record.entity as? ModelEntity)?.model?.materials.first
+        )
+    }
+
+    private func materialDump(
+        _ record: Record,
+        spec: ScriptingMaterialSpec,
+        material: (any RealityKit.Material)?
+    ) -> [String: Any] {
         var dump: [String: Any] = [
             "type": spec.type,
             "color": [spec.color.x, spec.color.y, spec.color.z],
@@ -143,7 +203,6 @@ extension ScriptingCommandApplier {
         ]
 
         // Read the values back off the material RealityKit is actually using.
-        let material = (record.entity as? ModelEntity)?.model?.materials.first
         if let physical = material as? PhysicallyBasedMaterial {
             dump["nativeType"] = "PhysicallyBasedMaterial"
             let tint = ScriptingColor.linearComponents(of: physical.baseColor.tint)
@@ -161,6 +220,10 @@ extension ScriptingCommandApplier {
             let emissive = ScriptingColor.linearComponents(of: physical.emissiveColor.color)
             dump["emissive"] = [emissive.x, emissive.y, emissive.z]
             dump["emissiveIntensity"] = physical.emissiveIntensity
+        } else if material is ShaderGraphMaterial {
+            // SPEC 14.6: the graph's own name and parameters live under
+            // `shaderGraph`; here it is only the native type.
+            dump["nativeType"] = "ShaderGraphMaterial"
         } else if let unlit = material as? UnlitMaterial {
             dump["nativeType"] = "UnlitMaterial"
             let tint = ScriptingColor.linearComponents(of: unlit.color.tint)
@@ -243,6 +306,49 @@ extension ScriptingCommandApplier {
         if entity.components[ImageBasedLightReceiverComponent.self] != nil {
             names.append("ImageBasedLightReceiverComponent")
         }
+        // SPEC 14.14: the phase 2 components a harness checks for.
+        if entity.components[SpatialAudioComponent.self] != nil { names.append("SpatialAudioComponent") }
+        if entity.components[AmbientAudioComponent.self] != nil { names.append("AmbientAudioComponent") }
+        if entity.components[ChannelAudioComponent.self] != nil { names.append("ChannelAudioComponent") }
+        if entity.components[AudioMixGroupsComponent.self] != nil { names.append("AudioMixGroupsComponent") }
+        if entity.components[CharacterControllerComponent.self] != nil {
+            names.append("CharacterControllerComponent")
+        }
+        if entity.components[CharacterControllerStateComponent.self] != nil {
+            names.append("CharacterControllerStateComponent")
+        }
+        if entity.components[ForceEffectComponent.self] != nil { names.append("ForceEffectComponent") }
+        if entity.components[AccessibilityComponent.self] != nil { names.append("AccessibilityComponent") }
+        if entity.components[ModelDebugOptionsComponent.self] != nil {
+            names.append("ModelDebugOptionsComponent")
+        }
+        if entity.components[SkeletalPosesComponent.self] != nil { names.append("SkeletalPosesComponent") }
+        if entity.components[BlendShapeWeightsComponent.self] != nil {
+            names.append("BlendShapeWeightsComponent")
+        }
+        if entity.components[PerspectiveCameraComponent.self] != nil {
+            names.append("PerspectiveCameraComponent")
+        }
+        if entity.components[OrthographicCameraComponent.self] != nil {
+            names.append("OrthographicCameraComponent")
+        }
+        if entity.children.contains(where: { $0.components[VideoPlayerComponent.self] != nil }) {
+            names.append("VideoPlayerComponent")
+        }
+#if os(visionOS)
+        if entity.components[SceneUnderstandingComponent.self] != nil {
+            names.append("SceneUnderstandingComponent")
+        }
+        if entity.components[AdaptiveResolutionComponent.self] != nil {
+            names.append("AdaptiveResolutionComponent")
+        }
+        if entity.components[EnvironmentLightingConfigurationComponent.self] != nil {
+            names.append("EnvironmentLightingConfigurationComponent")
+        }
+        if entity.children.contains(where: { $0.components[DockingRegionComponent.self] != nil }) {
+            names.append("DockingRegionComponent")
+        }
+#endif
 #if os(visionOS)
         if entity.components[ManipulationComponent.self] != nil { names.append("ManipulationComponent") }
         if entity.components[HoverEffectComponent.self] != nil { names.append("HoverEffectComponent") }
@@ -263,8 +369,25 @@ extension ScriptingCommandApplier {
         }
     }
 
+    private func dumpType(for record: Record) -> String {
+        // SPEC 14.3: the camera is a scripted object, identified by the pose
+        // the camera command carried.
+        if cameraRecordID == record.id, let kind = cameraSpec?["kind"] as? String {
+            return kind == "orthographic" ? "OrthographicCamera" : "PerspectiveCamera"
+        }
+        return Self.dumpType(for: record)
+    }
+
     private static func dumpType(for record: Record) -> String {
-        switch record.kind {
+        // SPEC 14.1 and 14.2 objects are created as plain groups and take
+        // their identity from the media attached to them.
+        if let audio = record.extras?.audio {
+            if audio.ambient { return "AmbientAudio" }
+            return audio.spatial ? "PositionalAudio" : "Audio"
+        }
+        if record.extras?.video != nil { return "VideoScreen" }
+        if let field = record.extras?.forceField, !field.kind.isEmpty { return field.kind }
+        return switch record.kind {
         case .mesh: "Mesh"
         case .portal: "Portal"
         case .group: "Group"

@@ -76,6 +76,75 @@ struct JavaScriptArrayReader {
         isNullish(index) ? nil : float(index)
     }
 
+    func isArray(_ index: Int) -> Bool {
+        guard let value = raw(index) else { return false }
+        return JSValueIsArray(context, value)
+    }
+
+    /// The elements of an array argument, each read as a payload object.
+    /// SPEC 14.12 lets `material` carry several materials for one mesh.
+    func dictionaries(_ index: Int, in jsContext: JSContext) -> [[String: Any]]? {
+        guard let value = raw(index), JSValueIsArray(context, value),
+              let object = JSValueToObject(context, value, nil),
+              let lengthName = JavaScriptStrings.length,
+              let lengthValue = JSObjectGetProperty(context, object, lengthName, nil)
+        else { return nil }
+        let rawLength = JSValueToNumber(context, lengthValue, nil)
+        guard rawLength.isFinite, rawLength > 0 else { return [] }
+        let count = min(Int(rawLength), 256)
+        var reader = JavaScriptPayloadReader(context: context, ownKeys: ownKeys)
+        reader.prototypeIsClean = prototypeIsClean
+        var result: [[String: Any]] = []
+        result.reserveCapacity(count)
+        for index in 0..<count {
+            guard let element = JSObjectGetPropertyAtIndex(context, object, UInt32(index), nil),
+                  JSValueIsObject(context, element),
+                  let elementObject = JSValueToObject(context, element, nil) else { continue }
+            if prototypeIsClean, let jsValue = JSValue(jsValueRef: element, in: jsContext),
+               let dictionary = jsValue.toDictionary() as? [String: Any] {
+                result.append(dictionary)
+            } else {
+                result.append(reader.dictionary(object: elementObject, depth: 0))
+            }
+        }
+        return result
+    }
+
+    func optionalDouble(_ index: Int) -> Double? {
+        isNullish(index) ? nil : double(index)
+    }
+
+    /// One command argument as a Swift value: a number, string, boolean, or a
+    /// bounded array or object. Used by `shaderParameter`, whose value may be
+    /// any of those. Read with the same own-property rules as `dictionary`.
+    func any(_ index: Int, in jsContext: JSContext) -> Any? {
+        guard let value = raw(index) else { return nil }
+        switch JSValueGetType(context, value) {
+        case kJSTypeNull, kJSTypeUndefined:
+            return nil
+        case kJSTypeBoolean:
+            return JSValueToBoolean(context, value)
+        case kJSTypeNumber:
+            return double(index)
+        case kJSTypeString:
+            return string(index)
+        default:
+            break
+        }
+        guard JSValueIsObject(context, value), let object = JSValueToObject(context, value, nil) else {
+            return nil
+        }
+        if JSValueIsArray(context, value) {
+            if prototypeIsClean {
+                return JSValue(jsValueRef: value, in: jsContext)?.toArray()
+            }
+            var reader = JavaScriptPayloadReader(context: context, ownKeys: ownKeys)
+            reader.prototypeIsClean = false
+            return reader.boundedArray(object: object)
+        }
+        return dictionary(index, in: jsContext)
+    }
+
     func string(_ index: Int) -> String? {
         guard let value = raw(index), !JSValueIsNull(context, value),
               !JSValueIsUndefined(context, value) else { return nil }
@@ -284,6 +353,11 @@ struct JavaScriptPayloadReader {
         default:
             return nil
         }
+    }
+
+    /// The bounded array walk, for a caller that already has the object.
+    func boundedArray(object: JSObjectRef) -> [Any] {
+        array(object: object, depth: 0)
     }
 
     private func array(object: JSObjectRef, depth: Int) -> [Any] {

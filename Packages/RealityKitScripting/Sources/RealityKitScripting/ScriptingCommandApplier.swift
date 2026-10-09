@@ -35,6 +35,12 @@ final class ScriptingCommandApplier {
         var lightHolder: Entity?
         var materialSpec: ScriptingMaterialSpec?
         var nativeMaterial: (any RealityKit.Material)?
+        /// SPEC 14.12: set when the mesh carries a material per part.
+        var materialSpecs: [ScriptingMaterialSpec]?
+        /// SPEC 14.12: how many `geometry.groups` the descriptor carried, and
+        /// how many of them actually split the mesh.
+        var geometryGroups: Int?
+        var geometryRawGroupCount: Int?
         var mesh: MeshResource?
         var geometryType = ""
         var geometryParameters: [String: Any] = [:]
@@ -66,7 +72,20 @@ final class ScriptingCommandApplier {
         var linearVelocity: SIMD3<Float> = .zero
         var angularVelocity: SIMD3<Float> = .zero
         var restingFrames = 0
+        /// True once the simulation has actually moved this body, which is
+        /// when the measured velocity becomes worth reporting.
+        var hasObservedMotion = false
         var isSleeping: Bool { restingFrames >= ScriptingMotionSampling.sleepFrameThreshold }
+        /// Phase 2 state, allocated only for the objects that use it.
+        var extras: ScriptingRecordExtras?
+
+        @MainActor
+        func makeExtras() -> ScriptingRecordExtras {
+            if let extras { return extras }
+            let created = ScriptingRecordExtras()
+            extras = created
+            return created
+        }
 
         init(id: Int, kind: Kind, entity: Entity) {
             self.id = id
@@ -117,8 +136,50 @@ final class ScriptingCommandApplier {
         }
     }
 
+    // MARK: - Phase 2 state (SPEC section 14)
+
+    /// SPEC 14.1 mixer. Group gain is master times group; the object's own
+    /// volume stays on its audio component.
+    var audioMasterVolume: Double = 1
+    var audioGroupVolumes: [String: Double] = [:]
+    var didWarnAudioCone = false
+    /// SPEC 14.13: `audioState` is reported once, when a sound actually starts.
+    var didReportAudioRunning = false
+    /// Set by the host when a harness drives the media sync channel: the
+    /// consumer then stops sampling its own players, which would overwrite the
+    /// state that was pushed in.
+    var mediaSyncIsExternal = false
+    /// SPEC 14.3. The active camera as the core last described it.
+    var cameraSpec: [String: Any]?
+    /// Entity carrying the camera component, parented under the root.
+    var cameraEntity: Entity?
+    /// The scripted object the camera command described, when one matched.
+    var cameraRecordID: Int?
+    /// SPEC 14.7.
+    var sceneUnderstandingSpec: [String: Any] = [:]
+    /// SPEC 14.11.
+    var renderOptions: [String: Any] = [:]
+    /// SPEC 14.11 `environmentLighting.intensityExponent`. macOS has no
+    /// passthrough to blend with, so the exponent is added to the image based
+    /// light's own exponent instead.
+    var environmentIntensityExponent: Float = 0
+
+    /// A grouped geometry from this command batch, kept only long enough for a
+    /// `material` array in the same batch to ask for the split mesh.
+    struct GroupedGeometry {
+        var key: String?
+        var groups: [ScriptingGeometryFactory.Group]
+        var buffers: ScriptingGeometryFactory.Buffers
+    }
+
+    var pendingGroupedGeometry: [Int: GroupedGeometry] = [:]
+
     /// Set by ``JavaScriptScene`` so events reach the core.
     var dispatch: ((String, Int, [String: Any]?) -> Void)?
+    /// SPEC 14.10 script-to-host channel.
+    var hostEvent: ((String, [String: Any]?) -> Void)?
+    var hostCall: ((Int, String, [String: Any]?) -> Void)?
+    var hostFetch: ((Int, [String: Any]?) -> Void)?
     var emitLog: ((ScriptingLogLevel, String) -> Void)?
     var emitWarning: ((String, String) -> Void)?
     /// `Object.keys` captured by the host before the script ran.
@@ -286,9 +347,21 @@ final class ScriptingCommandApplier {
             applyGeometry(id: id, command: command, context: context)
 
         case "material":
+            // SPEC 14.12: an array payload is one material per mesh part.
+            if command.isArray(2) {
+                guard let payloads = command.dictionaries(2, in: context) else { return }
+                applyMaterialArray(id: id, payloads: payloads)
+                return
+            }
             guard let payload = command.dictionary(2, in: context) else { return }
+            // SPEC 14.6 materials are loaded from a USD file, not built here.
+            if payload["type"] as? String == "ShaderGraphMaterial" {
+                applyShaderGraphMaterial(id: id, payload: payload)
+                return
+            }
             warnUnknownKeys(payload, expected: Self.materialKeys, opcode: "material")
             let spec = ScriptingMaterialSpec(payload: payload)
+            records[id]?.materialSpecs = nil
             indexMaterial(spec, for: id)
             applyMaterial(id: id, spec: spec)
 
@@ -397,6 +470,9 @@ final class ScriptingCommandApplier {
             emitLog?(level, command.string(3) ?? "")
 
         default:
+            // SPEC section 14's opcodes live in their own files so this switch
+            // stays the phase 1 protocol.
+            if applyPhase2(command: command, opcode: opcode, id: id, in: context) { return }
             warnings.warnOnce("Unknown command '\(opcode)' was ignored.", key: "opcode-\(opcode)")
         }
     }
@@ -431,6 +507,13 @@ final class ScriptingCommandApplier {
         record.animation = nil
         record.assetContainer?.removeFromParent()
         record.assetContainer = nil
+        // SPEC 14.1 and 14.2: destroying an object releases its media. Without
+        // this the AVPlayer kept playing for the life of the process and the
+        // playback controller's completion handler held the record alive.
+        releaseAudio(on: record)
+        releaseVideo(on: record)
+        if cameraRecordID == id { releaseCamera() }
+        record.extras = nil
         // Drop the entity's components before it goes, so the mesh, material and
         // shape it referenced are released even if something else still holds
         // the entity for a moment.
@@ -567,14 +650,37 @@ final class ScriptingCommandApplier {
         // the mirror still reports what the core sent.
         record.geometryType = type
         record.geometryParameters = parameters
-        record.geometryKey = ScriptingGeometryFactory.cacheKey(
+        // SPEC 14.12: a grouped geometry is always built from its buffers, so
+        // each group can carry its own material through one ModelComponent.
+        let groups = ScriptingGeometryFactory.groups(from: descriptor)
+        record.geometryGroups = groups.map(ScriptingGeometryFactory.partCount)
+        record.geometryRawGroupCount = (descriptor["groups"] as? [Any])?.count
+        var key = ScriptingGeometryFactory.cacheKey(
             type: type,
             parameters: parameters,
             uuid: descriptor["uuid"] as? String,
             buffers: buffers
         )
-        guard let mesh = resources.mesh(forKey: record.geometryKey, build: {
-            ScriptingGeometryFactory.mesh(
+        // A grouped mesh is still one resource: the split is part of its
+        // identity, not a reason to give every object its own copy.
+        if let key, let groups {
+            record.geometryKey = key + "|groups=" + ScriptingGeometryFactory.groupSignature(groups)
+        } else {
+            record.geometryKey = key
+        }
+        key = record.geometryKey
+        let cacheKey = key
+        guard let mesh = resources.mesh(forKey: cacheKey, build: {
+            if let groups {
+                return ScriptingGeometryFactory.meshFromBuffers(buffers, groups: groups)
+                    ?? ScriptingGeometryFactory.mesh(
+                        type: type,
+                        parameters: parameters,
+                        buffers: buffers,
+                        warnings: self.warnings
+                    )
+            }
+            return ScriptingGeometryFactory.mesh(
                 type: type,
                 parameters: parameters,
                 buffers: buffers,
@@ -588,7 +694,20 @@ final class ScriptingCommandApplier {
             return
         }
         record.mesh = mesh
-        let materials = model.model?.materials ?? [defaultMaterial()]
+        var materials = model.model?.materials ?? [defaultMaterial()]
+        // A grouped mesh needs one material per part; the array the script gave
+        // is re-indexed onto the new mesh, and any short fall repeats the last.
+        // Only a grouped geometry can have more than one part, and asking a
+        // shared mesh for its part count once per object costs more than the
+        // whole load, so the question is only asked when it can matter.
+        // The part count is known from the groups, so a shared mesh is never
+        // asked for it per object.
+        let parts = record.geometryGroups ?? 1
+        if parts > materials.count, let specs = record.materialSpecs {
+            materials = (0..<parts).map { nativeMaterial(for: specs[min($0, specs.count - 1)]) }
+        } else if parts > materials.count, let last = materials.last {
+            materials.append(contentsOf: Array(repeating: last, count: parts - materials.count))
+        }
         model.model = ModelComponent(mesh: mesh, materials: materials)
         refreshCollisionShape(record)
     }
@@ -659,7 +778,7 @@ final class ScriptingCommandApplier {
         reapplyMaterials(referencing: textureID)
     }
 
-    private func indexMaterial(_ spec: ScriptingMaterialSpec, for id: Int) {
+    func indexMaterial(_ spec: ScriptingMaterialSpec, for id: Int) {
         for textureID in spec.referencedTextureIDs {
             materialsByTexture[textureID, default: []].insert(id)
         }
@@ -913,8 +1032,21 @@ final class ScriptingCommandApplier {
         !isDisposed && generation == loadGeneration
     }
 
+    /// Clears everything the running script built without retiring the
+    /// applier, for a hot reload that keeps the same JavaScript context
+    /// (SPEC 14.10). The core restarts its object ids, so nothing of the old
+    /// scene may survive.
+    func reset() {
+        tearDown()
+        isDisposed = false
+    }
+
     func dispose() {
+        tearDown()
         isDisposed = true
+    }
+
+    private func tearDown() {
         loadGeneration += 1
         for subscription in subscriptions { subscription.cancel() }
         subscriptions.removeAll()
@@ -955,6 +1087,13 @@ final class ScriptingCommandApplier {
         // this applier put on it comes off again.
         root.components.remove(ImageBasedLightReceiverComponent.self)
         root.components.remove(PhysicsSimulationComponent.self)
+        root.components.remove(AudioMixGroupsComponent.self)
+        audioMasterVolume = 1
+        audioGroupVolumes.removeAll()
+        cameraSpec = nil
+        sceneUnderstandingSpec.removeAll()
+        renderOptions.removeAll()
+        environmentIntensityExponent = 0
     }
 
     // MARK: - Native driven objects

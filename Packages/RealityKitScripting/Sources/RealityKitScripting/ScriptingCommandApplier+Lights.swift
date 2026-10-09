@@ -162,7 +162,10 @@ extension ScriptingCommandApplier {
             return entity
         }()
         holder.components.set(
-            ImageBasedLightComponent(source: .single(source.resource), intensityExponent: source.intensity)
+            ImageBasedLightComponent(
+                source: .single(source.resource),
+                intensityExponent: source.intensity + environmentIntensityExponent
+            )
         )
         setEnvironmentEntity(holder)
     }

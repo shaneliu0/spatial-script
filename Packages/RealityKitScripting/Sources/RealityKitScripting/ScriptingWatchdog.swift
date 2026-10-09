@@ -5,6 +5,13 @@
 //  Created by Shane Liu on 9/9/26.
 //
 
+/// The execution limit, spelled out where every configuration can see it: the
+/// watchdog itself is DEBUG only, but the message a terminated load reports is
+/// compiled into release builds too.
+enum ScriptingExecutionLimit {
+    static let seconds = 2.0
+}
+
 #if DEBUG
 import Darwin
 import Foundation
@@ -19,7 +26,7 @@ import JavaScriptCore
 /// `dlsym`. Release builds never reference it and have **no watchdog**.
 enum ScriptingWatchdog {
     /// Seconds a single synchronous entry into the core may take.
-    static let limitSeconds = 2.0
+    static let limitSeconds = ScriptingExecutionLimit.seconds
 
     private typealias ShouldTerminateCallback = @convention(c) (
         JSContextRef?,

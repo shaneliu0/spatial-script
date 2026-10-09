@@ -48,8 +48,22 @@ public final class JavaScriptScene {
     /// Set when the watchdog trips: the scene is beyond saving and is dropped.
     public private(set) var isTerminated = false
     private var externalInputPending = false
+    /// SPEC 14.13 channels an outside driver has taken over. A harness that
+    /// pushes one of these owns it: the consumer's own sample would otherwise
+    /// overwrite the pushed state on the very next frame.
+    var externalMediaSyncOwner = false
+    var externalCharacterSyncOwner = false
+    var externalSkeletonSyncOwner = false
+    /// Pending host calls and fetches, so a harness can answer them by name.
+    var pendingHostCalls: [String: Int] = [:]
+    var pendingFetches: [String: Int] = [:]
+    /// Set the first time `setInput` is called from outside.
+    private var externalInputOwner = false
     private var externalTransformSyncPending = false
     private var externalBodySyncPending = false
+    /// SPEC 14.10. Ticks are held while the scene is inactive, so timers do
+    /// not advance behind a closed window.
+    public internal(set) var isActive = true
     private var stats = ScriptingFrameStats()
     private var lastTickTimestamp: UInt64 = 0
     private let createdAt = DispatchTime.now().uptimeNanoseconds
@@ -62,6 +76,9 @@ public final class JavaScriptScene {
     /// Console output and reported errors from this scene.
     public var logListener: ScriptingLogListener?
 
+    /// SPEC 14.10 `onHostEvent`: every `Spatial.host.send` from the script.
+    public var hostEventListener: (@MainActor (String, [String: Any]) -> Void)?
+
     /// Rolling buffer the DEBUG dev transport drains through `GET /logs`.
     public private(set) var recentLogs: [ScriptingLogEntry] = []
 
@@ -71,7 +88,8 @@ public final class JavaScriptScene {
         rootEntity: Entity,
         source: String,
         assetRoot: URL? = nil,
-        logListener: ScriptingLogListener? = nil
+        logListener: ScriptingLogListener? = nil,
+        previousState: [String: Any]? = nil
     ) throws {
         guard let context = JSContext() else {
             throw ScriptError(message: "Unable to create the JavaScript execution context.", line: nil, column: nil)
@@ -79,6 +97,7 @@ public final class JavaScriptScene {
         self.context = context
         self.logListener = logListener
         applier = ScriptingCommandApplier(root: rootEntity, assetRoot: assetRoot)
+        self.assetRoot = assetRoot
         sceneID = applier.sceneIdentifier
         rootEntity.components.set(ScriptingEntityComponent(sceneID: sceneID, entityID: 0))
 
@@ -126,8 +145,22 @@ public final class JavaScriptScene {
         applier.emitWarning = { [weak self] key, message in
             self?.recordConsumerWarning(key: key, message: message)
         }
+        applier.hostEvent = { [weak self] name, payload in
+            guard let self else { return }
+            hostEventListener?(name, payload ?? [:])
+            ScriptingRuntime.deliverHostEvent(name: name, payload: payload ?? [:], from: self)
+        }
+        applier.hostCall = { [weak self] callID, name, arguments in
+            self?.performHostCall(id: callID, name: name, arguments: arguments ?? [:])
+        }
+        applier.hostFetch = { [weak self] requestID, request in
+            self?.performFetch(id: requestID, request: request ?? [:])
+        }
 
-        let environment = Self.environmentDescription(assetRoot: assetRoot)
+        // SPEC 14.10: a hot reload that preserves state hands the previous
+        // `this.state` to the new script through the load options.
+        var environment = Self.environmentDescription(assetRoot: assetRoot)
+        if let previousState { environment["previousState"] = previousState }
         currentEntryPoint = "load"
         let loadStarted = DispatchTime.now().uptimeNanoseconds
         spatial.invokeMethod("load", withArguments: [source, environment])
@@ -136,7 +169,7 @@ public final class JavaScriptScene {
             applier.dispose()
             throw ScriptError(
                 message: "The script was terminated: load ran for more than "
-                    + "\(Int(ScriptingWatchdog.limitSeconds)) seconds.",
+                    + "\(Int(ScriptingExecutionLimit.seconds)) seconds.",
                 line: nil,
                 column: nil
             )
@@ -179,7 +212,7 @@ public final class JavaScriptScene {
     }
 
     public func tick(deltaTime: TimeInterval) {
-        guard !isDisposed, !isPaused else { return }
+        guard !isDisposed, !isPaused, isActive else { return }
         if let budget = planFrameBudget {
             guard budget > 0 else { return }
             planFrameBudget = budget - 1
@@ -188,6 +221,10 @@ public final class JavaScriptScene {
 
         applier.sampleBodyMotion(deltaTime: deltaTime)
         applier.advanceParticleLifetimes(deltaTime: deltaTime)
+        applier.stepCharacters(deltaTime: deltaTime)
+        applier.advanceAudioPlayback(deltaTime: deltaTime)
+        applier.advanceVideoPlayback()
+        pushPhase2Sync()
 
         // A sync pushed in from outside owns this frame for that channel only;
         // transforms and velocities are suppressed independently.
@@ -210,7 +247,10 @@ public final class JavaScriptScene {
             }
         }
 
-        if externalInputPending {
+        // Once something outside has driven `setInput`, it owns the channel:
+        // the consumer's own polling would otherwise clear the state on the
+        // next frame the driver did not push.
+        if externalInputPending || externalInputOwner {
             externalInputPending = false
         } else {
             invoke("setInput", [ScriptingInputRouter.shared.inputState(for: sceneID)])
@@ -253,6 +293,47 @@ public final class JavaScriptScene {
         }
     }
 
+    /// Clears the per-scene bookkeeping a reload invalidates. The context,
+    /// the native bridge and the watchdog all stay as they are.
+    func resetForReload() {
+        frameIndex = 0
+        elapsed = 0
+        stats.reset()
+        lastTickTimestamp = 0
+        firstFrameMilliseconds = nil
+        reportedErrors.removeAll()
+        logLines.removeAll()
+        pendingHostCalls.removeAll()
+        pendingFetches.removeAll()
+        externalMediaSyncOwner = false
+        externalCharacterSyncOwner = false
+        externalSkeletonSyncOwner = false
+        isActive = true
+    }
+
+    /// Runs `__spatial.load` again in this context, returning the failure
+    /// rather than throwing so the reload path can report it.
+    func loadInPlace(source: String, environment: [String: Any]) -> ScriptError? {
+        pendingException = nil
+        currentEntryPoint = "load"
+        let started = DispatchTime.now().uptimeNanoseconds
+        spatial.invokeMethod("load", withArguments: [source, environment])
+        noteIfOverran(since: started, entryPoint: "load")
+        if isTerminated {
+            return ScriptError(
+                message: "The script was terminated: load ran for more than "
+                    + "\(Int(ScriptingExecutionLimit.seconds)) seconds.",
+                line: nil,
+                column: nil
+            )
+        }
+        if let pendingException {
+            self.pendingException = nil
+            return pendingException
+        }
+        return nil
+    }
+
     /// The last 120 frames of timing, for `GET /stats`.
     public func frameStats() -> [String: Any] {
         var summary = stats.summary()
@@ -275,6 +356,8 @@ public final class JavaScriptScene {
         if let commands = spatial.invokeMethod("dispose", withArguments: []) {
             applier.apply(commands: commands, in: context)
         }
+        applier.disposeMedia()
+        applier.releaseCamera()
         applier.dispose()
         ScriptingInputRouter.shared.unregister(id: sceneID)
 #if os(visionOS)
@@ -388,7 +471,8 @@ public final class JavaScriptScene {
             frame: frameIndex,
             elapsed: elapsed,
             errors: reportedErrors,
-            logs: logLines
+            logs: logLines,
+            isActive: isActive
         )
     }
 
@@ -445,8 +529,17 @@ public final class JavaScriptScene {
 
     public func dispatch(type: String, id: Int, payload: [String: Any]?) {
         guard !isDisposed else { return }
+        dispatchObserver?(type, id, payload)
+        // An event pushed in from outside tells this consumer something about
+        // an object it could not observe itself, so the mirror follows it.
+        applier.adopt(event: type, id: id, payload: payload)
         invoke("dispatch", [type, id, payload ?? [:]])
     }
+
+    /// Sees every event on its way into the core. The tests use it to check
+    /// answers the host sends back (`hostResult`, `fetchResult`) without
+    /// depending on how the core stores them.
+    var dispatchObserver: ((String, Int, [String: Any]?) -> Void)?
 
     // MARK: - Consumer to core entry points
 
@@ -468,6 +561,7 @@ public final class JavaScriptScene {
 
     public func setInput(_ state: [String: Any]) {
         externalInputPending = true
+        externalInputOwner = true
         invoke("setInput", [state])
     }
 
@@ -548,6 +642,27 @@ public final class JavaScriptScene {
 
     var commandApplier: ScriptingCommandApplier { applier }
 
+    /// The raw context, for the phase 2 readers that use the C API directly.
+    var jsContextRef: JSGlobalContextRef? { context.jsGlobalContextRef }
+
+    var jsContext: JSContext { context }
+
+    var isDisposedScene: Bool { isDisposed }
+
+    /// Root the consumer resolves relative asset paths against.
+    public private(set) var assetRoot: URL?
+
+    /// `Object.keys` captured before any script ran.
+    var ownKeysReference: JSObjectRef? { ownKeysFunction }
+
+    /// `invoke` is private; phase 2 lives in its own file and calls through
+    /// this so exceptions and the watchdog still cover every entry.
+    @discardableResult
+    func invokePublic(_ method: String, _ arguments: [Any]) -> JSValue? {
+        guard !isDisposed else { return nil }
+        return invoke(method, arguments)
+    }
+
     /// Moves an entity the way physics or manipulation would have, so a
     /// `sync` from a test harness leaves both sides consistent.
     public func setNativeWorldTransform(
@@ -622,6 +737,27 @@ public final class JavaScriptScene {
             Date().timeIntervalSince1970 * 1000
         }
         native?.setObject(now, forKeyedSubscript: "now" as NSString)
+
+        // SPEC 14.3. Returns [ox, oy, oz, dx, dy, dz] or an empty array where
+        // there is no view camera, which the core reports as null.
+        let rayFromPoint: @convention(block) (Double, Double) -> [Double] = { x, y in
+            MainActor.assumeIsolated {
+                ScriptingInputRouter.shared.rayFromPoint(x: x, y: y) ?? []
+            }
+        }
+        native?.setObject(rayFromPoint, forKeyedSubscript: "rayFromPoint" as NSString)
+
+        // SPEC 14.8. No opcode carries rumble, so it is a native call.
+        let rumble: @convention(block) (String, Double, Double) -> Bool = { id, intensity, duration in
+            MainActor.assumeIsolated {
+                ScriptingGameControllerHub.shared.rumble(
+                    id: id,
+                    intensity: intensity,
+                    duration: duration
+                )
+            }
+        }
+        native?.setObject(rumble, forKeyedSubscript: "rumble" as NSString)
 
         context.setObject(native, forKeyedSubscript: "__spatialNative" as NSString)
     }
@@ -722,18 +858,33 @@ public final class JavaScriptScene {
     }
 
     static func environmentDescription(assetRoot: URL?) -> [String: Any] {
+        let options = ScriptingRuntime.activeInputOptions
 #if os(visionOS)
-        let capabilities: [String: Bool] = [
-            "hands": true,
+        var capabilities: [String: Bool] = [
+            "hands": options.contains(.ar),
             "anchors": true,
             "portals": true,
             "particles": true,
             "manipulation": true,
             "hoverEffect": true,
             "shadows": true,
+            // SPEC 14.14.
+            "audio": true,
+            "video": true,
+            // The wearer is the camera; a scripted one is kept but has no view.
+            "camera": false,
+            "characterController": true,
+            "forceFields": true,
+            "skeleton": true,
+            "blendShapes": true,
+            "shaderGraph": true,
+            "sceneUnderstanding": true,
+            "controllers": options.contains(.gamepad),
+            "hostFunctions": true,
+            "accessibility": true,
         ]
 #else
-        let capabilities: [String: Bool] = [
+        var capabilities: [String: Bool] = [
             "hands": false,
             "anchors": false,
             "portals": true,
@@ -743,12 +894,29 @@ public final class JavaScriptScene {
             "manipulation": false,
             "hoverEffect": false,
             "shadows": true,
+            // SPEC 14.14.
+            "audio": true,
+            "video": true,
+            "camera": true,
+            "characterController": true,
+            "forceFields": true,
+            "skeleton": true,
+            "blendShapes": true,
+            "shaderGraph": true,
+            // SceneUnderstandingComponent is unavailable on macOS.
+            "sceneUnderstanding": false,
+            "controllers": options.contains(.gamepad),
+            "hostFunctions": true,
+            "accessibility": true,
         ]
 #endif
+        capabilities["hands"] = capabilities["hands"] == true && options.contains(.ar)
+
         var environment: [String: Any] = [
             "backend": "realitykit",
             "platform": platformName,
             "capabilities": capabilities,
+            "hostFunctions": ScriptingRuntime.hostFunctionNames,
         ]
         if let assetRoot {
             environment["assetRoot"] = assetRoot.path
