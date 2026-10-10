@@ -92,6 +92,13 @@ struct ConformanceTests {
                 skipped.append("\(testCase.name) (backend \(backend))")
                 continue
             }
+            // A case that names a platform is written for that one; this
+            // runner only speaks for the platform it is built as.
+            if let platform = testCase.expected["platform"] as? String,
+               platform != JavaScriptScene.platformName {
+                skipped.append("\(testCase.name) (platform \(platform))")
+                continue
+            }
             let result = Self.run(testCase)
             let coreDiffs = SpatialDumpMatcher.mismatches(
                 expected: testCase.expected,
@@ -139,6 +146,13 @@ struct ConformanceTests {
     /// Keyed by the exact mismatch text, valued by why it is not this
     /// consumer's to fix.
     static let knownCoreGaps: [String: String] = [
+        "camera-unparented native: objects[\"free-camera\"]: not found (present: marker)":
+            "SPEC 14.13 now says the `camera` command carries the camera object's id, so a camera "
+            + "that was never added to the scene arrives as its own object. The bundled core still "
+            + "emits `[\"camera\", 0, payload]` (grep '\"camera\", 0' in spatial-core.js), so no "
+            + "`create` is sent for an unparented camera and the consumer has no record to attach "
+            + "the component to. The consumer attaches by id and needs no change when the bundle "
+            + "lands.",
         "raycast-rules core: objects[\"probe\"].userData.direct: expected 1 elements, got 2":
             "Spatial.raycast reads options.recursive but never forwards it to "
             + "__spatialNative.raycast, whose SPEC 6 signature stops at maxDistance, so a consumer "
@@ -150,12 +164,30 @@ struct ConformanceTests {
         let root = Entity()
         let platform = testCase.expected["platform"] as? String ?? JavaScriptScene.platformName
 
+        // SPEC 14.10: a case that names the host functions it expects is run
+        // against an app that registered them. They answer through the case's
+        // own `hostResult` steps, so the bodies are deferred and never reply.
+        let hostFunctions = testCase.expected["hostFunctions"] as? [String] ?? []
+        for name in hostFunctions {
+            let parts = name.split(separator: ".", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { continue }
+            ScriptingRuntime.register(module: parts[0], function: parts[1]) { _, _ in }
+        }
+
+        // The input router and the controller hub are process wide, so each
+        // case starts from the same empty state whatever ran before it.
+        ScriptingInputRouter.shared.injectControllers(nil)
+        ScriptingInputRouter.shared.beginFrame()
+
         let scene: JavaScriptScene
         do {
             scene = try JavaScriptScene(
                 rootEntity: root,
                 source: testCase.script,
-                assetRoot: URL(fileURLWithPath: "assets")
+                // The node runner passes the string "assets"; a file URL would
+                // report an absolute path in the environment and the two
+                // backends would normalise script URLs differently.
+                assetRoot: URL(string: "assets")
             )
         } catch let error as JavaScriptScene.ScriptError {
             let dump: [String: Any] = [
@@ -181,9 +213,32 @@ struct ConformanceTests {
             return Result(dump: dump, nativeDump: dump)
         }
 
+        // SPEC 14.13's entry point, which is the path the node and web runners
+        // take too; registering alone would be a different mechanism.
+        scene.setHostFunctions(ScriptingRuntime.hostFunctionNames)
+
         var stepErrors: [String] = []
         for step in testCase.steps ?? [["frames": 3]] {
-            apply(step: step, to: scene, errors: &stepErrors)
+            if let frames = step["frames"] as? Int {
+                for _ in 0..<frames {
+                    // The system does this once per display frame; a headless
+                    // run has to do it too or every frame sees one stale
+                    // snapshot.
+                    ScriptingInputRouter.shared.beginFrame()
+                    scene.tick(deltaTime: frame)
+                }
+                continue
+            }
+            // Every other step kind is applied by the interpreter this runner
+            // shares with the dev transport's parity plan, so a step added for
+            // one is available to the other.
+            let applied = ScriptingSceneStep.apply(
+                step,
+                to: scene,
+                errors: &stepErrors,
+                reloadSource: { Self.reloadSource($0, near: testCase.name) }
+            )
+            if !applied { stepErrors.append("Error: unknown step \(step)") }
         }
 
         var dump = scene.dump()
@@ -195,121 +250,41 @@ struct ConformanceTests {
 
         let native = scene.nativeDump()
         scene.dispose()
+        for name in hostFunctions {
+            let parts = name.split(separator: ".", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { continue }
+            ScriptingRuntime.unregister(module: parts[0], function: parts[1])
+        }
         return Result(dump: dump, nativeDump: native)
     }
 
-    private static func apply(step: [String: Any], to scene: JavaScriptScene, errors: inout [String]) {
-        if let frames = step["frames"] as? Int {
-            for _ in 0..<frames { scene.tick(deltaTime: frame) }
-            return
-        }
-
-        if let inject = step["inject"] as? String {
-            let target = step["target"] as? String ?? ""
-            switch inject {
-            case "tap":
-                scene.injectTap(target: target, point: vector(step["point"]))
-            case "hover":
-                scene.injectHover(target: target, entering: step["entering"] as? Bool ?? true)
-            case "drag":
-                scene.injectDrag(
-                    target: target,
-                    translation: vector(step["translation"]) ?? .zero,
-                    steps: step["steps"] as? Int ?? 1
-                )
-            case "key":
-                scene.injectKey(
-                    code: step["code"] as? String ?? target,
-                    down: step["down"] as? Bool ?? true
-                )
-            default:
-                errors.append("Error: unknown inject \"\(inject)\"")
+    /// `[id, playing, currentTime, duration]` per record, shared by the audio
+    /// and video channels of SPEC 14.13.
+    private static func mediaRecords(
+        _ records: [[String: Any]],
+        in scene: JavaScriptScene,
+        errors: inout [String]
+    ) -> [Float] {
+        var flat: [Float] = []
+        for record in records {
+            guard let id = scene.objectID(named: record["target"] as? String ?? "") else {
+                errors.append("Error: no object named \(record["target"] ?? "")")
+                continue
             }
-            return
+            flat.append(Float(id))
+            flat.append(record["playing"] as? Bool == true ? 1 : 0)
+            flat.append(Float((record["currentTime"] as? NSNumber)?.doubleValue ?? 0))
+            flat.append(Float((record["duration"] as? NSNumber)?.doubleValue ?? 0))
         }
-
-        if let dispatch = step["dispatch"] as? [String: Any] {
-            let type = dispatch["type"] as? String ?? ""
-            let id: Int?
-            if let texture = dispatch["texture"] as? String {
-                id = scene.textureID(forURL: texture)
-            } else if let asset = dispatch["asset"] as? String {
-                id = scene.assetID(forURL: asset)
-            } else {
-                id = scene.objectID(named: dispatch["target"] as? String ?? "")
-            }
-            guard let id else {
-                errors.append("Error: no target for dispatch \(dispatch)")
-                return
-            }
-            var payload = dispatch["payload"] as? [String: Any] ?? [:]
-            if let other = payload["other"] as? String {
-                payload["other"] = scene.objectID(named: other) ?? 0
-            }
-            scene.dispatch(type: type, id: id, payload: payload)
-            return
-        }
-
-        if let sync = step["sync"] as? [[String: Any]] {
-            var flat: [Float] = []
-            for record in sync {
-                guard let id = scene.objectID(named: record["target"] as? String ?? "") else {
-                    errors.append("Error: no object named \(record["target"] ?? "")")
-                    continue
-                }
-                let position = floats(record["position"]) ?? [0, 0, 0]
-                let quaternion = floats(record["quaternion"]) ?? [0, 0, 0, 1]
-                let scale = floats(record["scale"]) ?? [1, 1, 1]
-                flat.append(Float(id))
-                flat.append(contentsOf: position)
-                flat.append(contentsOf: quaternion)
-                flat.append(contentsOf: scale)
-                // A real consumer moved the entity before it called sync.
-                scene.setNativeWorldTransform(
-                    id: id,
-                    position: SIMD3(position[0], position[1], position[2]),
-                    rotation: simd_quatf(
-                        ix: quaternion[0],
-                        iy: quaternion[1],
-                        iz: quaternion[2],
-                        r: quaternion[3]
-                    ),
-                    scale: SIMD3(scale[0], scale[1], scale[2])
-                )
-            }
-            scene.sync(records: flat)
-            return
-        }
-
-        if let syncBodies = step["syncBodies"] as? [[String: Any]] {
-            var flat: [Float] = []
-            for record in syncBodies {
-                guard let id = scene.objectID(named: record["target"] as? String ?? "") else { continue }
-                flat.append(Float(id))
-                flat.append(contentsOf: floats(record["linear"]) ?? [0, 0, 0])
-                flat.append(contentsOf: floats(record["angular"]) ?? [0, 0, 0])
-                flat.append(record["sleeping"] as? Bool == true ? 1 : 0)
-            }
-            scene.syncBodies(records: flat)
-            return
-        }
-
-        if let input = step["setInput"] as? [String: Any] {
-            scene.setInput(input)
-            return
-        }
-
-        if step["dispose"] != nil {
-            scene.dispose()
-            return
-        }
-
-        errors.append("Error: unknown step \(step)")
+        return flat
     }
 
-    private static func vector(_ value: Any?) -> SIMD3<Float>? {
-        guard let values = floats(value), values.count >= 3 else { return nil }
-        return SIMD3(values[0], values[1], values[2])
+    /// A `reload` step carries the next script inline, or names a file beside
+    /// the case when it ends in `.js`.
+    private static func reloadSource(_ value: String, near caseName: String) -> String {
+        guard value.hasSuffix(".js"), !value.contains("\n") else { return value }
+        let url = casesDirectory.appending(path: value)
+        return (try? String(contentsOf: url, encoding: .utf8)) ?? value
     }
 
     private static func floats(_ value: Any?) -> [Float]? {
@@ -320,12 +295,21 @@ struct ConformanceTests {
     /// material and light parameters RealityKit stores. Everything else in an
     /// expectation belongs to the core alone, so it is dropped before the
     /// native comparison.
-    static let nativeTopLevelKeys: Set<String> = ["backend", "platform", "objects", "gravity", "joints"]
+    static let nativeTopLevelKeys: Set<String> = [
+        "backend", "platform", "objects", "gravity", "joints",
+        // SPEC 14.13's dump additions: the native half of the gate was blind to
+        // all of section 14 while these were filtered out.
+        "isActive", "audioMixer", "camera", "sceneUnderstanding", "render",
+        "environmentLighting", "debug", "hostFunctions", "controllers",
+    ]
     static let nativeObjectKeys: Set<String> = [
         "name", "absent", "type", "parent", "visible", "position", "quaternion", "scale",
         "worldPosition", "geometry", "material", "light", "rigidBody", "opacity", "billboard",
         "groundingShadow", "hoverEffect", "manipulable", "castShadow", "receiveShadow",
         "renderOrder", "interactive", "world", "anchor", "portal",
+        // SPEC 14.13's per-object additions.
+        "audio", "video", "characterController", "forceField", "accessibility",
+        "skeleton", "blendShapes",
     ]
 
     static func nativeExpectation(_ expected: [String: Any]) -> [String: Any] {
