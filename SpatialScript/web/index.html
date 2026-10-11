@@ -14,7 +14,9 @@
   }
   #stage { position: relative; display: grid; place-items: center; overflow: hidden; }
   canvas { width: 100%; height: 100%; display: block; background: #15171b; }
-  #panel { border-left: 1px solid #23262c; display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
+  #panel { border-left: 1px solid #23262c; display: grid; grid-template-rows: auto auto 1fr auto; min-height: 0; }
+  #help { margin: 0; padding: 8px 12px; border-bottom: 1px solid #23262c; color: #8b939e; font-size: 11px; line-height: 1.5; }
+  #help code { color: #b8c0cb; }
   /* `?ui=off` gives the canvas the whole viewport so a capture is exactly the
      requested size and the camera aspect matches it. */
   body.no-ui { grid-template-columns: 1fr; }
@@ -39,6 +41,13 @@
   <div id="stage"><canvas id="view" width="800" height="600"></canvas></div>
   <div id="panel">
     <header>script</header>
+    <p id="help">
+      <code>window.spatialHost</code> registers native functions for
+      <code>Spatial.host.call</code>. A demo <code>Preferences.read</code> is
+      registered by default, matching the macOS host's DEBUG build; call
+      <code>window.spatialHost.unregister("Preferences", "read")</code> or
+      register your own before running a script to replace it.
+    </p>
     <textarea id="editor" spellcheck="false" placeholder="const Spatial = require(&quot;spatial&quot;);"></textarea>
     <div id="controls">
       <button id="run" type="button">Run</button>

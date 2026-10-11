@@ -1,4 +1,4 @@
-// Exercises the consumer's real GLTF and environment paths against files in web/assets.
+// Exercises the consumer's real GLTF and environment paths against files in the shared asset root.
 const Spatial = require("spatial");
 const { Scene, Mesh, SphereGeometry, MeshStandardMaterial, ImageBasedLight, Group } = Spatial;
 

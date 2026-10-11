@@ -59,6 +59,7 @@ export class PhysicsWorld {
     /** @type {Map<number, {joint:any, spec:any}>} */
     this.joints = new Map();
     this.accumulator = 0;
+    this.beforeStep = null;
     this.pendingEvents = [];
     this._syncBuffer = new Float32Array(0);
     this._bodyBuffer = new Float32Array(0);
@@ -374,6 +375,8 @@ export class PhysicsWorld {
     this.accumulator += Math.max(0, dt);
     let steps = 0;
     while (this.accumulator >= FIXED_STEP && steps < MAX_SUBSTEPS) {
+      // Force fields and character controllers run before the solver.
+      if (this.beforeStep) this.beforeStep(FIXED_STEP);
       this.world.timestep = FIXED_STEP;
       this.world.step(this.eventQueue);
       this._collectEvents(events);

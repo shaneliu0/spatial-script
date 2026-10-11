@@ -86,7 +86,7 @@ test('textureIdForUrl resolves by the script url and by the resolved one', async
     url: 'asset://grid.png', repeat: [1, 1], offset: [0, 0], wrapS: 1001, wrapT: 1001, flipY: true,
   }]]);
   assert.equal(consumer.textureIdForUrl('asset://grid.png'), 7);
-  assert.equal(consumer.textureIdForUrl('/web/assets/grid.png'), 7);
+  assert.equal(consumer.textureIdForUrl('/assets/grid.png'), 7);
   assert.equal(consumer.textureIdForUrl('asset://other.png'), undefined);
   consumer.apply([['texture', 7, null]]);
   assert.equal(consumer.textureIdForUrl('asset://grid.png'), undefined, 'a released id no longer resolves');
@@ -203,4 +203,49 @@ test('InputController.endSessions and manipulatedObjects report the live gesture
   assert.deepEqual(dispatched, []);
   assert.equal(input.hovered, null);
   assert.equal(input.drag, null);
+});
+
+test('the parity viewport probe survives an orthographic scripted camera', async () => {
+  const { consumer } = await makeConsumer();
+  // The probe parity.mjs runs, in the same shape.
+  const probe = () => {
+    const camera = consumer.camera;
+    return {
+      kind: camera.isOrthographicCamera ? 'orthographic' : 'perspective',
+      scripted: consumer.scriptCamera !== null,
+      aspect: camera.isOrthographicCamera ? null : camera.aspect,
+      fov: camera.isOrthographicCamera ? null : camera.fov,
+      frustum: camera.isOrthographicCamera
+        ? [camera.left, camera.right, camera.top, camera.bottom]
+        : null,
+    };
+  };
+
+  const builtIn = probe();
+  assert.equal(builtIn.kind, 'perspective');
+  assert.equal(builtIn.scripted, false);
+  assert.equal(typeof builtIn.aspect, 'number');
+  assert.doesNotThrow(() => builtIn.aspect.toFixed(4));
+
+  consumer.apply([
+    ['create', 9, 'group', 'cam'], ['parent', 9, 0],
+    ['camera', 9, {
+      kind: 'orthographic', fov: null, near: 0.01, far: 20,
+      left: -0.3, right: 0.3, top: 0.3, bottom: -0.3,
+    }],
+  ]);
+  const scripted = probe();
+  assert.equal(scripted.kind, 'orthographic');
+  assert.equal(scripted.scripted, true);
+  // An orthographic camera has no aspect or fov, which is what used to throw.
+  assert.equal(scripted.aspect, null);
+  assert.equal(scripted.fov, null);
+  assert.deepEqual(scripted.frustum, [-0.3, 0.3, 0.3, -0.3]);
+  assert.doesNotThrow(() => scripted.frustum.map((n) => n.toFixed(2)).join('/'));
+
+  // And it still dumps, with no perspective fields invented.
+  const dumped = consumer.nativeDump().camera;
+  assert.equal(dumped.kind, 'orthographic');
+  assert.equal(dumped.fov, null);
+  assert.equal(dumped.left, -0.3);
 });

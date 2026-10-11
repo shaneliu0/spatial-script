@@ -165,9 +165,9 @@ test('WEB-18: textures bind per colour space without clobbering each other', asy
 });
 
 test('asset:// and relative texture urls resolve against their roots', async () => {
-  const { consumer } = await makeConsumer({ assetRoot: '/web/assets', scriptRoot: '/examples' });
-  assert.equal(consumer.resolveUrl('asset://wood.png'), '/web/assets/wood.png');
-  assert.equal(consumer.resolveUrl('textures/wood.png'), '/examples/textures/wood.png');
+  const { consumer } = await makeConsumer({ assetRoot: '/assets' });
+  assert.equal(consumer.resolveUrl('asset://wood.png'), '/assets/wood.png');
+  assert.equal(consumer.resolveUrl('textures/wood.png'), '/assets/textures/wood.png');
   assert.equal(consumer.resolveUrl('https://example.com/a.png'), 'https://example.com/a.png');
   assert.equal(consumer.resolveUrl('/absolute.png'), '/absolute.png');
 });
@@ -861,7 +861,11 @@ test('nativeDump mirrors the Swift dump shape and reads its values off three.js'
   const dump = consumer.nativeDump();
   assert.deepEqual(Object.keys(dump), [
     'backend', 'platform', 'frame', 'elapsed', 'objects', 'objectCount', 'joints',
-    'gravity', 'environment', 'warnings', 'errors', 'logs', 'placeholder',
+    'gravity', 'environment',
+    // phase 2 (SPEC 14.13)
+    'isActive', 'audioMixer', 'camera', 'sceneUnderstanding', 'render',
+    'environmentLighting', 'debug', 'hostFunctions', 'controllers',
+    'warnings', 'errors', 'logs', 'placeholder',
   ]);
   assert.equal(dump.backend, 'three');
   assert.equal(dump.objectCount, 3);
@@ -875,6 +879,9 @@ test('nativeDump mirrors the Swift dump shape and reads its values off three.js'
     'worldPosition', 'opacity', 'billboard', 'groundingShadow', 'hoverEffect',
     'manipulable', 'castShadow', 'receiveShadow', 'renderOrder', 'world',
     'interactive', 'components', 'geometry', 'material', 'light', 'rigidBody',
+    // phase 2 (SPEC 14.13)
+    'audio', 'video', 'characterController', 'forceField', 'accessibility',
+    'skeleton', 'blendShapes',
   ]);
   assert.equal(cube.type, 'Mesh');
   assert.equal(cube.parent, 1, 'the core parent id, not the three.js object');
@@ -1198,7 +1205,7 @@ test('.exr environments warn once and .hdr goes to the Radiance loader', async (
   let requested = null;
   consumer.hdrLoader = { load: (url) => { requested = url; } };
   consumer.apply([['environment', 0, { url: 'asset://studio-env.hdr', intensity: 2 }]]);
-  assert.equal(requested, '/web/assets/studio-env.hdr');
+  assert.equal(requested, '/assets/studio-env.hdr');
   assert.equal(consumer.scene.environmentIntensity, 2);
   assert.equal(consumer.warnings.filter((w) => w.includes('.hdr')).length, 0);
 });
@@ -1485,7 +1492,7 @@ test('WEB-12: a texture url change keeps the instance materials are bound to', a
   consumer.apply([['texture', 7, { url: 'asset://b.png', repeat: [1, 1], offset: [0, 0], wrapS: 1001, wrapT: 1001, flipY: true }]]);
   assert.equal(disposed, 0, 'the bound instance is not disposed under the material');
   assert.equal(consumer.objects.get(1).material.map, bound, 'and is still the one in use');
-  assert.equal(consumer.textures.get(7).url, '/web/assets/b.png', 'while the entry points at the new url');
+  assert.equal(consumer.textures.get(7).url, '/assets/b.png', 'while the entry points at the new url');
 });
 
 test('SPEC 5: a null texture payload releases the id', async () => {
@@ -1867,12 +1874,15 @@ test('PERF-10: console storage is bounded per frame and in total', async () => {
 });
 
 test('ROBUST-05: asset and relative urls are contained to the asset root', async () => {
-  const { consumer } = await makeConsumer({ assetRoot: '/web/assets', scriptRoot: '/examples' });
+  const { consumer } = await makeConsumer({ assetRoot: '/assets', scriptRoot: '/examples' });
   const resolve = (url) => consumer.resolveUrl(url);
 
-  assert.equal(resolve('asset://a.png'), '/web/assets/a.png');
-  assert.equal(resolve('asset://sub/./b.png'), '/web/assets/sub/b.png');
-  assert.equal(resolve('textures/wood.png'), '/examples/textures/wood.png');
+  assert.equal(resolve('asset://a.png'), '/assets/a.png');
+  assert.equal(resolve('asset://sub/./b.png'), '/assets/sub/b.png');
+  // SPEC 3.5: a relative path is relative to the shared asset root.
+  assert.equal(resolve('textures/wood.png'), '/assets/textures/wood.png');
+  // The core prefixes its own assetRoot name, which is dropped before joining.
+  assert.equal(resolve('assets/textures/wood.png'), '/assets/textures/wood.png');
   assert.equal(resolve('/absolute.png'), '/absolute.png');
   assert.equal(resolve('data:image/png;base64,AAAA'), 'data:image/png;base64,AAAA');
   assert.equal(resolve('file:///etc/passwd'), 'file:///etc/passwd');
@@ -1895,7 +1905,7 @@ test('ROBUST-05: asset and relative urls are contained to the asset root', async
 
   // A refused url starts no load and dispatches no result.
   const core = new RecordingCore();
-  const { consumer: guarded } = await makeConsumer({ core, assetRoot: '/web/assets' });
+  const { consumer: guarded } = await makeConsumer({ core, assetRoot: '/assets' });
   guarded.gltfLoader = { load: () => { throw new Error('must not be called'); } };
   guarded.apply([
     ['texture', 7, { url: 'asset://../../evil.png', repeat: [1, 1], offset: [0, 0], wrapS: 1001, wrapT: 1001, flipY: true }],

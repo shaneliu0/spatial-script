@@ -132,6 +132,9 @@ async function runCase(browser, server, testCase, matcher) {
       origin: server.url,
       scriptPath: testCase.scriptPath,
       camera: args.camera || camera,
+      // The node runner applies these before load; so does this one.
+      hostFunctions: testCase.expected && testCase.expected.hostFunctions,
+      demoHost: false,
     });
     page = scene.page;
 

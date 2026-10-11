@@ -12,6 +12,11 @@ import { Portal } from './portals.js';
 import { InputController } from './input.js';
 import { nativeDump } from './native-dump.js';
 import { walkUp, idOf, isDescendantOf } from './scene-walk.js';
+import { AudioEngine } from './audio.js';
+import { VideoScreens } from './video.js';
+import { CharacterControllers, ForceFields } from './character.js';
+import { HostBridge } from './host.js';
+import { AccessibilityMirror } from './accessibility.js';
 
 /**
  * The RealityKit consumer renders a macOS window whose default camera sits about a
@@ -84,6 +89,8 @@ export class SpatialConsumer {
 
     const cam = options.camera || DEFAULT_CAMERA;
     this.camera = new THREE.PerspectiveCamera(options.fov ?? DEFAULT_FOV, options.aspect ?? 1, 0.01, 200);
+    /** The consumer's own camera, used until a script assigns one (SPEC 14.3). */
+    this.builtInCamera = this.camera;
     this.camera.position.set(cam[0], cam[1], cam[2]);
     this.camera.lookAt(0, 0, 0);
     this.scene.add(this.camera);
@@ -108,6 +115,8 @@ export class SpatialConsumer {
     this.materialOf = new Map();
     /** Per-object material clones, used only where `opacity` is below one. */
     this.opacityMaterials = new Map();
+    /** SPEC 14.12: the material array of a multi-material mesh, owned per id. */
+    this.multiMaterials = new Map();
     /** @type {Map<number, {tap:boolean,hover:boolean,drag:boolean}>} */
     this.interactive = new Map();
     this.manipulable = new Set();
@@ -164,6 +173,49 @@ export class SpatialConsumer {
     // would be routed back into the core as a fresh `log` command each frame.
     this.console = options.console || (typeof console !== 'undefined' ? console : null);
 
+    // ---- phase 2 (SPEC 14) ------------------------------------------------
+    this.audio = new AudioEngine(this.camera, {
+      resolveUrl: (url) => this.resolveUrl(url),
+      dispatch: (type, id, payload) => this.dispatch(type, id, payload),
+      warnOnce: (key, message) => this.warnOnce(key, message),
+      beginLoad: () => { this.pendingLoads += 1; },
+      endLoad: () => this.endLoad(),
+    });
+    this.video = new VideoScreens({
+      resolveUrl: (url) => this.resolveUrl(url),
+      dispatch: (type, id, payload) => this.dispatch(type, id, payload),
+      warnOnce: (key, message) => this.warnOnce(key, message),
+    });
+    this.host = new HostBridge({
+      dispatch: (type, id, payload) => this.dispatch(type, id, payload),
+      resolveUrl: (url) => this.resolveUrl(url),
+      warnOnce: (key, message) => this.warnOnce(key, message),
+    });
+    this.accessibility = new AccessibilityMirror(options.document);
+    this.characters = null;
+    this.forceFields = null;
+    /** The camera the script chose, or null for the consumer's own. */
+    this.scriptCamera = null;
+    /** The object id the scripted camera rides. */
+    this.cameraId = null;
+    this.cameraSpec = null;
+    this.sceneUnderstanding = null;
+    this.renderOptions = { adaptiveResolution: null, environmentIntensityExponent: 1, debugModelView: null };
+    this.environmentIntensity = 1;
+    /** @type {Map<number, {joints: object, track: boolean}>} */
+    this.skeletons = new Map();
+    /** @type {Map<number, object>} */
+    this.blendShapes = new Map();
+    this.shaderGraphs = new Map();
+    /** `hostCall` and `fetch` ids, so a conformance step can answer them. */
+    this.pendingCalls = new Map();
+    this.pendingFetches = new Map();
+    /** `type:id` media results a host injected, so the element does not repeat them. */
+    this.hostAnswered = new Set();
+    /** Element media results waiting one frame for a host answer to overtake them. */
+    this._deferredMedia = new Map();
+    this.isActive = true;
+
     this.gltfLoader = new GLTFLoader();
     this.textureLoader = options.canvas || typeof document !== 'undefined' ? new THREE.TextureLoader() : null;
     this.physics = null;
@@ -176,6 +228,8 @@ export class SpatialConsumer {
       interactiveAncestor: (o, kind) => this.interactiveAncestor(o, kind),
       isManipulable: (o) => !!o.userData && this.manipulable.has(o.userData.__spatialId),
       dispatch: (type, id, payload) => this.dispatch(type, id, payload),
+      warnOnce: (key, message) => this.warnOnce(key, message),
+      scenePositionAt: (x, y) => this.scenePositionAt(x, y),
     });
 
     /**
@@ -184,6 +238,7 @@ export class SpatialConsumer {
      */
     this.manualBridge = false;
     this._inputOverride = null;
+    this._inputOverridden = false;
     this.pendingLoads = 0;
     /** @type {Map<number, object>} asset id -> the `asset` command payload */
     this.assetSpecs = new Map();
@@ -192,6 +247,8 @@ export class SpatialConsumer {
     this._manipulatedBodies = new Set();
 
     this._pendingBodies = new Map();
+    this._pendingCharacters = new Map();
+    this._pendingForceFields = new Map();
     this._pendingTeleports = new Set();
     this._pendingJoints = new Map();
     this._pendingBodyOps = [];
@@ -223,7 +280,11 @@ export class SpatialConsumer {
       this.camera.aspect = canvas.width / canvas.height;
       this.camera.updateProjectionMatrix();
     }
-    if (rapier) this.physics = new PhysicsWorld(rapier, (m) => this.warnOnce(m, m));
+    if (rapier) {
+      this.physics = new PhysicsWorld(rapier, (m) => this.warnOnce(m, m));
+      this.characters = new CharacterControllers(this.physics, { warnOnce: (k, m) => this.warnOnce(k, m) });
+      this.forceFields = new ForceFields(this.physics, { warnOnce: (k, m) => this.warnOnce(k, m) });
+    }
     this.input.attach();
     return this;
   }
@@ -242,9 +303,29 @@ export class SpatialConsumer {
     this.manualBridge = on === true;
   }
 
+  /** SPEC 14.10: the view appeared or went away; ticks pause while inactive. */
+  setActive(active) {
+    const next = active === true;
+    if (next === this.isActive) return;
+    this.isActive = next;
+    if (this.core && typeof this.core.setActive === 'function') this.core.setActive(next);
+  }
+
+  /**
+   * P2-B-28: a reset zeroes the counter while loads are still in flight, so a
+   * late completion must not take it negative and stall `settleLoads` for ever.
+   */
+  endLoad() {
+    this.pendingLoads = Math.max(0, this.pendingLoads - 1);
+  }
+
   /** Sends this exact input state on the next tick instead of the live one. */
   overrideInput(state) {
+    // Once a caller sets input explicitly it owns the channel: the consumer
+    // stops sending its own, so the core keeps the state between the frames the
+    // caller drives (SPEC 6: fields the payload omits persist).
     this._inputOverride = state;
+    this._inputOverridden = true;
   }
 
   setCameraPosition(x, y, z) {
@@ -257,6 +338,10 @@ export class SpatialConsumer {
     this.input.detach();
     // WEB-22: no throwaway Rapier world on the way out.
     this.reset({ recreatePhysics: false });
+    // P2-B-49: the audio graph and the accessibility container are the consumer's
+    // and must not outlive it.
+    this.audio.dispose();
+    this.accessibility.dispose();
     if (this.renderer) this.renderer.dispose();
   }
 
@@ -282,6 +367,32 @@ export class SpatialConsumer {
     this.materials.clear();
     this.materialOf.clear();
     this.opacityMaterials.clear();
+    for (const materials of this.multiMaterials.values()) for (const m of materials) m.dispose();
+    this.multiMaterials.clear();
+    this.audio.reset();
+    this.video.reset();
+    this.host.reset();
+    this.accessibility.reset();
+    if (this.characters) this.characters.reset();
+    if (this.forceFields) this.forceFields.reset();
+    this.skeletons.clear();
+    this.blendShapes.clear();
+    this.shaderGraphs.clear();
+    this.pendingCalls.clear();
+    this.pendingFetches.clear();
+    this.hostAnswered.clear();
+    this._deferredMedia.clear();
+    this.sceneUnderstanding = null;
+    this.renderOptions = { adaptiveResolution: null, environmentIntensityExponent: 1, debugModelView: null };
+    this.scene.overrideMaterial = null;
+    this.cameraSpec = null;
+    if (this.scriptCamera) {
+      this.scriptCamera.removeFromParent();
+      this.scriptCamera = null;
+      this.cameraId = null;
+      this.camera = this.builtInCamera;
+      this._rebindCamera();
+    }
     this._sharedGeometries.clear();
     this._sharedMaterials.clear();
     this._idleGeometries.clear();
@@ -306,16 +417,25 @@ export class SpatialConsumer {
       this.physics = recreatePhysics && this.options.rapier
         ? new PhysicsWorld(this.options.rapier, (m) => this.warnOnce(m, m))
         : null;
+      this.characters = this.physics
+        ? new CharacterControllers(this.physics, { warnOnce: (k, m) => this.warnOnce(k, m) })
+        : null;
+      this.forceFields = this.physics
+        ? new ForceFields(this.physics, { warnOnce: (k, m) => this.warnOnce(k, m) })
+        : null;
     }
     // Session state: a stale drag or hover would otherwise be delivered to
     // whatever object owns that id in the next scene (WEB-21).
     this.input.clearSessions();
     this._pendingBodies.clear();
+    this._pendingCharacters.clear();
+    this._pendingForceFields.clear();
     this._pendingTeleports.clear();
     this._pendingJoints.clear();
     this._pendingBodyOps.length = 0;
     this._manipulatedBodies.clear();
     this._inputOverride = null;
+    this._inputOverridden = false;
     this.manualBridge = false;
     this.pendingLoads = 0;
     this._syncScratch = new Float32Array(0);
@@ -369,10 +489,42 @@ export class SpatialConsumer {
     // WEB-15: a case that drives sync/dispatch itself owns the input and
     // collision channel, but load results must still reach the script.
     if (this.manualBridge && !LOAD_EVENTS.has(type)) return;
+    if (this.manualBridge && MEDIA_EVENTS.has(type)) {
+      const key = `${type}:${id}`;
+      // A host driving the bridge answers for the media element, so the
+      // element's own answer must not reach the script twice. Which of the two
+      // fires first is a network race, so the element's answer waits until the
+      // next frame and is dropped if the host's arrives in the meantime.
+      if (this.hostAnswered.has(key)) return;
+      this._deferredMedia.set(key, { type, id, payload, generation: this.generation });
+      return;
+    }
+    // P2-B-29: the correlation id is spent only when its answer really goes out;
+    // under the manual bridge the harness is the one that answers.
+    if (type === 'hostResult' || type === 'fetchResult') this.settleCorrelation(id);
+    this._emit(type, id, payload);
+  }
+
+  _emit(type, id, payload) {
     try {
       this.core.dispatch(type, id, payload || {});
     } catch (err) {
       this.errors.push(`dispatch(${type}, ${id}) failed: ${err.message}`);
+    }
+  }
+
+  /**
+   * Sends the media results the elements produced last frame, minus any the host
+   * has answered for since, and minus any left over from a previous load.
+   */
+  flushDeferredMedia() {
+    if (!this._deferredMedia.size) return;
+    const pending = [...this._deferredMedia.values()];
+    this._deferredMedia.clear();
+    for (const entry of pending) {
+      if (entry.generation !== this.generation) continue;
+      if (this.hostAnswered.has(`${entry.type}:${entry.id}`)) continue;
+      this._emit(entry.type, entry.id, entry.payload);
     }
   }
 
@@ -485,6 +637,8 @@ export class SpatialConsumer {
       this.recordError('post-batch', null, err);
     } finally {
       this._pendingBodies.clear();
+      this._pendingCharacters.clear();
+      this._pendingForceFields.clear();
       this._pendingTeleports.clear();
       this._pendingJoints.clear();
       this._pendingBodyOps.length = 0;
@@ -585,6 +739,63 @@ export class SpatialConsumer {
       case 'assetAnimation': this.setAssetAnimation(id, command[2], command[3], command[4]); break;
       case 'environment': this.setEnvironment(command[2]); break;
       case 'log': this.handleLog(command[2], command[3]); break;
+
+      // ---- phase 2 (SPEC 14.13) ------------------------------------------
+      case 'audio':
+        this.checkPayloadKeys('audio', command[2], KNOWN_KEYS.audio);
+        this.withObject(id, (o) => this.audio.setSource(id, o, sanitizeAudio(command[2])));
+        break;
+      case 'audioControl': this.audio.control(id, command[2], command[3]); break;
+      case 'audioMixer':
+        this.checkPayloadKeys('audioMixer', command[2], KNOWN_KEYS.audioMixer);
+        this.audio.setMixer(command[2]);
+        break;
+      case 'video':
+        this.checkPayloadKeys('video', command[2], KNOWN_KEYS.video);
+        this.withObject(id, (o) => this.video.set(id, o, command[2]));
+        break;
+      case 'videoControl': this.video.control(id, command[2], command[3]); break;
+      case 'camera': this.setCamera(id, command[2]); break;
+      case 'characterController':
+        this.checkPayloadKeys('characterController', command[2], KNOWN_KEYS.characterController);
+        this._pendingCharacters.set(id, command[2] || null);
+        break;
+      case 'characterMove': this._pendingBodyOps.push(['characterMove', id, command[2], command[3], command[4]]); break;
+      case 'characterTeleport': this._pendingBodyOps.push(['characterTeleport', id, command[2], command[3], command[4]]); break;
+      case 'forceField':
+        this.checkPayloadKeys('forceField', command[2], KNOWN_KEYS.forceField);
+        this._pendingForceFields.set(id, command[2] || null);
+        break;
+      case 'skeleton':
+        this.checkPayloadKeys('skeleton', command[2], KNOWN_KEYS.skeleton);
+        this.setSkeleton(id, command[2]);
+        break;
+      case 'blendShapes': this.setBlendShapes(id, command[2]); break;
+      case 'shaderParameter': this.setShaderParameter(id, command[2], command[3], command[4]); break;
+      case 'sceneUnderstanding':
+        this.checkPayloadKeys('sceneUnderstanding', command[2], KNOWN_KEYS.sceneUnderstanding);
+        this.setSceneUnderstanding(command[2]);
+        break;
+      case 'accessibility':
+        this.checkPayloadKeys('accessibility', command[2], KNOWN_KEYS.accessibility);
+        this.withObject(id, (o) => this.accessibility.set(id, o.name, command[2]));
+        break;
+      case 'renderOptions':
+        this.checkPayloadKeys('renderOptions', command[2], KNOWN_KEYS.renderOptions);
+        this.setRenderOptions(command[2]);
+        break;
+      case 'hostEvent': this.host.emit(command[2], command[3]); break;
+      case 'hostCall':
+        // P2-B-29: keyed by the correlation id, indexed by name, and pruned when
+        // the answer goes out, so repeated calls do not lose each other's id.
+        this.pendingCalls.set(id, command[2]);
+        this.host.call(id, command[2], command[3]);
+        break;
+      case 'fetch':
+        this.pendingFetches.set(id, command[2] && command[2].url);
+        this.host.fetch(id, command[2]);
+        break;
+      case 'controllerRumble': this.input.rumble(command[2], command[3], command[4]); break;
       default:
         this.warnOnce(`opcode:${op}`, `unknown command opcode "${op}"`);
     }
@@ -645,6 +856,27 @@ export class SpatialConsumer {
           this.recordError(`joint ${jointId}`, null, err);
         }
       }
+    }
+    if (this.characters) {
+      for (const [id, spec] of this._pendingCharacters) {
+        const object = this.objects.get(id);
+        if (!object) continue;
+        try {
+          this.characters.set(id, object, spec);
+        } catch (err) {
+          this.recordError('characterController', id, err);
+        }
+      }
+    }
+    if (this.forceFields) {
+      for (const [id, spec] of this._pendingForceFields) {
+        const object = this.objects.get(id);
+        if (object) this.forceFields.set(id, object, spec);
+      }
+    }
+    if (this.physics) {
+      // After the controllers exist: a batch may create a character and move it
+      // in the same flush, and the move has to find its controller.
       for (const op of this._pendingBodyOps) {
         try {
           this._runBodyOp(op);
@@ -652,7 +884,12 @@ export class SpatialConsumer {
           this.recordError(op[0], op[1], err);
         }
       }
-    } else if (this._pendingBodies.size || this._pendingJoints.size || this._pendingBodyOps.length) {
+    }
+    if (!this.physics && (this._pendingCharacters.size || this._pendingForceFields.size)) {
+      this.warnOnce('noPhysics',
+        'no physics module was supplied; character controllers and force fields are recorded but not simulated');
+    }
+    if (!this.physics && (this._pendingBodies.size || this._pendingJoints.size || this._pendingBodyOps.length)) {
       this.warnOnce(
         'noPhysics',
         'no physics module was supplied; rigid bodies, joints and body forces are recorded but not simulated',
@@ -670,6 +907,8 @@ export class SpatialConsumer {
     else if (kind === 'force') this.physics.applyForce(id, op[2], op[3], op[4]);
     else if (kind === 'torque') this.physics.applyTorque(id, op[2], op[3], op[4]);
     else if (kind === 'velocity') this.physics.setVelocity(id, op[2], op[3], op[4], op[5], op[6], op[7]);
+    else if (kind === 'characterMove' && this.characters) this.characters.move(id, op[2], op[3], op[4]);
+    else if (kind === 'characterTeleport' && this.characters) this.characters.teleport(id, op[2], op[3], op[4]);
   }
 
   // ------------------------------------------------------------ scene graph
@@ -743,6 +982,15 @@ export class SpatialConsumer {
       this.assets.delete(id);
     }
     this.assetSpecs.delete(id);
+    this.audio.remove(id);
+    this.video.remove(id);
+    this.accessibility.remove(id);
+    if (this.characters) this.characters.remove(id);
+    if (this.forceFields) this.forceFields.set(id, null, null);
+    this.skeletons.delete(id);
+    this.blendShapes.delete(id);
+    this.shaderGraphs.delete(id);
+    this._disposeMultiMaterial(id);
     if (this.physics) this.physics.removeBody(id);
     if (object.isLight && object.target && object.target.parent) object.target.removeFromParent();
     object.removeFromParent();
@@ -871,6 +1119,7 @@ export class SpatialConsumer {
     const previous = object.geometry;
     this.checkPayloadKeys('geometry', info, KNOWN_KEYS.geometry);
     const entry = this._acquireGeometry(id, info, positions, normals, uvs, indices);
+    this._applyGroups(entry.geometry, info && info.groups);
     object.geometry = entry.geometry;
     object.userData.__spatialGeometry = entry.info;
 
@@ -984,6 +1233,13 @@ export class SpatialConsumer {
     geometry.computeBoundingSphere();
   }
 
+  /** SPEC 14.12: `groups` selects a material per index range. */
+  _applyGroups(geometry, groups) {
+    geometry.clearGroups();
+    if (!groups) return;
+    for (const group of groups) geometry.addGroup(group.start, group.count, group.materialIndex);
+  }
+
   _setAttribute(geometry, name, values, itemSize) {
     if (!values) {
       if (geometry.getAttribute(name)) geometry.deleteAttribute(name);
@@ -1016,10 +1272,26 @@ export class SpatialConsumer {
     if (!object || !object.isMesh || !spec) return;
     if (this.portals.has(id)) return;
     const previous = object.material;
+    if (Array.isArray(spec)) {
+      // SPEC 14.12: one material per geometry group.
+      this._releaseMaterial(id);
+      const materials = spec.map((one, index) => this.buildMaterial(one, id, index));
+      object.material = materials;
+      this.multiMaterials.set(id, materials);
+      this.opacityDirty = true;
+      if (previous && !Array.isArray(previous) && previous.userData.__placeholder) previous.dispose();
+      this.opacityDirty = true;
+      return;
+    }
+    this._disposeMultiMaterial(id);
     const entry = this._acquireMaterial(id, spec);
     object.material = entry.material;
     // The placeholder material a mesh is created with is owned by nobody else.
-    if (previous && previous !== entry.material && previous.userData.__placeholder) previous.dispose();
+    // P2-B-12: `previous` may be the material array this mesh just left.
+    if (previous && !Array.isArray(previous) && previous !== entry.material
+      && previous.userData.__placeholder) {
+      previous.dispose();
+    }
     this.opacityDirty = true;
   }
 
@@ -1027,7 +1299,10 @@ export class SpatialConsumer {
    * Returns the shared material for this uuid. A changed spec is written into the
    * existing instance so every mesh using it updates at once (SPEC 5).
    */
-  _acquireMaterial(id, spec) {
+  _acquireMaterial(id, spec, slot = 0) {
+    // P2-B-31: the graph identity belongs to the mesh, not to the cache entry, so
+    // every mesh binding the uuid records it, not only the one that built it.
+    if (spec.type === 'ShaderGraphMaterial') this._recordShaderGraph(id, spec, slot);
     const uuid = spec.uuid;
     let entry = uuid ? this.materials.get(uuid) : null;
     if (entry && entry.type !== spec.type) {
@@ -1038,13 +1313,17 @@ export class SpatialConsumer {
     if (entry) {
       const key = JSON.stringify(spec);
       if (entry.key !== key) {
-        this.applyMaterial(entry.material, spec);
+        if (spec.type === 'ShaderGraphMaterial') {
+          if (spec.fallback) this.applyMaterial(entry.material, spec.fallback);
+        } else {
+          this.applyMaterial(entry.material, spec);
+        }
         entry.key = key;
         entry.revision += 1;
         this.opacityDirty = true;
       }
     } else {
-      const material = this.buildMaterial(spec);
+      const material = this.buildMaterial(spec, id);
       entry = { material, users: new Set(), key: JSON.stringify(spec), revision: 0, uuid, type: spec.type };
       if (uuid) this.materials.set(uuid, entry);
       this._sharedMaterials.add(material);
@@ -1069,13 +1348,44 @@ export class SpatialConsumer {
     if (previous.users.size === 0) this._disposeMaterialEntry(previous);
   }
 
+  _disposeMultiMaterial(id) {
+    const materials = this.multiMaterials.get(id);
+    if (!materials) return;
+    this.multiMaterials.delete(id);
+    for (const material of materials) material.dispose();
+  }
+
   _disposeMaterialEntry(entry) {
     entry.material.dispose();
     this._sharedMaterials.delete(entry.material);
     if (entry.uuid && this.materials.get(entry.uuid) === entry) this.materials.delete(entry.uuid);
   }
 
-  buildMaterial(spec) {
+  _recordShaderGraph(id, spec, slot) {
+    if (id === null || id === undefined) return;
+    this.shaderGraphs.set(shaderKey(id, slot), {
+      source: spec.source ?? null,
+      name: spec.name ?? null,
+      parameters: { ...(spec.parameters || {}) },
+      generation: spec.generation ?? 0,
+      slot,
+    });
+  }
+
+  buildMaterial(spec, id = null, slot = 0) {
+    if (spec.type === 'ShaderGraphMaterial') {
+      this._recordShaderGraph(id, spec, slot);
+      // SPEC 14.6: RealityKit loads the graph; the web renders the fallback.
+      this.warnOnce(
+        'shaderGraph',
+        'ShaderGraphMaterial is RealityKit only; the fallback material is rendered here',
+      );
+      const fallback = spec.fallback
+        ? this.buildMaterial(spec.fallback)
+        : new THREE.MeshStandardMaterial();
+      fallback.userData.__shaderGraph = { source: spec.source ?? null, name: spec.name ?? null };
+      return fallback;
+    }
     let material;
     switch (spec.type) {
       case 'MeshBasicMaterial':
@@ -1179,15 +1489,19 @@ export class SpatialConsumer {
    */
   resolveUrl(url) {
     if (!url) return url;
+    const root = this.options.assetRoot || DEFAULT_ASSET_ROOT;
     if (url.startsWith('asset://')) {
-      return this._containedUrl(this.options.assetRoot || '/web/assets', url.slice('asset://'.length), url);
+      return this._containedUrl(root, url.slice('asset://'.length), url);
     }
     if (/^(https?:|file:|data:|blob:)/.test(url)) return stripCredentials(url);
     // A root-relative path is already absolute for the page, and cannot escape.
     if (url.startsWith('/')) return url;
-    const root = this.options.scriptRoot;
-    if (!root) return url;
-    return this._containedUrl(root, url, url);
+    // SPEC 3.5: a relative path is relative to the shared asset root. The core
+    // has already joined its own `assetRoot` name onto it, so that prefix is
+    // dropped before the path is joined onto the served root.
+    const prefix = `${(this.options.coreAssetRoot || 'assets').replace(/^\/+|\/+$/g, '')}/`;
+    const relative = url.startsWith(prefix) ? url.slice(prefix.length) : url;
+    return this._containedUrl(root, relative, url);
   }
 
   /** Joins `path` onto `root`, refusing a result outside it. */
@@ -1317,7 +1631,7 @@ export class SpatialConsumer {
     this.imageLoader.load(
       url,
       (image) => {
-        this.pendingLoads -= 1;
+        this.endLoad();
         if (generation !== this.generation || entry.released) return;
         for (const texture of this._textureViews(entry)) {
           texture.image = image;
@@ -1329,7 +1643,7 @@ export class SpatialConsumer {
       },
       undefined,
       () => {
-        this.pendingLoads -= 1;
+        this.endLoad();
         if (generation !== this.generation || entry.released) return;
         // A missing texture is a resource problem, not a scene error: the script
         // hears about it through the texture's own error event.
@@ -1340,6 +1654,325 @@ export class SpatialConsumer {
         }
       },
     );
+  }
+
+  // ------------------------------------------------------- phase 2 (SPEC 14)
+
+  /**
+   * `camera` (SPEC 14.3): the script's camera replaces the consumer's built-in
+   * one. `aspect` stays the consumer's, from the viewport, and a script-set
+   * value is ignored with a warning.
+   */
+  /**
+   * `camera` (SPEC 14.13): the second element is the camera object's id, and its
+   * transform rides `transforms` like any other object. `["camera", 0, { kind:
+   * null }]` restores the consumer's built-in camera. `aspect` stays the
+   * consumer's, from the viewport; a script-set value is ignored.
+   */
+  setCamera(id, spec) {
+    this.checkPayloadKeys('camera', spec, KNOWN_KEYS.camera);
+    this.cameraSpec = spec && spec.kind ? spec : null;
+    if (!spec || !spec.kind) {
+      if (this.scriptCamera) {
+        this.scriptCamera = null;
+        this.cameraId = null;
+        this.camera = this.builtInCamera;
+        this._rebindCamera();
+      }
+      return;
+    }
+
+    // The camera is a real object in the scene graph, so the consumer swaps the
+    // three.js camera onto it rather than keeping one of its own.
+    const object = this.objects.get(id);
+    if (!object) {
+      this.warnOnce(`cameraId:${id}`, `the camera command names unknown object id ${id}`);
+      return;
+    }
+    const aspect = this.viewportAspect();
+    const wanted = spec.kind === 'orthographic' ? 'OrthographicCamera' : 'PerspectiveCamera';
+    let camera = this.scriptCamera;
+    if (!camera || camera.type !== wanted || this.cameraId !== id) {
+      if (camera && camera.parent) camera.removeFromParent();
+      camera = spec.kind === 'orthographic'
+        ? new THREE.OrthographicCamera(-1, 1, 1, -1, spec.near ?? 0.01, spec.far ?? 200)
+        : new THREE.PerspectiveCamera(spec.fov ?? DEFAULT_FOV, aspect, spec.near ?? 0.01, spec.far ?? 200);
+      camera.name = '__scriptCamera';
+      camera.matrixAutoUpdate = false;
+      // Riding the object means the script's transform commands move it for free.
+      object.add(camera);
+      this.scriptCamera = camera;
+      this.cameraId = id;
+    }
+    if (camera.isPerspectiveCamera) {
+      camera.fov = spec.fov ?? camera.fov;
+      camera.aspect = aspect;
+    } else {
+      this._applyOrthographicFrustum(camera, spec, aspect);
+    }
+    camera.near = spec.near ?? camera.near;
+    camera.far = spec.far ?? camera.far;
+    camera.updateProjectionMatrix();
+    if (this.camera !== camera) {
+      this.camera = camera;
+      this._rebindCamera();
+    }
+  }
+
+  /**
+   * SPEC 14.3: an orthographic camera's visible height is `top - bottom` and its
+   * visible width follows the viewport aspect, so the image never stretches
+   * anisotropically. The script's `left` and `right` are honored silently when
+   * they already describe that width within two percent, and otherwise warn once
+   * naming both numbers. The dump keeps what the script asked for.
+   */
+  _applyOrthographicFrustum(camera, spec, aspect) {
+    const top = spec.top ?? camera.top;
+    const bottom = spec.bottom ?? camera.bottom;
+    const left = spec.left ?? camera.left;
+    const right = spec.right ?? camera.right;
+
+    camera.top = top;
+    camera.bottom = bottom;
+
+    const height = top - bottom;
+    const derivedWidth = height * aspect;
+    const requestedWidth = right - left;
+    const centre = (left + right) / 2;
+
+    if (Math.abs(requestedWidth - derivedWidth) > Math.abs(derivedWidth) * ORTHOGRAPHIC_TOLERANCE) {
+      this.warnOnce(
+        'orthographicWidth',
+        `the orthographic camera asks for a width of ${requestedWidth} but the viewport aspect `
+        + `makes it ${derivedWidth}; the height is kept and the width follows the viewport`,
+      );
+    }
+    camera.left = centre - derivedWidth / 2;
+    camera.right = centre + derivedWidth / 2;
+  }
+
+  /** Everything that holds a camera reference follows the active one. */
+  _rebindCamera() {
+    this.input.deps.camera = this.camera;
+    this.audio.camera = this.camera;
+    if (this.audio.listener) this.camera.add(this.audio.listener);
+  }
+
+  viewportAspect() {
+    if (!this.renderer) return this.camera.aspect || 1;
+    const size = this.renderer.getDrawingBufferSize(_size);
+    return size.y ? size.x / size.y : 1;
+  }
+
+  /** `rayFromPoint` (SPEC 14.3): a world ray for a view pixel. */
+  rayFromPoint(x, y) {
+    const size = this.renderer ? this.renderer.getDrawingBufferSize(_size) : _size.set(1, 1);
+    if (!size.x || !size.y) return null;
+    _ndc.set((x / size.x) * 2 - 1, -(y / size.y) * 2 + 1);
+    const caster = new THREE.Raycaster();
+    caster.setFromCamera(_ndc, this.camera);
+    return [
+      caster.ray.origin.x, caster.ray.origin.y, caster.ray.origin.z,
+      caster.ray.direction.x, caster.ray.direction.y, caster.ray.direction.z,
+    ];
+  }
+
+  /**
+   * The world point under the pointer: the first hit mesh, or the plane through
+   * the origin facing the camera when nothing is hit (SPEC 14.3).
+   */
+  scenePositionAt(x, y) {
+    const size = this.renderer ? this.renderer.getDrawingBufferSize(_size) : _size.set(1, 1);
+    if (!size.x || !size.y) return null;
+    _ndc.set((x / size.x) * 2 - 1, -(y / size.y) * 2 + 1);
+    const caster = new THREE.Raycaster();
+    caster.setFromCamera(_ndc, this.camera);
+    const hits = caster.intersectObjects(this.pickables(), false);
+    if (hits.length) return [hits[0].point.x, hits[0].point.y, hits[0].point.z];
+    this.camera.getWorldDirection(_v3);
+    _plane.setFromNormalAndCoplanarPoint(_v3.negate(), _origin);
+    const point = new THREE.Vector3();
+    if (!caster.ray.intersectPlane(_plane, point)) return null;
+    return [point.x, point.y, point.z];
+  }
+
+  /** `skeleton` (SPEC 14.5): script-driven joint poses on a loaded asset. */
+  setSkeleton(id, spec) {
+    if (!spec) {
+      this.skeletons.delete(id);
+      return;
+    }
+    this.skeletons.set(id, { joints: spec.joints || {}, track: spec.track === true });
+    const entry = this.assets.get(id);
+    if (!entry || !entry.bones) return;
+    for (const [name, pose] of Object.entries(spec.joints || {})) {
+      const bone = entry.bones.get(name);
+      if (!bone) {
+        this.warnOnce(`joint:${id}:${name}`, `asset joint "${name}" not found`);
+        continue;
+      }
+      if (pose && pose.length >= 7) {
+        bone.position.set(pose[0], pose[1], pose[2]);
+        bone.quaternion.set(pose[3], pose[4], pose[5], pose[6]);
+      }
+    }
+  }
+
+  /** `blendShapes` (SPEC 14.5): morph target weights by name. */
+  setBlendShapes(id, weights) {
+    if (!weights) {
+      this.blendShapes.delete(id);
+      return;
+    }
+    this.blendShapes.set(id, { ...weights });
+    const entry = this.assets.get(id);
+    if (!entry || !entry.morphs) return;
+    for (const [name, weight] of Object.entries(weights)) {
+      if (!Number.isFinite(weight)) {
+        this.warnOnce(`blendShapeValue:${name}`, `the blend shape "${name}" was given a non-numeric weight`);
+        continue;
+      }
+      const targets = entry.morphs.get(name);
+      if (!targets) {
+        this.warnOnce(`blendShape:${id}:${name}`, `asset blend shape "${name}" not found`);
+        continue;
+      }
+      for (const { mesh, index } of targets) mesh.morphTargetInfluences[index] = weight;
+    }
+  }
+
+  /** Flat `[id, ...]` joint report for `syncSkeleton`, only while tracking. */
+  trackedSkeletons() {
+    const out = [];
+    for (const [id, state] of this.skeletons) {
+      if (!state.track) continue;
+      const entry = this.assets.get(id);
+      if (!entry || !entry.bones) continue;
+      const joints = {};
+      for (const [name, bone] of entry.bones) {
+        joints[name] = [
+          bone.position.x, bone.position.y, bone.position.z,
+          bone.quaternion.x, bone.quaternion.y, bone.quaternion.z, bone.quaternion.w,
+        ];
+      }
+      out.push([id, joints]);
+    }
+    return out;
+  }
+
+  /** `shaderParameter` (SPEC 14.6): update a same-named fallback property. */
+  /**
+   * `shaderParameter` (SPEC 14.13): the fifth element is the material index, so a
+   * multi-material mesh can carry a graph in any slot. The web renders the
+   * fallback, so a same-named property on it is what the parameter updates; an
+   * integer for a map slot is resolved against the texture cache.
+   */
+  setShaderParameter(id, name, value, materialIndex = 0) {
+    const graph = this.shaderGraphs.get(shaderKey(id, materialIndex));
+    if (graph) graph.parameters[name] = value;
+    const material = this.materialAt(id, materialIndex);
+    if (!material || !(name in material)) {
+      this.warnOnce(
+        `shaderParameter:${name}`,
+        `the shader graph parameter "${name}" has no matching property on the fallback material`,
+      );
+      return;
+    }
+    const target = material[name];
+    if (MAP_SLOTS.includes(name) && typeof value === 'number') {
+      // A texture id, which is what the core sends for a map parameter.
+      const entry = this.textures.get(value);
+      if (!entry) {
+        this.warnOnce(`shaderTexture:${value}`, `the shader graph parameter "${name}" names unknown texture id ${value}`);
+        return;
+      }
+      material[name] = this._textureForColorSpace(entry, name === 'map' || name === 'emissiveMap'
+        ? THREE.SRGBColorSpace
+        : THREE.NoColorSpace);
+    } else if (target && target.isColor && Array.isArray(value)) {
+      target.setRGB(value[0], value[1], value[2], THREE.LinearSRGBColorSpace);
+    } else if (target && target.isVector2 && Array.isArray(value)) {
+      target.set(value[0], value[1]);
+    } else if (target && target.isVector3 && Array.isArray(value)) {
+      target.set(value[0], value[1], value[2]);
+    } else if (typeof value === 'number' || typeof value === 'boolean') {
+      material[name] = value;
+    } else {
+      this.warnOnce(
+        `shaderParameterValue:${name}`,
+        `the shader graph parameter "${name}" carries a value this consumer cannot map`,
+      );
+      return;
+    }
+    material.needsUpdate = true;
+  }
+
+  /** The material in one slot of a mesh, single or multi. */
+  materialAt(id, index = 0) {
+    const object = this.objects.get(id);
+    if (!object || !object.isMesh) return null;
+    if (Array.isArray(object.material)) return object.material[index] || null;
+    return index === 0 ? object.material : null;
+  }
+
+  /** `sceneUnderstanding` (SPEC 14.7): kept in the dump, warned once. */
+  setSceneUnderstanding(spec) {
+    this.sceneUnderstanding = spec ? { ...spec } : null;
+    if (spec && (spec.collision || spec.occlusion || spec.physics || spec.shadows)) {
+      this.warnOnce(
+        'sceneUnderstanding',
+        'scene understanding is visionOS only; the flags are kept but have no effect here',
+      );
+    }
+  }
+
+  /** `renderOptions` (SPEC 14.11). */
+  setRenderOptions(spec) {
+    if (!spec) return;
+    this.renderOptions = { ...this.renderOptions, ...spec };
+    if (spec.adaptiveResolution) {
+      this.warnOnce('adaptiveResolution', 'adaptive resolution is visionOS only and has no effect here');
+    }
+    const exponent = spec.environmentIntensityExponent;
+    if (typeof exponent === 'number') {
+      this.environmentIntensity = exponent;
+      // The ambient environment is scaled by the exponent, as macOS does.
+      this.scene.environmentIntensity = (this._environmentBaseIntensity ?? 1) ** exponent;
+    }
+    this.setDebugModelView(spec.debugModelView ?? null);
+  }
+
+  /** `debug.modelView` (SPEC 14.11): normal and uv have three.js equivalents. */
+  setDebugModelView(mode) {
+    if (this.renderOptions.debugModelViewApplied === mode) return;
+    this.renderOptions.debugModelViewApplied = mode;
+    if (mode && mode !== 'normal' && mode !== 'uv') {
+      this.warnOnce(
+        `debugModelView:${mode}`,
+        `the debug model view "${mode}" has no three.js substitute; the scene renders normally`,
+      );
+    }
+    if (!mode) {
+      this.scene.overrideMaterial = null;
+      return;
+    }
+    if (mode === 'normal') {
+      this.scene.overrideMaterial = new THREE.MeshNormalMaterial();
+    } else if (mode === 'uv') {
+      // three ships no uv debug material, so one is built from the uv attribute.
+      const material = new THREE.MeshBasicMaterial();
+      material.onBeforeCompile = (shader) => {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <color_fragment>',
+          '#include <color_fragment>\n  diffuseColor.rgb = vec3(vMapUv, 0.0);',
+        );
+      };
+      material.defines = { USE_UV: '', USE_MAP: '' };
+      material.map = whiteTexture();
+      this.scene.overrideMaterial = material;
+    } else {
+      this.scene.overrideMaterial = null;
+    }
   }
 
   // ----------------------------------------------------------------- lights
@@ -1426,10 +2059,16 @@ export class SpatialConsumer {
       const own = id !== undefined ? (this.opacities.get(id) ?? 1) : 1;
       const value = accumulated * own;
       // A portal owns its render-target surface; nothing else may reassign it.
-      if (object.isMesh && object.material && !Array.isArray(object.material) && !this.portals.has(id)) {
-        const entry = id === undefined ? null : this.materialOf.get(id);
-        if (entry) this._applyObjectOpacity(object, id, entry, value);
-        else this._applyInlineOpacity(object.material, value);
+      if (object.isMesh && object.material && !this.portals.has(id)) {
+        if (Array.isArray(object.material)) {
+          // SPEC 3.2 and 14.12: opacity multiplies down the whole subtree, so
+          // every material of a multi-material mesh takes it.
+          for (const one of object.material) this._applyInlineOpacity(one, value);
+        } else {
+          const entry = id === undefined ? null : this.materialOf.get(id);
+          if (entry) this._applyObjectOpacity(object, id, entry, value);
+          else this._applyInlineOpacity(object.material, value);
+        }
       }
       const emitter = id === undefined ? null : this.emitters.get(id);
       // SPEC 3.2 multiplies down the whole subtree, particles included (WEB-30).
@@ -1564,7 +2203,7 @@ export class SpatialConsumer {
     this.gltfLoader.load(
       resolved,
       (gltf) => {
-        this.pendingLoads -= 1;
+        this.endLoad();
         if (generation !== this.generation || this.objects.get(id) !== object) {
           disposeSubtree(gltf.scene);
           return;
@@ -1572,17 +2211,25 @@ export class SpatialConsumer {
         object.add(gltf.scene);
         const clips = gltf.animations || [];
         const mixer = new THREE.AnimationMixer(gltf.scene);
-        this.assets.set(id, { mixer, clips, action: null, root: gltf.scene });
+        const { bones, morphs } = describeRig(gltf.scene);
+        this.assets.set(id, { mixer, clips, action: null, root: gltf.scene, bones, morphs });
         const box = new THREE.Box3().setFromObject(gltf.scene);
         this.dispatch('assetLoaded', id, {
           animations: clips.map((clip) => clip.name),
+          joints: [...bones.keys()],
+          blendShapes: [...morphs.keys()],
           boundingBox: [box.min.x, box.min.y, box.min.z, box.max.x, box.max.y, box.max.z],
         });
+        // Poses the script set before the file arrived are applied now.
+        const pending = this.skeletons.get(id);
+        if (pending) this.setSkeleton(id, { joints: pending.joints, track: pending.track });
+        const weights = this.blendShapes.get(id);
+        if (weights) this.setBlendShapes(id, weights);
         this.opacityDirty = true;
       },
       undefined,
       (err) => {
-        this.pendingLoads -= 1;
+        this.endLoad();
         if (generation !== this.generation || this.objects.get(id) !== object) return;
         const message = `asset failed to load: ${url} (${err && err.message ? err.message : err})`;
         this.warnOnce(`assetLoad:${url}`, message);
@@ -1621,7 +2268,8 @@ export class SpatialConsumer {
     }
     this.checkPayloadKeys('environment', spec, KNOWN_KEYS.environment);
     const url = this.resolveUrl(spec.url);
-    this.scene.environmentIntensity = spec.intensity ?? 1;
+    this._environmentBaseIntensity = spec.intensity ?? 1;
+    this.scene.environmentIntensity = this._environmentBaseIntensity ** (this.environmentIntensity ?? 1);
     if (url === null) {
       this._disposeEnvironment();
       return;
@@ -1681,7 +2329,7 @@ export class SpatialConsumer {
     this.hdrLoader.load(
       url,
       (texture) => {
-        this.pendingLoads -= 1;
+        this.endLoad();
         if (generation !== this.generation) {
           texture.dispose();
           return;
@@ -1691,7 +2339,7 @@ export class SpatialConsumer {
       },
       undefined,
       () => {
-        this.pendingLoads -= 1;
+        this.endLoad();
         if (generation !== this.generation) return;
         this.warnOnce(`environmentLoad:${url}`, `environment failed to load: ${url}`);
       },
@@ -1709,6 +2357,32 @@ export class SpatialConsumer {
     generator.dispose();
     texture.dispose();
     return this._environmentTarget.texture;
+  }
+
+  /** The oldest unanswered call id for a name, for a `dispatch` conformance step. */
+  pendingCallId(name) {
+    for (const [id, called] of this.pendingCalls) if (called === name) return id;
+    return undefined;
+  }
+
+  pendingFetchId(url) {
+    for (const [id, requested] of this.pendingFetches) if (requested === url) return id;
+    return undefined;
+  }
+
+  /** A host dispatched this event itself (SPEC 9): the consumer must not repeat it. */
+  noteHostDispatch(type, id) {
+    if (!MEDIA_EVENTS.has(type) || id === undefined || id === null) return;
+    const key = `${type}:${id}`;
+    this.hostAnswered.add(key);
+    // The element got there first; its answer is still waiting, so drop it.
+    this._deferredMedia.delete(key);
+  }
+
+  /** Drops a correlation id once its answer has been dispatched. */
+  settleCorrelation(id) {
+    this.pendingCalls.delete(id);
+    this.pendingFetches.delete(id);
   }
 
   /** Texture id for the url the script used, for `dispatch` conformance steps. */
@@ -1765,22 +2439,33 @@ export class SpatialConsumer {
     if (!this.core) return [];
     const frameStarted = now();
     this._logsThisFrame = 0;
+    // Media results the elements produced since the last frame, now that any
+    // host answer for the same object has had its chance to arrive.
+    this.flushDeferredMedia();
     try {
       if (this.physics) {
+        // Force fields and character controllers run inside the fixed step.
+        this.physics.beforeStep = (step) => {
+          if (this.forceFields) this.forceFields.step(step);
+          if (this.characters) this.characters.step(step);
+        };
         for (const event of this.physics.step(dt)) this._dispatchCollision(event);
         this._pushScriptDrivenBodies();
+        if (this.characters) this._applyCharacterTransforms();
       }
       // WEB-14: manipulation reaches the core whether or not physics exists.
       if (!this.manualBridge) {
         this.core.sync(this._syncRecords());
         if (this.physics) this.core.syncBodies(this.physics.bodyRecords());
+        this._syncPhase2();
       }
     } catch (err) {
       this.recordError('physics sync', null, err);
     }
     try {
       const liveInput = this.input.consumeState();
-      this.core.setInput(this._inputOverride || liveInput);
+      if (this._inputOverride) this.core.setInput(this._inputOverride);
+      else if (!this._inputOverridden) this.core.setInput(liveInput);
     } catch (err) {
       this.recordError('setInput', null, err);
     }
@@ -1835,6 +2520,40 @@ export class SpatialConsumer {
     if (this.mirrorCollisionEvents) {
       const flipped = [-event.normal[0], -event.normal[1], -event.normal[2]];
       this.dispatch(event.type, event.idB, payload(event.idA, flipped));
+    }
+  }
+
+  /** The phase 2 channels: audio, video, character and skeleton state. */
+  _syncPhase2() {
+    if (typeof this.core.syncAudio === 'function' && this.audio.sources.size) {
+      this.core.syncAudio(this.audio.syncRecords());
+    }
+    if (typeof this.core.syncVideo === 'function' && this.video.screens.size) {
+      this.core.syncVideo(this.video.syncRecords());
+    }
+    if (this.characters && typeof this.core.syncCharacter === 'function' && this.characters.controllers.size) {
+      this.core.syncCharacter(this.characters.syncRecords());
+    }
+    if (typeof this.core.syncSkeleton === 'function') {
+      for (const [id, joints] of this.trackedSkeletons()) this.core.syncSkeleton(id, joints);
+    }
+  }
+
+  /** A character controller is native-driven, like a dynamic body. */
+  _applyCharacterTransforms() {
+    for (const [id, entry] of this.characters.controllers) {
+      const object = this.objects.get(id);
+      if (!object) continue;
+      const translation = entry.body.translation();
+      if (object.parent) {
+        object.parent.updateWorldMatrix(true, false);
+        _v3.set(translation.x, translation.y, translation.z)
+          .applyMatrix4(_matrix.copy(object.parent.matrixWorld).invert());
+        object.position.copy(_v3);
+      } else {
+        object.position.set(translation.x, translation.y, translation.z);
+      }
+      object.updateMatrix();
     }
   }
 
@@ -1936,6 +2655,7 @@ export class SpatialConsumer {
     for (const id of this.lightDirections.keys()) this._updateLightTarget(id);
     this._updateBillboards();
     for (const emitter of this.emitters.values()) emitter.update(dt);
+    this.audio.update();
     for (const entry of this.assets.values()) entry.mixer.update(dt);
     if (this.opacityDirty) {
       this.applyOpacity();
@@ -2081,8 +2801,43 @@ const _quat = new THREE.Quaternion();
 const _parentQuat = new THREE.Quaternion();
 const _scale = new THREE.Vector3();
 const _size = new THREE.Vector2();
+const _ndc = new THREE.Vector2();
+const _plane = new THREE.Plane();
+const _origin = new THREE.Vector3(0, 0, 0);
+const _matrix = new THREE.Matrix4();
+
+/** Bones by name and morph targets by name, for SPEC 14.5. */
+function describeRig(root) {
+  const bones = new Map();
+  const morphs = new Map();
+  root.traverse((node) => {
+    if (node.isBone && node.name && !bones.has(node.name)) bones.set(node.name, node);
+    if (node.isSkinnedMesh && node.skeleton) {
+      for (const bone of node.skeleton.bones) if (bone.name && !bones.has(bone.name)) bones.set(bone.name, bone);
+    }
+    if (node.isMesh && node.morphTargetDictionary && node.morphTargetInfluences) {
+      for (const [name, index] of Object.entries(node.morphTargetDictionary)) {
+        if (!morphs.has(name)) morphs.set(name, []);
+        morphs.get(name).push({ mesh: node, index });
+      }
+    }
+  });
+  return { bones, morphs };
+}
+
+let _whiteTexture = null;
+function whiteTexture() {
+  if (_whiteTexture) return _whiteTexture;
+  _whiteTexture = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+  _whiteTexture.needsUpdate = true;
+  return _whiteTexture;
+}
 
 const MAX_ERRORS = 200;
+/** SPEC 3.5: the one shared asset root, served from the SpatialScript folder. */
+const DEFAULT_ASSET_ROOT = '/assets';
+/** SPEC 14.3: how far an orthographic width may differ before it is called out. */
+const ORTHOGRAPHIC_TOLERANCE = 0.02;
 /** Geometries kept after their last user, so a re-send with null buffers works. */
 const MAX_IDLE_GEOMETRIES = 128;
 const MAX_LOGS_PER_FRAME = 200;
@@ -2101,9 +2856,22 @@ const KNOWN_KEYS = {
     'speed', 'speedVariation', 'size', 'sizeVariation', 'color', 'colorEnd', 'opacity', 'opacityEnd',
     'spreadAngle', 'acceleration', 'isEmitting', 'burstCount', 'loops', 'texture']),
   anchor: new Set(['kind', 'plane', 'minimumBounds', 'hand', 'location', 'image', 'matrix']),
+  // ---- phase 2 (SPEC 14.13) ----------------------------------------------
+  audio: new Set(['url', 'spatial', 'ambient', 'loop', 'volume', 'rate', 'group', 'refDistance',
+    'rolloff', 'distanceModel', 'cone', 'reverbLevel']),
+  audioMixer: new Set(['masterVolume', 'groups', 'state']),
+  video: new Set(['url', 'width', 'height', 'loop', 'muted', 'autoplay', 'docking', 'volume', 'rate']),
+  camera: new Set(['kind', 'fov', 'near', 'far', 'left', 'right', 'top', 'bottom', 'transform']),
+  characterController: new Set(['radius', 'height', 'slopeLimit', 'stepLimit', 'gravity']),
+  forceField: new Set(['kind', 'enabled', 'radius', 'mask', 'force', 'strength', 'minimumDistance',
+    'falloff', 'axis', 'coefficient', 'noiseScale']),
+  skeleton: new Set(['joints', 'track']),
+  sceneUnderstanding: new Set(['collision', 'occlusion', 'physics', 'shadows']),
+  renderOptions: new Set(['adaptiveResolution', 'environmentIntensityExponent', 'debugModelView']),
+  accessibility: new Set(['label', 'value', 'hint', 'isButton']),
   portal: new Set(['worldId', 'width', 'height', 'crossing']),
   texture: new Set(['url', 'repeat', 'offset', 'wrapS', 'wrapT', 'flipY']),
-  geometry: new Set(['type', 'uuid', 'revision', 'parameters']),
+  geometry: new Set(['type', 'uuid', 'revision', 'parameters', 'groups']),
   asset: new Set(['usdz', 'reality', 'glb', 'gltf']),
   joint: new Set(['type', 'bodyA', 'bodyB', 'anchorA', 'anchorB', 'axis', 'limits']),
   environment: new Set(['url', 'intensity']),
@@ -2113,6 +2881,22 @@ const KNOWN_KEYS = {
 const LIGHT_TYPES = new Set(['ambient', 'directional', 'point', 'spot']);
 /** Anchor kinds SPEC 3.11 defines. */
 const ANCHOR_KINDS = new Set(['head', 'plane', 'hand', 'image', 'world']);
+
+/** Keys of the shader graph cache, one per mesh and material slot. */
+function shaderKey(id, slot) {
+  return `${id}:${slot || 0}`;
+}
+
+/** P2-B-51: a non-finite gain or rate would poison the Web Audio graph. */
+function sanitizeAudio(spec) {
+  if (!spec) return spec;
+  const clean = { ...spec };
+  for (const key of ['volume', 'rate', 'refDistance', 'rolloff', 'reverbLevel']) {
+    if (key in clean && !Number.isFinite(clean[key])) delete clean[key];
+  }
+  if (clean.cone && !clean.cone.every((n) => Number.isFinite(n))) clean.cone = null;
+  return clean;
+}
 
 /** Removes a `user:password@` authority so credentials never reach a log. */
 function lightKindOf(light) {
@@ -2144,7 +2928,13 @@ function fullyDecode(value) {
 const EMPTY_RECORDS = new Float32Array(0);
 const MAP_SLOTS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap'];
 /** Dispatch types that carry a load result rather than user input. */
-const LOAD_EVENTS = new Set(['textureLoaded', 'textureError', 'assetLoaded', 'assetError']);
+const LOAD_EVENTS = new Set([
+  'textureLoaded', 'textureError', 'assetLoaded', 'assetError',
+  // P2-B-35: media results are load results, not injected input.
+  'loaded', 'error', 'ended', 'audioState',
+]);
+/** The subset of those a host may also inject on the consumer's behalf. */
+const MEDIA_EVENTS = new Set(['loaded', 'error', 'ended', 'audioState']);
 
 /** Frees the geometries, materials and textures a loaded subtree owns. */
 function disposeSubtree(root) {

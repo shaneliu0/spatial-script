@@ -51,6 +51,18 @@ export function nativeDump(consumer, { platform = 'web' } = {}) {
     joints: describeJoints(consumer),
     gravity: [gravity.x, gravity.y, gravity.z],
     environment: consumer.scene.environment ? { active: true } : null,
+    // ---- phase 2 (SPEC 14.13) ---------------------------------------------
+    isActive: consumer.isActive !== false,
+    audioMixer: consumer.audio ? consumer.audio.mixerState() : null,
+    camera: cameraDump(consumer),
+    sceneUnderstanding: consumer.sceneUnderstanding
+      ? { ...consumer.sceneUnderstanding }
+      : { collision: false, occlusion: false, physics: false, shadows: false },
+    render: { adaptiveResolution: consumer.renderOptions.adaptiveResolution ?? null },
+    environmentLighting: { intensityExponent: consumer.renderOptions.environmentIntensityExponent ?? 1 },
+    debug: { modelView: consumer.renderOptions.debugModelView ?? null },
+    hostFunctions: consumer.host ? consumer.host.names() : [],
+    controllers: consumer.input ? consumer.input.readControllers() : [],
     warnings: consumer.warnings.slice(),
     errors: consumer.errors.slice(),
     logs: consumer.logs.map((line) => `${line.level}: ${line.message}`),
@@ -94,6 +106,14 @@ function describe(consumer, id, object) {
     material: materialDump(consumer, id, object),
     light: lightDump(consumer, id, object),
     rigidBody: bodyDump(consumer, id),
+    // ---- phase 2, in the same shape the core's dump uses ------------------
+    audio: consumer.audio ? consumer.audio.describe(id) : null,
+    video: consumer.video ? consumer.video.describe(id) : null,
+    characterController: consumer.characters ? consumer.characters.describe(id) : null,
+    forceField: consumer.forceFields ? consumer.forceFields.describe(id) : null,
+    accessibility: consumer.accessibility ? consumer.accessibility.describe(id) : null,
+    skeleton: skeletonDump(consumer, id),
+    blendShapes: consumer.blendShapes.has(id) ? { ...consumer.blendShapes.get(id) } : null,
   };
 
   if (object.userData.__spatialKind === 'anchor') {
@@ -109,6 +129,53 @@ function describe(consumer, id, object) {
     record.particles = consumer.emitters.has(id);
   }
   return record;
+}
+
+/** The active camera, or null while the consumer's own is in use (SPEC 14.3). */
+function cameraDump(consumer) {
+  const camera = consumer.scriptCamera;
+  if (!camera) return null;
+  camera.updateMatrixWorld(true);
+  const dump = {
+    kind: camera.isOrthographicCamera ? 'orthographic' : 'perspective',
+    near: camera.near,
+    far: camera.far,
+    transform: [
+      camera.position.x, camera.position.y, camera.position.z,
+      camera.quaternion.x, camera.quaternion.y, camera.quaternion.z, camera.quaternion.w,
+      camera.scale.x, camera.scale.y, camera.scale.z,
+    ],
+  };
+  if (camera.isOrthographicCamera) {
+    // SPEC 14.3: the dump keeps the script's left and right, even where the
+    // rendered width was derived from the viewport aspect instead.
+    const spec = consumer.cameraSpec;
+    Object.assign(dump, {
+      fov: null,
+      left: spec && spec.left !== undefined && spec.left !== null ? spec.left : camera.left,
+      right: spec && spec.right !== undefined && spec.right !== null ? spec.right : camera.right,
+      top: camera.top,
+      bottom: camera.bottom,
+    });
+  } else {
+    Object.assign(dump, { fov: camera.fov, left: null, right: null, top: null, bottom: null });
+  }
+  return dump;
+}
+
+/** The joints the consumer actually holds, read off the loaded rig. */
+function skeletonDump(consumer, id) {
+  const asset = consumer.assets.get(id);
+  if (!asset || !asset.bones || asset.bones.size === 0) return null;
+  const state = consumer.skeletons.get(id);
+  const joints = {};
+  for (const [name, bone] of asset.bones) {
+    joints[name] = [
+      bone.position.x, bone.position.y, bone.position.z,
+      bone.quaternion.x, bone.quaternion.y, bone.quaternion.z, bone.quaternion.w,
+    ];
+  }
+  return { joints, track: !!(state && state.track) };
 }
 
 function parentIdentifier(consumer, object) {
@@ -130,8 +197,41 @@ function geometryDump(object) {
 function materialDump(consumer, id, object) {
   const entry = consumer.materialOf.get(id);
   const spec = entry ? JSON.parse(entry.key) : null;
+  // SPEC 14.12: a multi-material mesh reports the array, with the same fields
+  // per element that a single material reports (P2-B-34).
+  if (Array.isArray(object.material)) {
+    return object.material.map((one, slot) => {
+      const graph = consumer.shaderGraphs.get(`${id}:${slot}`);
+      const record = {
+        type: graph ? 'ShaderGraphMaterial' : one.type,
+        nativeType: one.colorWrite === false ? 'OcclusionMaterial' : one.type,
+        color: colorTriple(one.color),
+        opacity: one.userData.__baseOpacity ?? one.opacity ?? null,
+        transparent: one.transparent === true,
+        side: one.side ?? null,
+        wireframe: one.wireframe === true,
+        metalness: one.isMeshStandardMaterial ? one.metalness : null,
+        roughness: one.isMeshStandardMaterial ? one.roughness : null,
+        emissive: one.isMeshStandardMaterial ? colorTriple(one.emissive) : null,
+        emissiveIntensity: one.isMeshStandardMaterial ? one.emissiveIntensity : null,
+        clearcoat: one.isMeshPhysicalMaterial ? one.clearcoat : null,
+        clearcoatRoughness: one.isMeshPhysicalMaterial ? one.clearcoatRoughness : null,
+        depthWrite: one.depthWrite === true,
+        depthTest: one.depthTest === true,
+        blending: one.blending ?? null,
+        maps: {},
+      };
+      if (graph) {
+        record.source = graph.source;
+        record.name = graph.name;
+        record.parameters = { ...graph.parameters };
+      }
+      return record;
+    });
+  }
   const material = object.isMesh && object.material && !Array.isArray(object.material) ? object.material : null;
   if (!spec && !material) return null;
+  const graph = consumer.shaderGraphs.get(`${id}:0`);
 
   // Every field is optional: a portal's render-target material and a particle
   // material have no colour, metalness or emissive at all, and report null.
@@ -155,9 +255,17 @@ function materialDump(consumer, id, object) {
     nativeType: null,
   };
 
+  if (graph) {
+    // SPEC 14.6: the dump names the graph, not the fallback three renders.
+    dump.type = 'ShaderGraphMaterial';
+    dump.source = graph.source;
+    dump.name = graph.name;
+    dump.parameters = { ...graph.parameters };
+  }
   if (!material) return dump;
   // Read the values back off the material three.js is actually rendering with.
   dump.nativeType = material.colorWrite === false ? 'OcclusionMaterial' : material.type;
+  if (graph) dump.type = 'ShaderGraphMaterial';
   dump.color = colorTriple(material.color);
   dump.side = material.side ?? null;
   dump.wireframe = material.wireframe === true;
@@ -291,6 +399,16 @@ function componentNames(consumer, id, object) {
   if (object.userData.__spatialKind === 'anchor') names.push('AnchoringComponent');
   if (isMesh && consumer.scene.environment) names.push('ImageBasedLightReceiverComponent');
   if (consumer.manipulable.has(id)) names.push('ManipulationComponent');
+  // ---- phase 2 components ------------------------------------------------
+  const audio = consumer.audio ? consumer.audio.sources.get(id) : null;
+  if (audio) names.push(audio.ambient ? 'AmbientAudioComponent' : (audio.spatial ? 'SpatialAudioComponent' : 'ChannelAudioComponent'));
+  if (consumer.video && consumer.video.screens.has(id)) names.push('VideoPlayerComponent');
+  if (consumer.characters && consumer.characters.controllers.has(id)) names.push('CharacterControllerComponent');
+  if (consumer.forceFields && consumer.forceFields.fields.has(id)) names.push('ForceEffectComponent');
+  if (consumer.accessibility && consumer.accessibility.entries.has(id)) names.push('AccessibilityComponent');
+  const asset = consumer.assets.get(id);
+  if (asset && asset.bones && asset.bones.size) names.push('SkeletalPosesComponent');
+  if (asset && asset.morphs && asset.morphs.size) names.push('BlendShapeWeightsComponent');
   if (object.isDirectionalLight) names.push('DirectionalLightComponent');
   if (object.isPointLight) names.push('PointLightComponent');
   if (object.isSpotLight) names.push('SpotLightComponent');

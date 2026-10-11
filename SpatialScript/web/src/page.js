@@ -4,6 +4,7 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import { SpatialConsumer, DEFAULT_CAMERA, CAMERA_PRESETS } from './consumer.js';
 
+// SPEC 14.14: true only where this consumer implements the feature with effect.
 const CAPABILITIES = {
   hands: false,
   anchors: false,
@@ -12,6 +13,19 @@ const CAPABILITIES = {
   manipulation: true,
   hoverEffect: false,
   shadows: true,
+  audio: true,
+  video: true,
+  camera: true,
+  characterController: true,
+  forceFields: true,
+  skeleton: true,
+  blendShapes: true,
+  // The graph itself is RealityKit only; the web renders the fallback.
+  shaderGraph: false,
+  sceneUnderstanding: false,
+  controllers: true,
+  hostFunctions: true,
+  accessibility: true,
 };
 
 // The core installs its own frame-driven requestAnimationFrame over the global
@@ -30,6 +44,7 @@ const state = {
   mode: params.get('mode') === 'manual' ? 'manual' : 'auto',
   loaded: false,
   scriptPath: params.get('script') || null,
+  hostFunctions: [],
   scriptRoot: '/',
   rafHandle: 0,
   lastTime: 0,
@@ -145,7 +160,9 @@ async function boot() {
     fov: preset.fov,
     background: preset.background,
     rapier: RAPIER,
-    assetRoot: '/web/assets',
+    // SPEC 3.5: one shared asset root for every backend.
+    assetRoot: '/assets',
+    coreAssetRoot: 'assets',
     scriptRoot: state.scriptRoot,
     console: nativeConsole,
   });
@@ -157,12 +174,51 @@ async function boot() {
   globalThis.__spatialNative = {
     raycast: (ox, oy, oz, dx, dy, dz, maxDistance, recursive) =>
       consumer.raycast(ox, oy, oz, dx, dy, dz, maxDistance, recursive),
+    // SPEC 14.3: a world ray for a view pixel.
+    rayFromPoint: (x, y) => consumer.rayFromPoint(x, y),
     log: (level, message) => consumer.handleLog(level, message),
     now: () => performance.now(),
   };
 
+  // SPEC 14.10: the bidirectional host channel the embedding page owns.
+  // The macOS host registers this demo function in DEBUG builds, so the page
+  // registers the same one and both backends report the same `hostFunctions`.
+  // An embedding page can replace or remove it with `window.spatialHost.register`
+  // or `unregister` before a script is loaded.
+  // `?demoHost=off` starts with an empty registry, which is what the conformance
+  // runner wants: a case declares the functions its app registered.
+  if (params.get('demoHost') !== 'off') {
+    consumer.host.register('Preferences', 'read', (args) => (
+      args && args.key === 'lampHue' ? { hue: 0.58 } : null
+    ));
+  }
+  consumer.host.onFunctionsChanged = (names) => {
+    if (state.core && typeof state.core.setHostFunctions === 'function') state.core.setHostFunctions(names);
+  };
+  window.spatialHost = {
+    send: (name, payload) => {
+      if (state.core && typeof state.core.hostEvent === 'function') state.core.hostEvent(name, payload);
+    },
+    on: (name, handler) => consumer.host.on(name, handler),
+    off: (name, handler) => consumer.host.off(name, handler),
+    register: (moduleName, name, fn) => consumer.host.register(moduleName, name, fn),
+    unregister: (moduleName, name) => consumer.host.unregister(moduleName, name),
+    functions: () => consumer.host.names(),
+    drain: () => consumer.host.drain(),
+  };
+
+  // SPEC 14.10: ticks pause while the page is hidden.
+  document.addEventListener('visibilitychange', () => {
+    consumer.setActive(document.visibilityState !== 'hidden');
+  });
+
   state.core = await loadCore();
   consumer.setCore(state.core);
+
+  // The embedding app declares what it registered before the script loads, so
+  // `Spatial.host.call` knows which names exist (SPEC 14.10).
+  const declared = params.get('hostFunctions');
+  if (declared) state.hostFunctions = declared.split(',').filter(Boolean);
 
   if (state.scriptPath) {
     const source = await fetchScript(state.scriptPath);
@@ -190,9 +246,65 @@ async function fetchScript(path) {
 }
 
 /** Loads (or replaces) the running script. Returns `{ ok, error }`. */
-function spatialLoad(source) {
+function loadOptions(consumer) {
+  return {
+    backend: 'three',
+    platform: 'web',
+    capabilities: CAPABILITIES,
+    // SPEC 3.5: the core joins relative urls onto this root and reports the
+    // result in the dump, so it is the contract's root, not the page's path.
+    // The consumer resolves the same url again for the network.
+    assetRoot: 'assets',
+    hostFunctions: [...new Set([...(state.hostFunctions || []), ...consumer.host.names()])],
+  };
+}
+
+/**
+ * SPEC 14.10: a hot reload on the same host. The outgoing script's `this.state`
+ * is captured and handed to the new script's `scriptChanged`; without
+ * `preserveState` the hook is not called at all.
+ */
+function spatialReload(source, preserveState = true) {
   const { core, consumer } = state;
   if (!core || !consumer) return { ok: false, error: { message: 'consumer is not booted yet' } };
+  // Called with no source, a reload means "this script again".
+  if (source === undefined || source === null) source = state.lastSource;
+  window.spatialLoadError = null;
+  let previousState;
+  if (preserveState && state.loaded && typeof core.captureState === 'function') {
+    try {
+      previousState = core.captureState();
+    } catch (err) {
+      console.warn(`captureState failed: ${err.message}`);
+    }
+  }
+  // The core's load resets its own scene; the consumer clears the one it drew.
+  consumer.reset();
+  const options = loadOptions(consumer);
+  if (preserveState) options.previousState = previousState;
+  try {
+    core.load(source, options);
+    state.loaded = true;
+    state.lastSource = source;
+    return { ok: true, error: null };
+  } catch (err) {
+    state.loaded = false;
+    const error = {
+      name: err.name || 'Error',
+      message: err.message,
+      line: err.line ?? null,
+      column: err.column ?? null,
+    };
+    window.spatialLoadError = error;
+    record('error', [`load error: ${error.message}`]);
+    return { ok: false, error };
+  }
+}
+
+function spatialLoad(source, options = {}) {
+  const { core, consumer } = state;
+  if (!core || !consumer) return { ok: false, error: { message: 'consumer is not booted yet' } };
+  if (state.loaded && options.preserveState) return spatialReload(source, true);
   window.spatialLoadError = null;
   if (state.loaded) {
     try {
@@ -203,13 +315,9 @@ function spatialLoad(source) {
     consumer.reset();
   }
   try {
-    core.load(source, {
-      backend: 'three',
-      platform: 'web',
-      capabilities: CAPABILITIES,
-      assetRoot: state.scriptRoot,
-    });
+    core.load(source, loadOptions(consumer));
     state.loaded = true;
+    state.lastSource = source;
     return { ok: true, error: null };
   } catch (err) {
     state.loaded = false;
@@ -272,6 +380,10 @@ function spatialInject(type, target, options = {}) {
   // The core's own Spatial.inject is always present, so the web runner
   // synthesises exactly the events the node and Swift runners do (SPEC 3.8).
   const inject = core && core.Spatial && core.Spatial.inject;
+  if (type === 'controller' && inject && typeof inject.controller === 'function') {
+    inject.controller(target);
+    return true;
+  }
   if (!inject || typeof inject[type] !== 'function') {
     if (type === 'key' && consumer) {
       consumer.input.injectKey(target, options.down !== false);
@@ -334,6 +446,8 @@ function spatialSyncBodies(records) {
 }
 
 function spatialDispatch(type, id, payload) {
+  // The host is answering for the consumer, so the consumer stays quiet about it.
+  if (state.consumer) state.consumer.noteHostDispatch(type, id);
   state.core.dispatch(type, id, payload || {});
 }
 
@@ -380,10 +494,26 @@ window.spatialTextureIdForUrl = spatialTextureIdForUrl;
 window.spatialAssetIdForUrl = spatialAssetIdForUrl;
 window.spatialPendingLoads = spatialPendingLoads;
 window.spatialStats = spatialStats;
+window.spatialSetActive = (active) => state.consumer.setActive(active);
+window.spatialHostEvent = (name, payload) => {
+  if (state.core && typeof state.core.hostEvent === 'function') state.core.hostEvent(name, payload);
+};
+window.spatialSetHostFunctions = (names) => {
+  if (state.core && typeof state.core.setHostFunctions === 'function') state.core.setHostFunctions(names);
+};
+window.spatialSyncAudio = (records) => state.core.syncAudio(Float32Array.from(records));
+window.spatialSyncVideo = (records) => state.core.syncVideo(Float32Array.from(records));
+window.spatialSyncCharacter = (records) => state.core.syncCharacter(Float32Array.from(records));
+window.spatialSyncSkeleton = (id, joints) => state.core.syncSkeleton(id, joints);
+window.spatialResumeAudio = () => state.consumer.audio.resume();
+/** Command ids the harness resolves for a `dispatch` step by call or fetch. */
+window.spatialPendingCallId = (name) => state.consumer.pendingCallId(name);
+window.spatialPendingFetchId = (url) => state.consumer.pendingFetchId(url);
 window.spatialRenderInfo = spatialRenderInfo;
 window.spatialTick = spatialTick;
 window.spatialInject = spatialInject;
 window.spatialLoad = spatialLoad;
+window.spatialReload = spatialReload;
 window.spatialStart = startLoop;
 window.spatialStop = stopLoop;
 

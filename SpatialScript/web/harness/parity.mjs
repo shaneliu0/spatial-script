@@ -121,32 +121,53 @@ async function main() {
     await fs.writeFile(path.join(outDir, 'native.json'), JSON.stringify(native, null, 2));
     await fs.writeFile(path.join(outDir, 'console.json'), JSON.stringify(console_, null, 2));
 
+    // The events the script sent to the host, in the order it sent them, so the
+    // gate can diff the channel as well as the scene (SPEC 14.10).
+    const hostEvents = await page.evaluate(() => (window.spatialHost ? window.spatialHost.drain() : []));
+    await fs.writeFile(path.join(outDir, 'hostEvents.json'), JSON.stringify(hostEvents, null, 2));
+
     const geometry = await page.evaluate(() => {
       const canvas = document.getElementById('view');
       const rect = canvas.getBoundingClientRect();
+      const camera = window.spatialConsumer.camera;
       return {
         backing: [canvas.width, canvas.height],
         css: [Math.round(rect.width), Math.round(rect.height)],
-        aspect: window.spatialConsumer.camera.aspect,
-        fov: window.spatialConsumer.camera.fov,
+        // A scripted camera may be orthographic, which has no fov or aspect
+        // (SPEC 14.3), so the shape of this record follows the camera kind.
+        kind: camera.isOrthographicCamera ? 'orthographic' : 'perspective',
+        scripted: window.spatialConsumer.scriptCamera !== null,
+        aspect: camera.isOrthographicCamera ? null : camera.aspect,
+        fov: camera.isOrthographicCamera ? null : camera.fov,
+        frustum: camera.isOrthographicCamera
+          ? [camera.left, camera.right, camera.top, camera.bottom]
+          : null,
       };
     });
-    if (geometry.backing[0] !== width || geometry.backing[1] !== height
-      || geometry.css[0] !== width || geometry.css[1] !== height
-      || Math.abs(geometry.aspect - width / height) > 1e-6) {
+    const sizeMismatch = geometry.backing[0] !== width || geometry.backing[1] !== height
+      || geometry.css[0] !== width || geometry.css[1] !== height;
+    // The consumer owns `aspect` on a perspective camera; an orthographic one
+    // takes its frustum from the script, so there is nothing to check.
+    const aspectMismatch = geometry.kind === 'perspective'
+      && Math.abs(geometry.aspect - width / height) > 1e-6;
+    if (sizeMismatch || aspectMismatch) {
       console.error(`viewport mismatch: backing ${geometry.backing}, css ${geometry.css}, `
         + `aspect ${geometry.aspect} for a ${width}x${height} capture`);
       exitCode = 1;
     }
 
+    const cameraNote = geometry.kind === 'orthographic'
+      ? `orthographic ${geometry.frustum.map((n) => n.toFixed(2)).join('/')}`
+      : `fov ${geometry.fov}, aspect ${geometry.aspect.toFixed(4)}`;
     console.log(`script:     ${relative}`);
-    console.log(`preset:     ${options.preset || 'default'} (${width}x${height}, fov ${geometry.fov}, `
-      + `aspect ${geometry.aspect.toFixed(4)}, dt ${options.dt})`);
+    console.log(`preset:     ${options.preset || 'default'} (${width}x${height}, `
+      + `${geometry.scripted ? 'scripted ' : ''}${cameraNote}, dt ${options.dt})`);
     console.log(`loaded:     ${loadError ? `no (${loadError.message})` : 'yes'}`);
     console.log(`screenshot: ${path.join(outDir, 'screenshot.png')}`);
     console.log(`dump:       ${path.join(outDir, 'dump.json')}`);
     console.log(`native:     ${path.join(outDir, 'native.json')}`);
     console.log(`console:    ${path.join(outDir, 'console.json')}`);
+    console.log(`hostEvents: ${path.join(outDir, 'hostEvents.json')} (${hostEvents.length})`);
   } catch (err) {
     // Only a crashed page is a failure of the run itself.
     console.error(`parity run failed: ${err.message}`);

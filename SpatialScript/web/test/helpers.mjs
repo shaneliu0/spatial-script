@@ -19,7 +19,22 @@ export class RecordingCore {
     this.syncs = [];
     this.bodySyncs = [];
     this.inputs = [];
+    this.audioSyncs = [];
+    this.videoSyncs = [];
+    this.characterSyncs = [];
+    this.skeletonSyncs = [];
+    this.activeStates = [];
   }
+
+  syncAudio(records) { this.audioSyncs.push(Array.from(records)); }
+
+  syncVideo(records) { this.videoSyncs.push(Array.from(records)); }
+
+  syncCharacter(records) { this.characterSyncs.push(Array.from(records)); }
+
+  syncSkeleton(id, joints) { this.skeletonSyncs.push({ id, joints }); }
+
+  setActive(active) { this.activeStates.push(active); }
 
   tick() {
     return this.commandBatches.shift() || [];
