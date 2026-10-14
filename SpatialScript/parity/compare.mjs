@@ -11,7 +11,10 @@ export function compareCoreDumps(mac, web, { tolerance = 1e-2 } = {}) {
   if (unnamedA !== unnamedB) issues.push(`unnamed object count differs: mac ${unnamedA} web ${unnamedB}`);
   for (const name of Object.keys(a)) {
     const x = a[name], y = b[name]; if (!y) continue;
-    const nativeDriven = (o) => o.rigidBody && o.rigidBody.type === "dynamic";
+    // Native-driven objects: dynamic bodies, character controllers, and anything beneath one.
+    const byId = Object.fromEntries(mac.objects.map((o) => [o.id, o]));
+    const underNative = (o) => { let cur = o; let guard = 0; while (cur && guard++ < 2048) { if ((cur.rigidBody && cur.rigidBody.type === "dynamic") || cur.characterController) return true; cur = cur.parent != null ? byId[cur.parent] : null; } return false; };
+    const nativeDriven = (o) => underNative(o);
     for (const key of ["type", "visible", "opacity", "billboard"]) if (JSON.stringify(x[key]) !== JSON.stringify(y[key])) issues.push(`${name}.${key}: mac ${JSON.stringify(x[key])} web ${JSON.stringify(y[key])}`);
     if ((x.parent == null) !== (y.parent == null)) issues.push(`${name}.parent attached differs`);
     else if (x.parent != null) { const pa = mac.objects.find((o) => o.id === x.parent), pb = web.objects.find((o) => o.id === y.parent); if ((pa && pa.name) !== (pb && pb.name)) issues.push(`${name}.parent: mac "${pa && pa.name}" web "${pb && pb.name}"`); }
@@ -37,7 +40,8 @@ export function compareNativeDumps(mac, web, { tolerance = 1e-2 } = {}) {
   for (const name of Object.keys(b)) if (!a[name]) issues.push(`RealityKit scene lacks "${name}"`);
   for (const name of Object.keys(a)) {
     const x = a[name], y = b[name]; if (!y) continue;
-    const dynamic = x.rigidBody && x.rigidBody.type === "dynamic";
+    const byIdN = Object.fromEntries((mac.objects || []).map((o) => [o.id, o]));
+    const dynamic = (() => { let cur = x; let guard = 0; while (cur && guard++ < 2048) { if ((cur.rigidBody && cur.rigidBody.type === "dynamic") || cur.characterController) return true; cur = cur.parent != null ? byIdN[cur.parent] : null; } return false; })();
     if (!dynamic) for (const key of ["position", "worldPosition", "scale"]) if (x[key] && y[key] && !close(x[key], y[key], tolerance)) issues.push(`native ${name}.${key}: rk ${fmt(x[key])} three ${fmt(y[key])}`);
     if (x.visible !== y.visible) issues.push(`native ${name}.visible: rk ${x.visible} three ${y.visible}`);
     if ((x.geometry && x.geometry.type) !== (y.geometry && y.geometry.type)) issues.push(`native ${name}.geometry: rk ${x.geometry && x.geometry.type} three ${y.geometry && y.geometry.type}`);
