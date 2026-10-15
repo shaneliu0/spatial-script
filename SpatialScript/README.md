@@ -9,15 +9,19 @@ renderer, no camera the script controls, no custom shaders and no
 post-processing — you build a scene and call `Spatial.mount(scene)`, and the
 host renders it. It adds what a spatial runtime needs and three.js lacks:
 physics bodies and joints, tap/hover/drag/manipulation events with bubbling,
-anchors, portals, particles, hand input, and whole-object opacity. Features
-RealityKit cannot express are either absent from the namespace or fail loudly,
-and no script input can crash the host or stop the frame loop.
+anchors, portals, particles, hand input, and whole-object opacity — and, in
+phase 2, audio, video, cameras, character controllers and force fields, rig and
+blend-shape control on loaded assets, shader graph materials, scene
+understanding, game controllers, and a two-way channel with the app the scene is
+embedded in. Features RealityKit cannot express are either absent from the
+namespace or fail loudly, and no script input can crash the host or stop the
+frame loop.
 
 ## Documentation
 
 | Document | Read it when |
 |---|---|
-| [docs/API.md](docs/API.md) | you need the complete reference: every class, property, default, method, and which backend supports it |
+| [docs/API.md](docs/API.md) | you need the complete reference: every class, property, default, method, and which backend supports it. Phase 1 is sections 1–17, [phase 2](docs/API.md#phase-2) is 18–28 |
 | [docs/DIFFERENCES.md](docs/DIFFERENCES.md) | before writing your first script, if you know three.js |
 | [docs/COOKBOOK.md](docs/COOKBOOK.md) | you have a task: tappable objects, physics, portals, assets, anchors, verification |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | something does not render, fire, move, or load |
@@ -125,9 +129,19 @@ curl -s -X POST http://127.0.0.1:8787/inject -d '{"type":"tap","target":"cube"}'
 curl -s -X POST http://127.0.0.1:8787/inject -d '{"type":"hover","target":"cube","entering":true}'
 curl -s -X POST http://127.0.0.1:8787/inject -d '{"type":"drag","target":"cube","translation":[0.1,0,0]}'
 curl -s -X POST http://127.0.0.1:8787/inject -d '{"type":"key","code":"KeyW","down":true}'
+
+# replace the script but carry this.state across (SPEC 14.10)
+jq -n --rawfile source scene.js '{ source: $source, preserveState: true }' \
+  | curl -s -X POST --data-binary @- http://127.0.0.1:8787/script
 ```
 
-`examples/push.sh <file.js> [host:port]` is the shorthand for the push.
+`examples/push.sh <file.js> [host:port]` is the shorthand for the plain push.
+
+`POST /script` takes either the raw script (as above) or
+`{ "source": "…", "preserveState": true }`. With `preserveState`, the outgoing
+script's `this.state` is read before it is disposed and handed to the new
+script's `this.scriptChanged(previousState)` after load and before its first
+frame. Without it, `scriptChanged` is not called at all.
 
 The verification loop is: push, inject, dump, assert. Publish whatever you want
 to assert on through `object.userData`, which the dump carries verbatim. See
@@ -176,6 +190,31 @@ Identical requests are answered from a **100 ms cache**, keyed by path and query
 string, so a tight polling loop costs one build per 100 ms rather than one per
 request. Two consequences: a poll can be up to 100 ms stale, and varying the
 query varies the cache key.
+
+### `POST /event` and `GET /events` for the host channel
+
+The two halves of [`Spatial.host`](docs/API.md#spatialhost), exposed so an agent
+can drive and observe the channel without an app of its own.
+
+```bash
+# app -> script: delivers to Spatial.host.on("setHue", handler)
+curl -s -X POST http://127.0.0.1:8787/event \
+  -d '{"name":"setHue","payload":{"hue":0.3}}'
+# {"ok":true,"error":null}   ok:false when no scene is running
+
+# script -> app: drains everything Spatial.host.send() has queued
+curl -s http://127.0.0.1:8787/events | jq
+# {"events":[{"name":"buttonPressed","payload":{"presses":1}}]}
+```
+
+`GET /events` **drains**: each event is returned once. A `/parity` run returns
+the same events in its own response under `hostEvents`, so a deterministic plan
+does not need a second request.
+
+Host *functions* are the other direction and belong to the app: Swift registers
+them with `ScriptingRuntime.register(module:function:)`, the web page with
+`window.spatialHost.register(...)`. A script sees the names in
+`Spatial.host.functions` and calls them with `Spatial.host.call("Module.fn", args)`.
 
 ### Interpreter mode
 
@@ -266,7 +305,11 @@ plan finishes it **stops ticking and holds the final frame** until the next
 `/script` or `/parity`. That is what makes a window capture match the returned
 state.
 
-Response: `{ ok, error, dump, nativeDump, console: [{ level, message }], frames }`.
+Response:
+`{ ok, error, dump, nativeDump, console: [{ level, message }], hostEvents, frames }`.
+
+`hostEvents` is everything the script sent with `Spatial.host.send` during the
+plan, drained into the same answer — the other half of a `hostEvent` step.
 
 Use it whenever a screenshot has to correspond to a dump. Everything else
 (`/script` + `/inject` + `/dump`) keeps running free, so the picture and the
@@ -376,6 +419,42 @@ ok   memory does not grow between large-scene cycles: cold 310 MB, after cycle 1
 rate, the `/stats` medians, the resource-cache build counts, and the process's
 RSS and CPU — the quickest way to compare two authoring choices.
 
+## The shared asset root
+
+`SpatialScript/assets` is the one asset root both backends resolve `asset://`
+against, and the only part of the repository a Release build bundles — examples,
+scenarios and conformance cases are DEBUG-only.
+
+| File | Used by |
+|---|---|
+| `checker.png` | texture tests and tiling examples |
+| `studio-env.hdr`, `studio-env.png` | `Spatial.environment`; `.hdr` works on both backends, `.exr` would not |
+| `panel.gltf` | a minimal `loadAsset` target for the web |
+| `rig.usdz`, `rig.glb` | the same two-joint rig for both backends — see below |
+| `spatial-materials.usda` | the `Glow` graph for [`ShaderGraphMaterial`](docs/API.md#23-shader-graph-materials) |
+| `spatial-tone.wav` | every audio example and case |
+| `spatial-bars.mp4`, `spatial-bars.webm` | [`VideoScreen`](docs/API.md#19-video); RealityKit plays the mp4, the browser the webm |
+| `layout.json` | `Spatial.fetchJSON` |
+
+**The rig pair.** RealityKit cannot read glTF and three.js cannot read USD, so
+`loadAsset({ usdz: "asset://rig.usdz", glb: "asset://rig.glb" })` needs two files
+describing the same thing: a 0.1 × 0.4 × 0.1 box in three bands, a two-joint
+skeleton (`root` at the origin, `head` 0.2 m above it, everything above the waist
+bound to `head`), and one blend shape, `widen`. Rotating `head` visibly bends the
+top half on both backends.
+
+```bash
+# rig.glb — three's GLTFExporter needs browser APIs, so it runs in the harness
+node web/harness/make-rig.mjs
+
+# rig.usdz — Pixar's USD Python package, written with UsdUtils.CreateNewUsdzPackage
+python3 -m pip install --user usd-core
+python3 tools/make-rig-usdz.py
+```
+
+Regenerate both together if you change either: the skeleton and blend-shape
+cases compare them against each other.
+
 ## Running the suites
 
 ```bash
@@ -437,7 +516,8 @@ and fails if it throws at load, throws out of a tick, or leaves anything in
       scripts/                    build, JavaScriptCore driver, sync-to-swift
     web/                          the three.js consumer
       src/                        renderer, Rapier physics, command applier
-      harness/                    dev server, Playwright runners, screenshot, parity, bench
+      harness/                    dev server, Playwright runners, screenshot, parity,
+                                  bench, make-rig.mjs (authors assets/rig.glb)
       assets/                     textures and models the harness serves
     conformance/
       cases/                      <name>.js + <name>.expected.json (+ .steps.json)
@@ -453,7 +533,12 @@ and fails if it throws at load, throws out of a tick, or leaves anything in
       check.mjs                   asserts load time, frame rate and memory
       measure.sh                  one ad-hoc measurement against the macOS host
       gen-stress.mjs              prints a stress scene
-    examples/                     basics, interaction, physics, animation, effects
+    assets/                       the one shared asset root (`asset://`), the only
+                                  part Release builds bundle
+    tools/make-rig-usdz.py        authors assets/rig.usdz
+    examples/                     phase 1: basics, interaction, physics, animation, effects
+                                  phase 2: audio-video, camera, character,
+                                  host-channel, asset-control
       push.sh                     posts a script to the macOS host's dev server
     scenarios/                    longer demo scripts and their runners
       robustness/                 deliberately hostile scripts

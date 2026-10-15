@@ -60,6 +60,22 @@ the shipped runtime and says so.
 - [16. Errors and warnings](#16-errors-and-warnings)
   - [Load errors](#load-errors) · [Runtime errors](#runtime-errors) · [Warning catalogue](#warning-catalogue) · [Per-object exception safety](#per-object-exception-safety) · [SpatialUnsupportedError](#spatialunsupportederror)
 - [17. Dump format](#17-dump-format)
+- **Phase 2** — [scope note](#phase-2)
+- [18. Audio](#18-audio)
+  - [Spatial.audio](#spatialaudio) · [AudioLoader and AudioBuffer](#audioloader-and-audiobuffer) · [Audio](#audio) · [PositionalAudio](#positionalaudio) · [AmbientAudio](#ambientaudio)
+- [19. Video](#19-video)
+- [20. Cameras](#20-cameras)
+  - [PerspectiveCamera](#perspectivecamera) · [OrthographicCamera](#orthographiccamera) · [Spatial.camera](#spatialcamera) · [Pointer queries](#pointer-queries)
+- [21. Character controller and force fields](#21-character-controller-and-force-fields)
+  - [CharacterController](#charactercontroller) · [Force fields](#force-fields)
+- [22. Skeletons and blend shapes](#22-skeletons-and-blend-shapes)
+- [23. Shader graph materials](#23-shader-graph-materials)
+- [24. Scene understanding](#24-scene-understanding)
+- [25. Game controllers](#25-game-controllers)
+- [26. Input completeness](#26-input-completeness)
+- [27. Lifecycle and the host channel](#27-lifecycle-and-the-host-channel)
+  - [Activation](#activation) · [Hot reload with state](#hot-reload-with-state) · [Spatial.host](#spatialhost) · [Fetch helpers](#fetch-helpers)
+- [28. Small components and multi-material meshes](#28-small-components-and-multi-material-meshes)
 - [Not in scope](#not-in-scope)
 - [Appendix A: architecture](#appendix-a-architecture)
 
@@ -744,7 +760,7 @@ scene.background = new Spatial.Color(0x101014);
 | Property | Type | Default | Notes |
 |---|---|---|---|
 | `geometry` | [`BufferGeometry`](#4-geometry) | an empty `BufferGeometry` | assigning a new geometry re-emits the geometry command |
-| `material` | [`Material`](#5-materials) `\| null` | a `MeshStandardMaterial` | exactly one; assigning an array throws `SpatialUnsupportedError` |
+| `material` | [`Material`](#5-materials) `\| Material[] \| null` | a `MeshStandardMaterial` | one material for the common case. **Phase 2 allows an array** with `geometry.groups` — see [multi-material meshes](#multiple-materials-per-mesh) |
 
 Omitting an argument is tolerated but warns:
 
@@ -2394,10 +2410,37 @@ nothing there, not that it is merely degraded.
 | `hoverEffect` | `false` | `true` | `false` | `hoverEffect` produces no visual. `hoverenter`/`hoverexit` events still fire on macOS and web |
 | `shadows` | `true` | `true` | `true` | — |
 
+Phase 2 adds twelve more (SPEC 14.14). Each is true only where the consumer
+implements the feature **with effect**.
+
+| Capability | RK macOS | RK visionOS | web | What `false` means for a script |
+|---|---|---|---|---|
+| [`audio`](#18-audio) | `true` | `true` | `true` | — |
+| [`video`](#19-video) | `true` | `true` | `true` | — |
+| [`camera`](#20-cameras) | `true` | **`false`** | `true` | `Spatial.camera` is kept and reported but moves nothing; `Spatial.rayFromPoint` is `null` |
+| [`characterController`](#charactercontroller) | `true` | `true` | `true` | — |
+| [`forceFields`](#force-fields) | `true` | `true` | `true` | — |
+| [`skeleton`](#22-skeletons-and-blend-shapes) | `true` | `true` | `true` | — |
+| [`blendShapes`](#22-skeletons-and-blend-shapes) | `true` | `true` | `true` | — |
+| [`shaderGraph`](#23-shader-graph-materials) | `true` | `true` | **`false`** | the `fallback` material is rendered, with a warning |
+| [`sceneUnderstanding`](#24-scene-understanding) | **`false`** | `true` | **`false`** | the flags are kept and reported; nothing occludes or collides |
+| [`controllers`](#25-game-controllers) | `true`¹ | `true`¹ | `true` | no controller ever appears in `Spatial.input.controllers` |
+| [`hostFunctions`](#spatialhost) | `true` | `true` | `true` | `Spatial.host.functions` is empty and every `call` rejects |
+| [`accessibility`](#28-small-components-and-multi-material-meshes) | `true` | `true` | `true` | — |
+
+¹ RealityKit honours `ScriptingRuntime.setup(inputOptions:)`: omitting
+`.gamepad` skips the provider and reports `controllers: false`.
+
+**Read the flag, not the platform.** Three of the phase 2 flags on the web are a
+static constant rather than a runtime probe, so `audio`, `characterController`
+and `forceFields` can read `true` on a page built without Web Audio or without
+Rapier. Guard with the flag *and* a null check on what you actually use.
+
 **The macOS picture in one line:** no hands, anchors never resolve, no system
-manipulation, no hover effect visual, and `renderOrder` is ignored — everything
-else works, including tap, hover and drag events, physics, portals, particles
-and shadows.
+manipulation, no hover effect visual, no scene understanding, and `renderOrder`
+is ignored — everything else works, including tap, hover and drag events,
+physics, portals, particles, shadows, audio, video, cameras, characters, force
+fields, rigs and shader graphs.
 
 A host may override any of these at load time, so branch on `capabilities`
 rather than on `platform` when you are guarding a feature.
@@ -3024,22 +3067,1149 @@ appear there even though the core dump lists it.
 
 ---
 
+## Phase 2
+
+Everything from here to [Not in scope](#not-in-scope) is phase 2 (SPEC section
+14): parity with what Apple's RealityKitScripting exposes. It is contract on
+both backends, and **nothing here is silent**. "RealityKit only" means the web
+consumer accepts the API, keeps the state in `dump()`, and warns once that it
+has no visual or audible effect; "visionOS only" means the same for RealityKit
+on macOS.
+
+Check [`Spatial.env.capabilities`](#spatialenv) before relying on any of it.
+
+---
+
+## 18. Audio
+
+**(ours, three.js-shaped.)** The script says what should sound, where it is and
+how loud. The consumer owns decoding and playback.
+
+**Playback state is native-driven.** `isPlaying`, `currentTime` and `duration`
+are whatever the consumer last reported through its `syncAudio` channel, so
+`isPlaying` is **still `false` on the frame you call `play()`**. Never branch on
+it immediately; read it next frame, or track your own intent.
+
+### Spatial.audio
+
+The listener and the mixer.
+
+| Member | Type / signature | Default | Notes |
+|---|---|---|---|
+| `masterVolume` | `number` 0..1 | `1` | every source passes through it |
+| `setGroupVolume(name, volume)` | `=> this` | | a flat name → volume map; a source joins a group by setting `sound.group` |
+| `groups` | `string[]` (read-only) | `[]` | the group names that have a volume set |
+| `state` | `"running" \| "suspended"` (read-only) | `"suspended"` | |
+| `resume()` | `=> this` | | records the intent and reports `"running"` |
+
+`state` starts `"suspended"` on **every** backend and becomes `"running"` when
+either `resume()` is called or the consumer dispatches `audioState`. On the web
+that matters: browsers refuse to start audio without a user gesture, so the
+page (or the harness) is what really opens the context. On RealityKit the
+engine starts on the first play.
+
+| Backend | Behaviour |
+|---|---|
+| RK macOS / visionOS | `ChannelAudioComponent` / `SpatialAudioComponent` / `AmbientAudioComponent`, with an `AudioPlaybackController` |
+| web | Web Audio, with the mixer as a gain graph |
+
+### AudioLoader and AudioBuffer
+
+`new AudioLoader()` — `setPath(path)`, `load(url, onLoad?, onProgress?, onError?): AudioBuffer`,
+`loadAsync(url): Promise<AudioBuffer>`.
+
+`load` returns the handle immediately and calls `onLoad` on the next microtask,
+so either style of script works. An `AudioBuffer` is **opaque**: only `url`
+crosses to the consumer.
+
+| `AudioBuffer` member | Type | Notes |
+|---|---|---|
+| `url` | `string \| null` | after [containment](#url-forms); `null` when the url was refused |
+| `error` | `string \| null` | the reason a refused url is unusable |
+| `duration` | `number` | filled in from the object that plays it, through `syncAudio` |
+
+### Audio
+
+`new Audio()` — non-spatial sound. An `Object3D`, so it can live anywhere in the
+graph; playing one that is not in the graph adopts it as an extra root so it
+still reaches the consumer.
+
+| Property | Type | Default | Notes |
+|---|---|---|---|
+| `buffer` | `AudioBuffer \| null` | `null` | read-only; set with `setBuffer` |
+| `isPlaying` | `boolean` | `false` | **read-only, native-driven** |
+| `currentTime` | `number` (seconds) | `0` | native-driven; **assigning seeks** |
+| `duration` | `number` (seconds) | `0` | read-only, native-driven |
+| `loop` | `boolean` | `false` | |
+| `volume` | `number` 0..1 | `1` | |
+| `playbackRate` | `number` | `1` | |
+| `group` | `string` | `"master"` | the mix group |
+| `onEnded` | `(() => void) \| null` | `null` | called with the `ended` event |
+
+| Method | Notes |
+|---|---|
+| `setBuffer(buffer \| null)`, `setLoop(bool)`, `setVolume(v)`, `getVolume()`, `setPlaybackRate(r)` | chainable |
+| `play()`, `pause()`, `stop()` | emit an `audioControl` command; the state comes back through sync |
+| `dispose()` | stops the sound, releases it on the consumer (`audio id null`) and frees the object — the same as `Spatial.destroy(sound)` |
+
+Event: `ended`, dispatched by the consumer when the sound finishes. It does not
+fire after an explicit `stop()` or `pause()`.
+
+After `dispose()` (or `Spatial.destroy`) the sound is gone: a later `play()` is
+dropped with `Audio.play on "snd" was dropped: the object was destroyed` and
+never resurrects it.
+
+```js runnable
+const Spatial = require("spatial");
+const { Scene, AmbientLight, Audio, AudioLoader } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+
+Spatial.audio.masterVolume = 0.85;
+Spatial.audio.setGroupVolume("effects", 0.9);
+Spatial.audio.resume();          // web needs a gesture; this records the intent
+
+const chime = new Audio();
+chime.name = "chime";
+chime.group = "effects";
+chime.setVolume(0.8);
+scene.add(chime);
+
+new AudioLoader().load(
+  "asset://spatial-tone.wav",
+  (buffer) => {
+    chime.setBuffer(buffer);
+    chime.play();
+    scene.userData.bufferUrl = buffer.url;
+  },
+  undefined,
+  (error) => console.warn("tone failed:", error.message),
+);
+
+chime.addEventListener("ended", () => { scene.userData.finished = true; });
+
+Spatial.mount(scene);
+```
+
+### PositionalAudio
+
+`new PositionalAudio()` extends [`Audio`](#audio). Parent it to the object that
+should be heard: it is an `Object3D`, so it rides its parent's transform and its
+cone turns with it.
+
+| Method | Default | Notes |
+|---|---|---|
+| `setRefDistance(m)` / `getRefDistance()` | `1` | full volume out to this distance |
+| `setRolloffFactor(f)` / `getRolloffFactor()` | `1` | how fast it falls away beyond it |
+| `setDistanceModel("inverse" \| "linear" \| "exponential")` / `getDistanceModel()` | `"inverse"` | |
+| `setDirectionalCone(innerAngle, outerAngle, outerGain)` | none | **degrees**, gain 0..1, aimed down the object's `-Z` |
+| `reverbLevel` | `0` | **decibels** of send into the room reverb, not a 0..1 mix |
+
+The defaults are tuned for metre-scale scenes. A scene that fits in 0.4 m never
+attenuates unless you shrink `refDistance` — `setRefDistance(0.3)` with
+`setRolloffFactor(1.4)` is a reasonable starting point.
+
+| Backend | Known limits |
+|---|---|
+| RK macOS / visionOS | `SpatialAudioComponent`. **Directivity is a single beam**: RealityKit takes one directivity setting, so the three-part cone collapses to it and `outerGain` is approximated. **`refDistance` folds into the rolloff**: the engine has one distance control, so the two values are combined rather than applied separately — and where it cannot be expressed at all the value is dump-only, with a one-time warning |
+| web | Web Audio `PannerNode`: cone, distance model, ref distance and rolloff map directly; `reverbLevel` becomes a convolver send |
+
+### AmbientAudio
+
+`new AmbientAudio()` extends [`Audio`](#audio). Sound arriving from every
+direction at the object's position — a room tone. RealityKit
+`AmbientAudioComponent`; on the web a non-spatial `Audio` scaled by distance.
+
+```js runnable
+const Spatial = require("spatial");
+const S = require("spatial");
+
+const scene = new S.Scene();
+scene.add(new S.AmbientLight(0xffffff, 1));
+
+const drone = new S.Mesh(new S.SphereGeometry(0.055, 24, 16), new S.MeshStandardMaterial());
+drone.name = "drone";
+scene.add(drone);
+
+// A source parented to the object it belongs to: it rides the transform.
+const hum = new S.PositionalAudio();
+hum.name = "hum";
+hum.group = "effects";
+hum.setLoop(true);
+hum.setVolume(0.8);
+hum.setRefDistance(0.3);        // the scene is small; the 1 m default never attenuates
+hum.setRolloffFactor(1.4);
+hum.setDistanceModel("inverse");
+hum.setDirectionalCone(60, 140, 0.25);   // degrees, aimed down -Z
+hum.reverbLevel = -8;                    // decibels
+drone.add(hum);
+
+const bed = new S.AmbientAudio();
+bed.name = "bed";
+bed.group = "ambience";
+bed.setLoop(true);
+bed.setVolume(0.5);
+scene.add(bed);
+
+new S.AudioLoader().loadAsync("asset://spatial-tone.wav")
+  .then((buffer) => { hum.setBuffer(buffer); hum.play(); bed.setBuffer(buffer); bed.play(); })
+  .catch((error) => console.warn("tone failed:", error.message));
+
+Spatial.onFrame((deltaTime, elapsed) => {
+  drone.position.set(Math.cos(elapsed * 0.7) * 0.22, 0, Math.sin(elapsed * 0.7) * 0.22);
+  drone.lookAt(0, 0, 0);
+});
+
+Spatial.mount(scene);
+```
+
+**Dump.** Every audio object reports
+`audio: { url, spatial, ambient, loop, volume, rate, group, refDistance, rolloff,
+distanceModel, cone, reverbLevel, playing, currentTime, duration }`, and the
+mixer is top-level `audioMixer: { masterVolume, groups, state }`.
+
+---
+
+## 19. Video
+
+**(ours)** `new VideoScreen(options)` — the video on a plane, in metres. It is a
+`Mesh`, so raycast, hit testing and input treat it like any other mesh.
+
+| Option / property | Type | Default | Notes |
+|---|---|---|---|
+| `url` | `string \| { mp4?, hls?, webm? }` | `undefined` | see below |
+| `width` | `number` (metres) | | with only one of width/height given, the other follows the video's aspect once the consumer reports it (16:9 until then) |
+| `height` | `number` (metres) | | |
+| `loop` | `boolean` | `false` | |
+| `muted` | `boolean` | `false` | |
+| `autoplay` | `boolean` | `false` | |
+| `docking` | `boolean` | `false` | **visionOS only** — adds `DockingRegionComponent`; elsewhere kept and warned |
+| `volume` | `number` 0..1 | `1` | |
+| `playbackRate` | `number` | `1` | |
+| `isPlaying`, `currentTime`, `duration` | | | native-driven, like [audio](#18-audio); `currentTime` seeks on assignment |
+| `error` | `string \| null` | `null` | the message from the last `error` event |
+
+Methods: `play()`, `pause()`.
+
+**Sources.** Give one url, or one per encoding. Each key goes through
+[containment](#url-forms) and a refused key is dropped with a warning. The core
+forwards **every surviving key** and the consumer picks what it can play:
+RealityKit takes `mp4` or `hls`, the web takes `webm` or `mp4` where the browser
+has the codec. Supply `mp4` **and** `webm` for a screen that works on both.
+
+A screen left with no source at all reports `url: null` and dispatches `error`
+immediately, with the reason: `VideoScreen has no playable source: no url was
+given`, or `… no url survived containment`. A screen whose surviving keys the
+backend cannot decode gets its `error` from the consumer instead.
+
+| Event | Payload |
+|---|---|
+| `loaded` | `{ width, height, duration }` in pixels and seconds; the screen's metre height is recomputed from it |
+| `ended` | — |
+| `error` | `{ message }` |
+
+| Backend | Behaviour |
+|---|---|
+| RK macOS / visionOS | `VideoPlayerComponent` with an `AVPlayer`; `mp4`/`hls`; `docking` on visionOS |
+| web | a `VideoTexture` on a plane; `webm`/`mp4`; `docking` warns once |
+
+```js runnable
+const Spatial = require("spatial");
+const { Scene, AmbientLight, DirectionalLight, VideoScreen } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 0.5));
+const sun = new DirectionalLight(0xffffff, 2.2);
+sun.position.set(0.4, 1, 0.7);
+scene.add(sun);
+
+const screen = new VideoScreen({
+  // Both encodings, so one script plays on both backends.
+  url: { mp4: "asset://spatial-bars.mp4", webm: "asset://spatial-bars.webm" },
+  width: 0.34,          // the height follows the video's aspect once known
+  loop: true,
+  muted: false,
+});
+screen.name = "screen";
+screen.position.set(0, 0.05, -0.05);
+screen.volume = 0.7;
+scene.add(screen);
+
+screen.addEventListener("loaded", (event) => {
+  scene.userData.pixels = [event.width, event.height];
+  scene.userData.metres = [screen.width, screen.height];
+});
+screen.addEventListener("error", (event) => { scene.userData.videoError = event.message; });
+
+// isPlaying is what the consumer last reported, so this toggles the real transport.
+screen.addEventListener("tap", () => {
+  if (screen.isPlaying) screen.pause();
+  else screen.play();
+});
+
+Spatial.mount(scene);
+```
+
+**Dump.** `video: { url, width, height, loop, muted, autoplay, docking, volume,
+rate, playing, currentTime, duration, error }`.
+
+---
+
+## 20. Cameras
+
+**(three, non-visionOS.)** Phase 1 had no camera; phase 2 ships both three.js
+classes and a way to make one active.
+
+### PerspectiveCamera
+
+`new PerspectiveCamera(fov = 50, aspect = 1, near = 0.1, far = 2000)` —
+<https://threejs.org/docs/#api/en/cameras/PerspectiveCamera>
+
+| Property | Type | Notes |
+|---|---|---|
+| `fov` | `number` (degrees, vertical) | |
+| `aspect` | `number` | **the consumer owns it**, from the viewport. A script value is kept for three's own projection matrix and reported as ignored: `PerspectiveCamera.aspect is managed by the consumer from the viewport; the script value is ignored` |
+| `near`, `far` | `number` (metres) | |
+| `updateProjectionMatrix()` | | |
+
+### OrthographicCamera
+
+`new OrthographicCamera(left, right, top, bottom, near, far)` —
+<https://threejs.org/docs/#api/en/cameras/OrthographicCamera>
+
+The visible **height** is `top - bottom`. The visible **width follows the
+viewport aspect** on both backends, because RealityKit's orthographic camera
+takes only a height — so images never stretch anisotropically. `left` and
+`right` are honoured when they match that width and warn once otherwise.
+
+### Spatial.camera
+
+`Spatial.camera: Camera | null`, default `null` — the consumer's built-in
+camera. On macOS that is the Mac `RealityView` virtual camera at
+`(0, 0.25, 1.4)` looking at the origin with a 60° vertical field of view; the
+web preset mirrors it.
+
+Assigning a camera takes the view over. The camera is an ordinary `Object3D`:
+move it, parent it, `lookAt` with it. It does not have to be in the scene — a
+camera that was never added becomes an extra root, so it is created and its
+transform flushes like any other object's. Assigning `null` hands the view back.
+
+No `camera` command is emitted until a script assigns one.
+
+| Backend | Behaviour |
+|---|---|
+| RK macOS | yes |
+| RK visionOS | **the user is the camera.** The assignment is kept and reported, and warns once: `On visionOS the user is the camera; Spatial.camera is kept and reported but has no effect`. `capabilities.camera` is `false` |
+| web | yes |
+
+### Pointer queries
+
+| Member | Returns | Notes |
+|---|---|---|
+| `Spatial.input.mouse.scenePosition` | `Vector3 \| null` | the world point under the pointer on the first hit mesh, or on the plane through the origin facing the camera when nothing is hit. `null` when the consumer reports no pointer |
+| `Spatial.rayFromPoint(x, y)` | `{ origin, direction } \| null` | a world-space ray for a view pixel. `null` on visionOS, and `null` without the consumer's hook — warning once: `Spatial.rayFromPoint needs the consumer's rayFromPoint hook; it returned null` |
+
+Both are `null` on a headset and when the pointer has left the window. Read them
+defensively.
+
+```js runnable
+const Spatial = require("spatial");
+const S = require("spatial");
+
+const scene = new S.Scene();
+scene.add(new S.AmbientLight(0xffffff, 0.5));
+const sun = new S.DirectionalLight(0xffffff, 2.4);
+sun.position.set(0.5, 1.2, 0.7);
+scene.add(sun);
+
+const ball = new S.Mesh(new S.SphereGeometry(0.07, 24, 16), new S.MeshStandardMaterial({ color: 0xffaa33 }));
+ball.name = "ball";
+scene.add(ball);
+
+const eye = new S.PerspectiveCamera(55, 1, 0.01, 20);
+eye.name = "eye";
+eye.position.set(0, 0.25, 1);
+eye.lookAt(0, 0, 0);
+Spatial.camera = eye;             // null would hand the view back to the consumer
+
+const flat = new S.OrthographicCamera(-0.3, 0.3, 0.3, -0.3, 0.01, 20);
+flat.name = "flat";
+flat.position.set(0, 0.6, 0.001);
+flat.lookAt(0, 0, 0);
+
+let orthographic = false;
+ball.addEventListener("tap", () => {
+  orthographic = !orthographic;
+  Spatial.camera = orthographic ? flat : eye;
+});
+
+const target = new S.Vector3();
+
+Spatial.onFrame((deltaTime, elapsed) => {
+  const angle = elapsed * 0.25;
+  eye.position.set(Math.sin(angle), 0.25, Math.cos(angle));
+  ball.getWorldPosition(target);
+  eye.lookAt(target);
+
+  // Both pointer queries are null on a headset and off-window: never assume.
+  const under = Spatial.input.mouse.scenePosition;
+  scene.userData.underPointer = under === null ? null : under.toArray();
+});
+
+Spatial.mount(scene);
+```
+
+**Dump.** Top-level `camera` is the active camera's parameters
+(`{ kind, fov, near, far, left, right, top, bottom }`) or `null` for the
+built-in one. The **pose is not in it**: the camera is an `Object3D`, so it
+appears in `objects` and its transform travels with everything else's.
+
+---
+
+## 21. Character controller and force fields
+
+**(ours)**
+
+### CharacterController
+
+`object.characterController = new CharacterController(options)`
+
+| Option / property | Type | Default | Notes |
+|---|---|---|---|
+| `radius` | `number` (metres) | `0.2` | the collision capsule, not the mesh |
+| `height` | `number` (metres) | `1` | |
+| `slopeLimit` | `number` (**radians**) | `0.785` (45°) | the steepest slope it climbs |
+| `stepLimit` | `number` (metres) | `0.3` | the tallest step it walks up |
+| `gravity` | `boolean` | `true` | |
+| `object` | `Object3D \| null` | | read-only, assigned by the runtime |
+| `isOnGround` | `boolean` | `false` | **read-only, native-driven** — the ground truth for whether a jump is allowed |
+| `velocity` | `Vector3` | `(0,0,0)` | read-only, native-driven |
+
+| Method | Notes |
+|---|---|
+| `move(displacement: Vector3)` | applied **next frame**, sliding along obstacles. One move per frame; a move issued before the consumer has seen the object waits for the frame after its `create` rather than being dropped |
+| `teleport(position: Vector3)` | unconditional placement, ignoring collision — a respawn, not a walk |
+
+The object becomes **native-driven like a dynamic body**: the consumer resolves
+each move against the world and syncs the result back. Do not write `position`
+on it; use `move` and `teleport`. The controller never rotates anything — set
+`object.rotation.y` yourself to face the direction of travel.
+
+| Backend | Engine |
+|---|---|
+| RK macOS / visionOS | `CharacterControllerComponent` + `moveCharacter` |
+| web | Rapier's kinematic character controller |
+
+### Force fields
+
+Five `Object3D` subclasses. Each acts on dynamic bodies within `radius` of its
+own **world** position, so parenting one to a moving object carries the effect
+along.
+
+| Class | Constructor options | Meaning |
+|---|---|---|
+| `ConstantForceField` | `{ force: Vector3, radius, mask, enabled }` | a steady push, like wind |
+| `RadialForceField` | `{ strength, minimumDistance, falloff: "none" \| "linear" \| "inverseSquare", radius, mask, enabled }` | out from the centre; `minimumDistance` is what stops the force going to infinity at the centre |
+| `VortexForceField` | `{ strength, axis: Vector3, radius, mask, enabled }` | a swirl about `axis` |
+| `DragForceField` | `{ coefficient, radius, mask, enabled }` | slows bodies down |
+| `TurbulenceForceField` | `{ strength, noiseScale, radius, mask, enabled }` | noise-driven jitter |
+
+Shared members: `enabled` (default `true`), `radius`, `mask` (a collision mask,
+forwarded to the consumer unchanged; the default is every group), `kind`
+(read-only class name), plus everything on `Object3D`. Every per-kind field
+(`strength`, `force`, `coefficient`, …) is writable and re-emitted by the diff,
+so a field can pulse.
+
+| Backend | Engine |
+|---|---|
+| RK macOS / visionOS | `ForceEffectComponent` with the matching effect |
+| web | a per-frame force loop inside the physics step |
+
+```js runnable
+const Spatial = require("spatial");
+const S = require("spatial");
+
+const scene = new S.Scene();
+scene.add(new S.AmbientLight(0xffffff, 0.5));
+const sun = new S.DirectionalLight(0xffffff, 2.5);
+sun.position.set(0.5, 1.2, 0.6);
+sun.castShadow = true;
+scene.add(sun);
+
+const ground = new S.Mesh(new S.BoxGeometry(0.8, 0.02, 0.8), new S.MeshStandardMaterial({ color: 0x2c3138 }));
+ground.name = "ground";
+ground.position.y = -0.26;
+ground.receiveShadow = true;
+ground.rigidBody = new S.RigidBody({ type: "static", shape: "box", friction: 0.9 });
+scene.add(ground);
+
+const walker = new S.Mesh(new S.CapsuleGeometry(0.035, 0.09, 6, 14), new S.MeshStandardMaterial({ color: 0x5aa9ff }));
+walker.name = "walker";
+walker.position.set(-0.2, -0.16, 0.18);
+walker.castShadow = true;
+walker.characterController = new S.CharacterController({
+  radius: 0.035, height: 0.16, slopeLimit: 0.7, stepLimit: 0.06, gravity: true,
+});
+scene.add(walker);
+
+const repeller = new S.RadialForceField({
+  strength: 0.6, minimumDistance: 0.04, falloff: "inverseSquare", radius: 0.3,
+});
+repeller.name = "repeller";
+repeller.position.y = -0.1;
+scene.add(repeller);
+
+const step = new S.Vector3();
+let verticalSpeed = 0;
+
+Spatial.onFrame((deltaTime, elapsed) => {
+  const keyboard = Spatial.input.keyboard;
+  const controller = walker.characterController;
+
+  step.set(0, 0, 0);
+  if (keyboard.isDown("KeyW")) step.z -= 1;
+  if (keyboard.isDown("KeyS")) step.z += 1;
+  if (keyboard.isDown("KeyA")) step.x -= 1;
+  if (keyboard.isDown("KeyD")) step.x += 1;
+  if (step.lengthSq() > 0) {
+    step.normalize().multiplyScalar(0.5 * deltaTime);
+    walker.rotation.y = Math.atan2(step.x, step.z);   // the controller never rotates
+  }
+
+  // isOnGround is reported after the consumer resolves the move.
+  if (controller.isOnGround) verticalSpeed = keyboard.wasPressed("Space") ? 1.4 : 0;
+  else verticalSpeed -= 9.81 * deltaTime;
+  step.y = verticalSpeed * deltaTime;
+
+  controller.move(step);                    // one move per frame
+  repeller.strength = 0.6 + Math.sin(elapsed * 1.2) * 0.35;
+});
+
+Spatial.mount(scene);
+```
+
+**Dump.** `characterController: { radius, height, slopeLimit, stepLimit, gravity }`
+plus a sibling `isOnGround`, and `forceField: { kind, enabled, radius, mask, … }`.
+
+---
+
+## 22. Skeletons and blend shapes
+
+**(ours)** After `Spatial.loadAsset` resolves, an `AssetGroup` may carry a rig.
+
+| Member | Type | Notes |
+|---|---|---|
+| `asset.skeleton` | `Skeleton \| null` | `null` until the consumer reports a rig, and for an asset that has none |
+| `asset.blendShapes` | `BlendShapes \| null` | same |
+
+`Skeleton`:
+
+| Member | Signature | Notes |
+|---|---|---|
+| `joints` | `string[]` | what the file actually names |
+| `tracking` | `boolean` | |
+| `setJointRotation(name, quaternion)` | `=> this` | an unknown name warns and is ignored |
+| `setJointPosition(name, position)` | `=> this` | same |
+| `getJointTransform(name)` | `{ position, quaternion } \| null` | what the consumer last reported while tracking, else the script's own pose |
+| `reset()` | `=> this` | drops every script pose |
+| `track(enabled)` | `=> this` | asks the consumer to report the real joint transforms back |
+
+`BlendShapes`: `names: string[]`, `get(name): number`,
+`set(name, weight): this` — the weight is clamped to 0..1 and an unknown name
+warns and is ignored.
+
+**Native animation wins.** Joint edits are script-driven, and a native animation
+playing on the asset overrides them while it runs; stopping the animation hands
+the pose back. `track(true)` is the only way to read where a joint actually is
+during an animation.
+
+| Backend | Mapping |
+|---|---|
+| RK macOS / visionOS | `SkeletalPosesComponent`, `BlendShapeWeightsComponent` |
+| web | the `SkinnedMesh` bones and `morphTargetInfluences` |
+
+The `assetLoaded` event payload gains `joints: string[]` and
+`blendShapes: string[]`.
+
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Group, AmbientLight, DirectionalLight, Quaternion, Euler } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 0.5));
+const sun = new DirectionalLight(0xffffff, 2.4);
+sun.position.set(0.5, 1.2, 0.7);
+scene.add(sun);
+
+const holder = new Group();
+holder.name = "holder";
+holder.position.y = -0.2;
+scene.add(holder);
+
+Spatial.mount(scene);
+
+let rig = null;
+let shapes = null;
+
+// rig.usdz and rig.glb are the same two-joint rig in the shared asset root.
+// A missing file is a normal outcome, so the await is guarded.
+try {
+  const asset = await Spatial.loadAsset({ usdz: "asset://rig.usdz", glb: "asset://rig.glb" });
+  asset.name = "figure";
+  holder.add(asset);
+
+  // Both are null until the consumer reports what the file contains, and stay
+  // null for an asset with no rig and no shapes.
+  if (asset.skeleton !== null) {
+    rig = asset.skeleton;
+    rig.track(true);                     // report the real transforms back
+    holder.userData.joints = rig.joints.slice();
+  }
+  if (asset.blendShapes !== null) {
+    shapes = asset.blendShapes;
+    holder.userData.shapes = shapes.names.slice();
+  }
+  if (asset.animations.length > 0) asset.playAnimation(asset.animations[0], { loop: true });
+} catch (error) {
+  console.warn("figure could not be loaded:", error.message);
+  holder.userData.assetError = error.message;
+}
+
+const rotation = new Quaternion();
+const euler = new Euler();
+
+Spatial.onFrame((deltaTime, elapsed) => {
+  holder.rotation.y += deltaTime * 0.25;
+  if (rig !== null && rig.joints.indexOf("head") !== -1) {
+    euler.set(0, Math.sin(elapsed) * 0.35, 0);
+    rig.setJointRotation("head", rotation.setFromEuler(euler));
+    const actual = rig.getJointTransform("head");
+    if (actual !== null) holder.userData.headY = actual.position.y;
+  }
+  if (shapes !== null && shapes.names.indexOf("widen") !== -1) {
+    shapes.set("widen", (Math.sin(elapsed * 1.3) + 1) / 2);
+  }
+});
+```
+
+**Dump.** `skeleton: { joints: { name: [px,py,pz,qx,qy,qz,qw] }, track }` and
+`blendShapes: { name: weight }`, both only where the object carries them.
+
+---
+
+## 23. Shader graph materials
+
+**(RealityKit, with a required web fallback.)** RealityKit only accepts
+pre-authored shader graphs, so this is a named lookup into a bundled USD file,
+never GLSL or Metal.
+
+```
+new ShaderGraphMaterial({ source, name, parameters, fallback })
+```
+
+| Option | Type | Notes |
+|---|---|---|
+| `source` | `string` | the USD file, after [containment](#url-forms) |
+| `name` | `string` | the graph's name inside that file. Read back as `graphName` — `name` is three's `Material.name` |
+| `parameters` | `Record<string, value>` | initial values |
+| `fallback` | `Material` | **required**; omitting it throws `TypeError` |
+
+| Member | Notes |
+|---|---|
+| `setParameter(name, value): this` | also updates a same-named property of the fallback where it owns one |
+| `getParameter(name)` | |
+| `generation` | bumps on every `setParameter`, so consumers can order edits |
+| `source`, `graphName`, `fallback`, `parameters` | read-only |
+
+Accepted parameter values: a finite number, a boolean, a string, a `Color`, a
+`Vector2`/`3`/`4`, an array of two to four finite numbers, or a `Texture`.
+Anything else is refused with a warning naming the parameter rather than sent as
+null.
+
+| Backend | Behaviour |
+|---|---|
+| RK macOS / visionOS | loads the named graph from the USD file. `capabilities.shaderGraph` is `true` |
+| web | renders `fallback` and warns once: `ShaderGraphMaterial has no shader graph on this consumer; the fallback material is rendered`. `capabilities.shaderGraph` is `false` |
+
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, BoxGeometry, MeshStandardMaterial, ShaderGraphMaterial, AmbientLight, DirectionalLight, Color } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 0.5));
+const sun = new DirectionalLight(0xffffff, 2.2);
+sun.position.set(0.5, 1, 0.7);
+scene.add(sun);
+
+// The fallback is what every consumer without a shader graph renders, so make
+// it a reasonable approximation rather than a placeholder.
+const fallback = new MeshStandardMaterial({ color: 0xff5522, emissive: 0x331100, roughness: 0.4 });
+
+const glow = new ShaderGraphMaterial({
+  source: "asset://spatial-materials.usda",
+  name: "Glow",
+  parameters: { glowAmount: 1 },
+  fallback,
+});
+
+const cube = new Mesh(new BoxGeometry(0.14, 0.14, 0.14), glow);
+cube.name = "cube";
+scene.add(cube);
+
+Spatial.onFrame((deltaTime, elapsed) => {
+  cube.rotation.y += deltaTime * 0.6;
+  // Numbers, booleans, strings, Colors, Vector2/3/4, small float arrays, Textures.
+  glow.setParameter("glowAmount", 1 + Math.sin(elapsed * 2) * 0.5);
+  glow.setParameter("glowColor", new Color().setHSL((elapsed * 0.1) % 1, 0.8, 0.5));
+});
+
+Spatial.mount(scene);
+```
+
+**Dump.** `material.type` is `"ShaderGraphMaterial"` with `source`, `name`,
+`parameters`, `generation` and the full `fallback` snapshot.
+
+---
+
+## 24. Scene understanding
+
+**(visionOS only)** `Spatial.sceneUnderstanding` is four flags over the
+real-world mesh:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `collision` | `false` | physics bodies collide with the room |
+| `occlusion` | `false` | the room hides virtual content behind it |
+| `physics` | `false` | the room participates in the simulation |
+| `shadows` | `false` | virtual objects cast shadows on the room |
+
+Setting any of them adds a `SceneUnderstandingComponent` with those options to
+the root on visionOS. macOS and web keep the state, report it in `dump()`, and
+warn once: `Spatial.sceneUnderstanding has no effect outside visionOS; the state
+is kept and reported`. `capabilities.sceneUnderstanding` is `true` only on
+visionOS.
+
+Every [`Spatial.raycast`](#spatialraycast) hit carries a `sceneUnderstanding`
+boolean, and a hit against the real-world mesh has `object === null` with
+`sceneUnderstanding: true`.
+
+**Known limit:** the RealityKit consumer does not currently report real-world
+raycast hits, so `sceneUnderstanding` is `false` on every hit you will see today
+and `object` is never `null`. Write the check anyway — it is the contract — but
+do not build a scene that depends on it.
+
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, BoxGeometry, MeshStandardMaterial, AmbientLight, Vector3 } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+
+const wall = new Mesh(new BoxGeometry(0.4, 0.4, 0.02), new MeshStandardMaterial());
+wall.name = "wall";
+wall.position.z = -0.5;
+scene.add(wall);
+
+// visionOS only; kept and warned about elsewhere.
+Spatial.sceneUnderstanding.occlusion = true;
+Spatial.sceneUnderstanding.shadows = true;
+
+Spatial.mount(scene);
+
+Spatial.onFrame(() => {
+  if (Spatial.time.frame !== 10) return;
+  const hits = Spatial.raycast(new Vector3(0.03, 0.02, 0), new Vector3(0, 0, -1), { maxDistance: 2 });
+  scene.userData.hits = hits.map((hit) => ({
+    // object is null for the real-world mesh.
+    name: hit.object === null ? null : hit.object.name,
+    room: hit.sceneUnderstanding === true,
+  }));
+});
+```
+
+---
+
+## 25. Game controllers
+
+**(ours, Apple-shaped)** `Spatial.input.controllers`:
+
+| Member | Type | Notes |
+|---|---|---|
+| `all` | `Controller[]` | |
+| `current` | `Controller \| null` | the controller whose **input changed** most recently. Connecting alone does not make one current |
+| `connected` | `number` | |
+| `get(id)` | `Controller \| null` | |
+
+Each `Controller`: `id`, `name`, `leftThumbstick`/`rightThumbstick` (`Vector2`),
+`leftTrigger`/`rightTrigger` (`0..1`), and fourteen `ButtonState`s — `a`, `b`,
+`x`, `y`, `leftShoulder`, `rightShoulder`, `dpadUp`, `dpadDown`, `dpadLeft`,
+`dpadRight`, `menu`, `options` — plus `rumble(intensity, duration)`.
+
+A `ButtonState` is `{ down, pressed, released, value, pressCount }`: level, both
+edges, the analogue travel, and clicks within 400 ms of each other.
+
+Scene events `controllerconnected` and `controllerdisconnected` carry
+`{ controller }`.
+
+| Backend | Source |
+|---|---|
+| RK macOS / visionOS | the GameController framework. `ScriptingRuntime.setup(inputOptions:)` is honoured: omitting `.gamepad` skips the provider and `capabilities.controllers` is `false` |
+| web | the Gamepad API |
+
+`rumble` always reaches the consumer as a `controllerRumble` command; where
+there are no haptics the script is warned once.
+
+**Verification.** No hardware is attached in any test, so controllers are driven
+with `Spatial.inject.controller(state)` — the same shape a consumer pushes:
+
+```
+{ id?, name?, leftThumbstick?: [x, y], rightThumbstick?: [x, y],
+  leftTrigger?, rightTrigger?,
+  buttons?: { a, b, x, y, leftShoulder, rightShoulder,
+              dpadUp, dpadDown, dpadLeft, dpadRight, menu, options },
+  current? }
+```
+
+Every field is optional and what is missing reads as zero; a missing `id`
+becomes `controller-<slot>`. Pass an array for several controllers, or `null` to
+disconnect them all. The core computes the `pressed`/`released` edges itself, so
+holding a button down over two injections gives `pressed` on the first frame
+only.
+
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, BoxGeometry, MeshStandardMaterial, AmbientLight, Vector3 } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+
+const ship = new Mesh(new BoxGeometry(0.08, 0.04, 0.12), new MeshStandardMaterial({ color: 0x44dd99 }));
+ship.name = "ship";
+scene.add(ship);
+
+scene.addEventListener("controllerconnected", (event) => {
+  scene.userData.connected = event.controller ? event.controller.name : null;
+});
+scene.addEventListener("controllerdisconnected", () => { scene.userData.connected = null; });
+
+const velocity = new Vector3();
+
+Spatial.onFrame((deltaTime) => {
+  const pad = Spatial.input.controllers.current;
+  scene.userData.padCount = Spatial.input.controllers.connected;
+  if (pad === null) return;
+
+  velocity.set(pad.leftThumbstick.x, 0, -pad.leftThumbstick.y);
+  ship.position.addScaledVector(velocity, 0.4 * deltaTime);
+  ship.scale.setScalar(1 + pad.rightTrigger * 0.3);
+
+  // pressed is one frame only; down is the level.
+  if (pad.a.pressed) scene.userData.jumps = (scene.userData.jumps || 0) + 1;
+  if (pad.b.down) ship.rotation.y += deltaTime * 2;
+  if (pad.menu.pressCount === 2) scene.userData.doubleTappedMenu = true;
+});
+
+Spatial.mount(scene);
+
+// Drive it without hardware.
+Spatial.onFrame(() => {
+  if (Spatial.time.frame === 5) {
+    Spatial.inject.controller({
+      id: "pad-1", name: "Test Pad",
+      leftThumbstick: [0.5, -0.25], rightTrigger: 0.8,
+      buttons: { a: true }, current: true,
+    });
+  }
+  if (Spatial.time.frame === 20) Spatial.inject.controller({ id: "pad-1", buttons: { a: false } });
+  if (Spatial.time.frame === 40) Spatial.inject.controller(null);
+});
+```
+
+**Dump.** Top-level `controllers` is an array of
+`{ id, name, leftThumbstick, rightThumbstick, leftTrigger, rightTrigger, buttons }`.
+
+---
+
+## 26. Input completeness
+
+Phase 2 fills in the rest of the pointer and keyboard surface. Everything from
+[phase 1](#spatialinput) stays.
+
+| Member | Type | Notes |
+|---|---|---|
+| `input.keyboard.connected` | `boolean` | |
+| `input.mouse.connected` | `boolean` | |
+| `input.mouse.left` / `.right` / `.middle` | `ButtonState` | `{ down, pressed, released, value, pressCount }` |
+| `input.mouse.scroll` | `Vector2` | wheel or trackpad movement **for this frame only** |
+| `input.mouse.scenePosition` | `Vector3 \| null` | see [Pointer queries](#pointer-queries) |
+
+`input.mouse.buttons` (the three booleans) is unchanged, so old code keeps
+working; `mouse.left.down` is the same value with edges attached.
+`pressCount` is 2 for a double click — presses inside 400 ms of each other.
+
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, BoxGeometry, MeshStandardMaterial, AmbientLight } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+
+const box = new Mesh(new BoxGeometry(0.12, 0.12, 0.12), new MeshStandardMaterial());
+box.name = "box";
+scene.add(box);
+
+Spatial.onFrame((deltaTime) => {
+  const mouse = Spatial.input.mouse;
+  scene.userData.pointer = mouse.connected;
+  scene.userData.keyboard = Spatial.input.keyboard.connected;
+
+  // Edges, not levels: one frame each.
+  if (mouse.left.pressed) scene.userData.clicks = (scene.userData.clicks || 0) + 1;
+  if (mouse.left.pressCount === 2) scene.userData.doubleClicked = true;
+  if (mouse.right.released) scene.userData.rightUp = true;
+
+  // scroll is this frame's movement only, so it needs no reset.
+  box.scale.setScalar(Math.max(0.4, box.scale.x + mouse.scroll.y * 0.01));
+});
+
+Spatial.mount(scene);
+```
+
+---
+
+## 27. Lifecycle and the host channel
+
+### Activation
+
+| Member | When |
+|---|---|
+| `this.didActivate()` | the view appeared, the window came back, or the immersive space opened |
+| `this.willDeactivate()` | the view went away, the window was hidden or miniaturised, or the space closed |
+| `Spatial.isActive` | `false` between the two |
+
+**Ticks pause while inactive**: `Spatial.time` does not advance, timers do not
+fire and `onFrame` does not run. Losing frontmost status alone never
+deactivates — development tooling drives the app from other processes.
+
+While inactive the consumer's queues are bounded: the latest sync record per
+object is kept, and events beyond 1000 are dropped with a recorded warning.
+
+### Hot reload with state
+
+| Member | Notes |
+|---|---|
+| `this.state` | a **JSON-serialisable** object the script maintains. It is copied, not referenced; anything the copy cannot carry is dropped |
+| `this.scriptChanged(previousState)` | runs after the new script has loaded and **before its first frame** |
+
+The host reads `this.state` out of the outgoing script, then hands it to the
+incoming one. It only happens when the reload asked for it — `POST /script` with
+`{ "source": …, "preserveState": true }` — so a cold load never calls
+`scriptChanged`.
+
+### Spatial.host
+
+The bidirectional channel with the embedding app. Payloads are JSON.
+
+| Member | Signature | Notes |
+|---|---|---|
+| `on(name, handler)` | `=> handler` | `this.on(name, handler)` is an alias |
+| `off(name, handler?)` | | no handler drops every handler for that name |
+| `send(name, payload?)` | `=> this` | fire and forget; the app may have no listener |
+| `call(name, args?)` | `=> Promise` | `"Module.function"`. An unregistered name **rejects immediately** with `SpatialUnsupportedError` (`feature: "host-function"`) rather than waiting |
+| `functions` | `string[]` | what the app registered |
+
+A host error comes back as a rejection whose message is `Module.function: <the
+app's message>`. Because an unknown name rejects at once, the guard is a
+`try`/`catch` and not a timeout.
+
+The app side: Swift `ScriptingRuntime.register(module:function:)` and
+`JavaScriptScene.send(name:payload:)`/`onHostEvent`; the web page's
+`window.spatialHost.register/send/on`. From outside, the dev server's
+[`POST /event` and `GET /events`](../README.md#post-event-and-get-events-for-the-host-channel).
+
+### Fetch helpers
+
+`Spatial.fetchText(url)` and `Spatial.fetchJSON(url)` return promises the
+**consumer** answers; [url containment](#url-forms) applies. Never `await` one
+at the top level: a request no host answers would hold up the rest of the body.
+
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, BoxGeometry, SphereGeometry, MeshStandardMaterial, AmbientLight, Color } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+
+const button = new Mesh(new BoxGeometry(0.14, 0.05, 0.14), new MeshStandardMaterial({ color: 0x3a6fd8 }));
+button.name = "button";
+button.position.x = -0.14;
+scene.add(button);
+
+const lamp = new Mesh(new SphereGeometry(0.06, 24, 16), new MeshStandardMaterial({ color: 0x445066 }));
+lamp.name = "lamp";
+lamp.position.x = 0.14;
+scene.add(lamp);
+
+// Keep it plain JSON: it is copied, not referenced.
+this.state = { presses: 0, hue: 0.58 };
+const state = this.state;
+
+function applyHue() {
+  lamp.material.color.copy(new Color().setHSL(state.hue, 0.65, 0.55));
+}
+applyHue();
+
+// Only called when the reload asked to preserve state.
+this.scriptChanged = (previous) => {
+  if (!previous) return;
+  if (typeof previous.presses === "number") state.presses = previous.presses;
+  if (typeof previous.hue === "number") state.hue = previous.hue;
+  applyHue();
+};
+
+this.didActivate = () => { Spatial.host.send("sceneActive", {}); };
+this.willDeactivate = () => { Spatial.host.send("sceneInactive", { presses: state.presses }); };
+
+// Events in: `this.on` is the same channel as Spatial.host.on.
+this.on("setHue", (payload) => {
+  if (!payload || typeof payload.hue !== "number") return;
+  state.hue = Math.min(1, Math.max(0, payload.hue));
+  applyHue();
+});
+
+// Events out.
+button.addEventListener("tap", () => {
+  state.presses += 1;
+  Spatial.host.send("buttonPressed", { presses: state.presses });
+});
+
+// A host function: an unregistered name rejects at once, so no timeout is needed.
+if (Spatial.host.functions.indexOf("Preferences.read") !== -1) {
+  Spatial.host.call("Preferences.read", { key: "lampHue" })
+    .then((preferences) => {
+      if (preferences && typeof preferences.hue === "number") { state.hue = preferences.hue; applyHue(); }
+    })
+    .catch((error) => console.warn("Preferences.read failed:", error.message));
+} else {
+  scene.userData.noHostFunctions = Spatial.host.functions.length;
+}
+
+// Never awaited at the top level: a host with no network never answers.
+Spatial.fetchJSON("asset://layout.json")
+  .then((layout) => { scene.userData.layout = layout && layout.name; })
+  .catch((error) => console.warn("layout.json was not served:", error.message));
+
+Spatial.onFrame(() => {
+  scene.userData.active = Spatial.isActive;
+  scene.userData.presses = state.presses;
+});
+
+Spatial.mount(scene);
+```
+
+**Dump.** Top-level `isActive` and `hostFunctions`.
+
+---
+
+## 28. Small components and multi-material meshes
+
+| Member | Type | Default | Backends |
+|---|---|---|---|
+| `object.accessibility` | `{ label?, value?, hint?, isButton? } \| null` | `null` | RealityKit `AccessibilityComponent`; the web mirrors it onto an offscreen DOM element with `aria-label`. Reported in `dump()` |
+| `Spatial.render.adaptiveResolution` | `boolean` | `false` | **visionOS only**; elsewhere kept and warned once |
+| `Spatial.environmentLighting.intensityExponent` | `number` | `0` | visionOS `EnvironmentLightingConfigurationComponent`; macOS and web scale the ambient environment |
+| `Spatial.debug.modelView` | `null \| "normal" \| "uv" \| "baseColor" \| "roughness" \| "metallic" \| "occlusion" \| "emissive"` | `null` | RealityKit `ModelDebugOptionsComponent`; the web substitutes a debug material for `normal` and `uv` and warns for the rest |
+
+### Multiple materials per mesh
+
+`new Mesh(geometry, materials[])` with `geometry.groups` selects a material per
+index range, exactly as in three.js. This **reverses the phase 1 rule** that
+assigning an array threw.
+
+```js
+const geometry = new BoxGeometry(0.15, 0.15, 0.15);
+geometry.groups.length = 0;
+geometry.addGroup(0, 18, 0);     // start, count, materialIndex
+geometry.addGroup(18, 18, 1);
+const mesh = new Mesh(geometry, [red, green]);
+```
+
+`mesh.material` stays a single material for the common case and is the array
+when you pass one. The `geometry` descriptor gains
+`groups: [{ start, count, materialIndex }] | null`, and the `material` command
+carries an array payload. RealityKit receives one `ModelComponent` with a
+material per mesh part.
+
+Fewer materials than the groups ask for is not an error: the last one is
+repeated, with a warning naming the mesh.
+
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, BoxGeometry, MeshStandardMaterial, AmbientLight, DirectionalLight } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 0.5));
+const sun = new DirectionalLight(0xffffff, 2.2);
+sun.position.set(0.5, 1, 0.7);
+scene.add(sun);
+
+const geometry = new BoxGeometry(0.16, 0.16, 0.16);
+// A BoxGeometry already has one group per face; replace them with two bands.
+geometry.groups.length = 0;
+geometry.addGroup(0, 18, 0);
+geometry.addGroup(18, 18, 1);
+
+const cube = new Mesh(geometry, [
+  new MeshStandardMaterial({ color: 0xff4455, roughness: 0.4 }),
+  new MeshStandardMaterial({ color: 0x44dd99, metalness: 0.6, roughness: 0.2 }),
+]);
+cube.name = "cube";
+cube.accessibility = { label: "Two-tone cube", hint: "Tap to spin", isButton: true };
+scene.add(cube);
+
+Spatial.environmentLighting.intensityExponent = 0.5;
+
+Spatial.onFrame((deltaTime) => { cube.rotation.y += deltaTime * 0.7; });
+
+Spatial.mount(scene);
+```
+
+**Dump.** `accessibility` per object; top-level `render`, `environmentLighting`
+and `debug`. A multi-material mesh's `material` is an **array** of the usual
+material snapshots.
+
+---
+
 ## Not in scope
 
 These names are **not exported**. A script that references one gets a plain
 `ReferenceError` (bare name) or `TypeError` (`Spatial.Foo is not a
 constructor`). Nothing pretends to work.
 
-Cameras and camera control · `ShaderMaterial` and custom shaders ·
-post-processing · `HemisphereLight` · `RectAreaLight` · sprites · lines and
-points as primitives · skinned mesh authoring · morph targets · audio · video ·
-character controller · force effects · scene understanding · game controllers ·
-multiple materials per mesh · `Scene.background` · `Scene.fog` · texture
-compression formats.
+Permanently out of scope, on every backend:
 
-`Scene.background`, `Scene.environment`, `Scene.fog` and `Mesh.material = [...]`
-are the exceptions: those properties exist and throw `SpatialUnsupportedError`
-on assignment, because a silent no-op there would be invisible.
+| Missing | Why, and what to do instead |
+|---|---|
+| custom GLSL or Metal shaders (`ShaderMaterial`, `onBeforeCompile`) | RealityKit only accepts pre-authored graphs. Use [`ShaderGraphMaterial`](#23-shader-graph-materials) |
+| post-processing, `EffectComposer` | cannot be made portable. Bake the look into materials and lights |
+| animation graphs, compute graphs | no portable story |
+| synchronization (multi-user) | not in scope |
+| reference components | not in scope |
+| `HemisphereLight`, `RectAreaLight` | `AmbientLight` + `DirectionalLight`, or [`Spatial.environment`](#spatialenvironment) |
+| `Sprite`, `Points`, `Line`, `LineSegments` | [`ParticleEmitter`](#11-particles) for points; thin boxes or cylinders for lines; a `billboard` plane for sprites |
+| skinned mesh **authoring**, morph target **authoring** | load a rigged asset and drive it with [`asset.skeleton` and `asset.blendShapes`](#22-skeletons-and-blend-shapes) |
+| `Scene.background`, `Scene.fog` | throw; there is no portable equivalent |
+| texture compression formats | supply PNG/JPEG |
+
+`Scene.background`, `Scene.environment` and `Scene.fog` are the exceptions to
+"not exported": those properties exist and throw `SpatialUnsupportedError` on
+assignment, because a silent no-op there would be invisible.
+
+**Phase 2 removed nine entries from this list.** Cameras and camera control,
+audio, video, character controllers, force effects, scene understanding, game
+controllers, multiple materials per mesh, and playing a loaded rig's skeleton
+and blend shapes are all shipped — see [Phase 2](#phase-2).
 
 ---
 

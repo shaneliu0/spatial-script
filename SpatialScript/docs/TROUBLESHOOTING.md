@@ -49,6 +49,9 @@ native dumps and both consoles for the same deterministic run.
 - [A geometry edit never shows up](#a-geometry-edit-never-shows-up)
 - [A command was dropped](#a-command-was-dropped)
 - [Something works on visionOS but not on macOS](#something-works-on-visionos-but-not-on-macos)
+- [Phase 2: sound, video and cameras](#phase-2-sound-video-and-cameras)
+- [Phase 2: characters, fields, rigs and shaders](#phase-2-characters-fields-rigs-and-shaders)
+- [Phase 2: controllers, the host channel and lifecycle](#phase-2-controllers-the-host-channel-and-lifecycle)
 - [Memory and performance](#memory-and-performance)
 - [Reading GET /stats](#reading-get-stats)
 - [Backend differences that look like bugs](#backend-differences-that-look-like-bugs)
@@ -143,7 +146,7 @@ there the message stands alone).
 | Message | Fix |
 |---|---|
 | `SyntaxError: ...` | the body did not parse. Note the body is compiled as a function body, so a stray `export` or a top-level `import` is a syntax error |
-| `ReferenceError: X is not defined (line N, column M)` | a typo, or a name that is [not in scope](./DIFFERENCES.md#10-not-in-scope-and-what-you-get-instead) — `PerspectiveCamera`, `HemisphereLight`, `Sprite`… |
+| `ReferenceError: X is not defined (line N, column M)` | a typo, or a name that is [not in scope](./DIFFERENCES.md#10-not-in-scope-and-what-you-get-instead) — `ShaderMaterial`, `HemisphereLight`, `Sprite`… Cameras, audio, video and the rest of [phase 2](./API.md#phase-2) **are** exported |
 | `The script finished without mounting a scene and constructed no Scene` | build a `Scene` and mount it |
 | `... and constructed 2 Scenes; call Spatial.mount(scene)` | mount one explicitly |
 | `Error: require("three") is not available; only require("spatial") is provided` | `const Spatial = require("spatial")` |
@@ -727,6 +730,183 @@ load time, and the capability is what the consumer actually honours.
 
 ---
 
+## Phase 2: sound, video and cameras
+
+**My sound does not play.** In order of likelihood:
+
+| Cause | Check | Fix |
+|---|---|---|
+| the buffer url was refused | `dump().warnings` for a containment message; `buffer.error` | keep the url inside the asset root and on an allowed scheme |
+| the mixer is suspended | `dump().audioMixer.state` | call `Spatial.audio.resume()`. It starts `"suspended"` on **every** backend and only becomes `"running"` on `resume()` or when the consumer reports its engine started |
+| the buffer never arrived | `onLoad` never ran | `AudioLoader.load` calls `onLoad` on the next microtask; if it never fires, the url was refused and `onError` ran instead |
+| `masterVolume` or the group volume is 0 | `dump().audioMixer` | a group volume multiplies every source in it |
+| the sound was disposed | `dump().warnings` for `Audio.play on "x" was dropped: the object was destroyed` | `dispose()` is final; build a new `Audio` |
+| nothing is wrong | | headless runs have no audio engine at all. `audio.playing` stays `false` in a Node or harness dump; verify audibly in the macOS host or in the browser harness with its fake audio device |
+
+**`isPlaying` is false right after `play()`.** Correct and expected: playback
+state is **native-driven**. `isPlaying`, `currentTime` and `duration` are what
+the consumer last reported through `syncAudio`, so they lag your call by a frame
+at least. Toggle against them next frame, or keep your own intent flag.
+
+**My spatial sound ignores `setVolume`, or the cone does nothing.** Check
+`dump().objects[i].audio` first — if the values are there, the core did its job
+and the difference is the backend. Two known RealityKit limits:
+**directivity is a single beam**, so a three-part cone collapses to one setting
+and `outerGain` is approximated; and **`refDistance` folds into the rolloff**,
+because the engine has one distance control rather than two. A scene tuned by
+ear on one backend will not match the other exactly.
+
+**Nothing attenuates with distance.** The defaults are metre-scale. In a 0.4 m
+scene, `setRefDistance(0.3)` with `setRolloffFactor(1.4)` is a starting point;
+the default `refDistance` of 1 m means full volume everywhere.
+
+**My video is blank.**
+
+| Cause | Check | Fix |
+|---|---|---|
+| no encoding this backend can play | `dump().objects[i].video.url` | RealityKit needs `mp4` or `hls`, the web needs `webm` or `mp4`. Supply both |
+| every url was refused | `warnings`, and `video.url === null` | the `error` event fires with `no url survived containment` |
+| no url at all | `video.url === null` | the `error` event fires with `no url was given` |
+| the consumer could not decode it | the `error` event's `message` | re-encode |
+| it is simply not playing | `video.playing` | `autoplay` is `false` by default; call `play()` |
+
+**The video is the wrong shape.** Give only `width` **or** only `height` and the
+other follows the video's real aspect once the consumer reports `loaded`. Until
+then it is 16:9. Giving both fixes the plane and lets the image letterbox.
+
+**My camera does nothing.** On visionOS the user is the camera:
+`capabilities.camera` is `false`, the assignment is kept and reported, and
+`warnings` contains `On visionOS the user is the camera; Spatial.camera is kept
+and reported but has no effect`. There is no way around it — branch on the
+capability.
+
+**`aspect` has no effect.** The consumer owns it, from the viewport;
+`PerspectiveCamera.aspect is managed by the consumer from the viewport; the
+script value is ignored`. For an `OrthographicCamera` the visible **height** is
+`top - bottom` and the width follows the viewport, because RealityKit's
+orthographic camera takes only a height — `left`/`right` warn when they disagree.
+
+**`scenePosition` or `rayFromPoint` is null.** Both are `null` on visionOS, when
+the pointer has left the window, and when the consumer supplies no hook —
+`Spatial.rayFromPoint needs the consumer's rayFromPoint hook; it returned null`.
+Guard both; never park a marker at the origin instead.
+
+---
+
+## Phase 2: characters, fields, rigs and shaders
+
+**My character does not move.**
+
+| Cause | Fix |
+|---|---|
+| you wrote `object.position` | a character controller is **native-driven**. Use `move(displacement)`, or `teleport(position)` for a respawn |
+| more than one `move` per frame | one per frame; the consumer applies it on the next step |
+| there is nothing to stand on | the floor needs its own `RigidBody({ type: "static" })` |
+| the step is too tall or the slope too steep | `stepLimit` is metres, `slopeLimit` is **radians** |
+| `isOnGround` is always false | it is reported by the consumer after it resolves a move, so it is `false` until the first sync arrives — and stays `false` in a headless dump |
+
+The controller never rotates anything. Set `object.rotation.y` yourself to face
+the direction of travel.
+
+**A force field does nothing.** It acts only on **dynamic** rigid bodies within
+`radius` of its own **world** position — check `dump().objects[i].forceField`
+for `enabled`, `radius` and the per-kind strength, and check that the bodies you
+expect to move are `type: "dynamic"`. A `RadialForceField` with no
+`minimumDistance` goes to infinity at its centre; that is what the option is for.
+
+**A joint edit did nothing.**
+
+| Cause | Check | Fix |
+|---|---|---|
+| a native animation is playing | it overrides script poses while it runs | `stopAnimation()` hands the pose back |
+| the name is not in the rig | `warnings` for `Skeleton.setJointRotation was given "x", which this asset has no joint for` | read `asset.skeleton.joints` and match against it |
+| the asset has no rig at all | `asset.skeleton === null` | expected for a static prop; guard every use |
+| you read `getJointTransform` during an animation | | call `skeleton.track(true)` first — that is the only way to see where a joint really is |
+
+Blend shapes behave the same way: an unknown name warns and is ignored, and the
+weight is clamped to 0..1.
+
+**`setParameter` did nothing.**
+
+| Cause | Fix |
+|---|---|
+| you are on the web | `capabilities.shaderGraph` is `false` there; the `fallback` renders and `setParameter` only reaches a same-named property the fallback owns |
+| the value was refused | `warnings` names the parameter: accepted values are a finite number, a boolean, a string, a `Color`, a `Vector2`/`3`/`4`, an array of two to four finite numbers, or a `Texture` |
+| RealityKit texture parameters | binding a `Texture` into a graph is not wired up today; numbers, colours and vectors are |
+| the value was `0` or `1` | some numeric edges are refused by the RealityKit binder; nudge to `0.001`/`0.999` if a parameter refuses to move |
+
+`ShaderGraphMaterial` requires a `fallback`; omitting it throws `TypeError` at
+construction, which is a load error.
+
+---
+
+## Phase 2: controllers, the host channel and lifecycle
+
+**No controller appears.** `Spatial.input.controllers.connected` is `0` when
+nothing is attached — and nothing ever is in a test. Drive it with
+`Spatial.inject.controller(state)`; the shape is the same one a consumer pushes,
+every field optional. On RealityKit also check that the app called
+`ScriptingRuntime.setup(inputOptions:)` **with** `.gamepad`: without it the
+provider is skipped and `capabilities.controllers` is `false`.
+
+**`current` is null even though a pad is connected.** `current` is the
+controller whose **input changed** most recently. Connecting alone does not make
+one current — inject a stick or a button, or pass `current: true`.
+
+**A button fires every frame.** `pressed` and `released` are one-frame edges;
+`down` is the level. Use `pressed` for "on press" and `down` for "while held".
+`pressCount` is 2 for a double click, within 400 ms.
+
+**`rumble` does nothing.** It always reaches the consumer as a
+`controllerRumble` command; where the hardware or the backend has no haptics you
+get one warning and no vibration.
+
+**`Spatial.host.call` rejected.** It rejects **immediately** with
+`SpatialUnsupportedError` (`feature: "host-function"`) when the name is not
+registered — `The host function "X" is not registered; Spatial.host.functions
+lists what is`. Check `Spatial.host.functions` first. A host-side failure comes
+back as a rejection whose message is `Module.function: <the app's message>`.
+Nothing here ever hangs, so never write a timeout around it.
+
+**My host events go nowhere.** `Spatial.host.send` is fire-and-forget: the app
+may have no listener. From outside, `GET /events` **drains** what the script
+sent — each event is returned once, so a second poll looks empty. A `/parity`
+run returns the same events under `hostEvents` in its own response.
+
+**A `fetch` never settles.** `Spatial.fetchText`/`fetchJSON` are answered by the
+consumer; a host with no network never answers, and a headless run answers
+nothing at all. **Never `await` one at the top level** — it would hold up the
+rest of the script body. Use `.then`/`.catch`.
+
+**My state was empty after a reload.**
+
+| Cause | Fix |
+|---|---|
+| the push did not ask for it | `POST /script` with `{ "source": …, "preserveState": true }`; without it `scriptChanged` is not called at all |
+| the state was not JSON-serialisable | `this.state` is **copied** to JSON. A `Vector3`, a `Map`, a function or a scene object does not survive. Store numbers, strings, booleans, arrays and plain objects |
+| you read it in the wrong place | `scriptChanged(previousState)` runs after load and before the first frame, not during the body |
+
+**Nothing happens while the window is in the background.** That is
+`Spatial.isActive`. Ticks pause while inactive: time does not advance, timers do
+not fire and `onFrame` does not run. `this.willDeactivate()` is the last call
+before the pause and `this.didActivate()` the first after it. Losing frontmost
+status alone never deactivates — the dev tooling drives the app from another
+process.
+
+**Verification limits worth knowing before you chase a ghost:**
+
+- **Nothing is audible headless.** Node and the conformance runners have no
+  audio engine; the browser harness runs Chromium with a fake audio device, so
+  it proves the graph is wired, not that it sounds right.
+- **No real gamepads in any test.** `Spatial.inject.controller` is the only
+  driver.
+- **RealityKit does not report scene-understanding raycast hits**, so
+  `hit.sceneUnderstanding` is `false` and `hit.object` is never `null` today.
+- **Release builds ship only `SpatialScript/assets`** — no examples, scenarios or
+  conformance cases, and no dev server.
+
+---
+
 ## Memory and performance
 
 Measured on the development Mac, with the macOS host in a DEBUG build:
@@ -882,6 +1062,11 @@ served from a 100 ms cache, so a tight loop then costs one build per 100 ms.
 | `.exr` environment ignored in the browser | expected; `.exr` is RealityKit only. Warned once |
 | `Portal.crossing` ignored in the browser | expected. Warned once |
 | a `Group` or plain mesh has no `CollisionComponent` in the native dump | expected; RealityKit builds shapes lazily. One `Spatial.raycast` materialises them all |
+| `audio.playing` never becomes `true` in a headless dump | expected; playback state is native-driven and there is no engine. Verify in the macOS host or the browser harness |
+| a spatial sound's cone sounds broader on RealityKit | expected; RealityKit directivity is a single beam, so the three-part cone collapses to it |
+| a scripted camera does nothing on visionOS | expected; `capabilities.camera` is `false` there. Warned once |
+| `hit.sceneUnderstanding` is always `false` | expected today: RealityKit does not report real-world raycast hits yet |
+| `Spatial.host.functions` is empty | the app registered none; `capabilities.hostFunctions` can still read `true` |
 | a portal on the web shows the world from your own viewpoint, not mirrored | expected, and deliberate: a portal is a window on both backends. An earlier build used a mirrored camera and disagreed with RealityKit |
 | a particle preset looks different in detail between backends | expected; the web presets are hand-tuned to match the RealityKit ones by eye, not by parameter |
 | `dump()` is slower than you expected | expected on a large scene; narrow it with `compact`, `names`, `fields` or `objects: false`. `native-dump` is roughly seven times dearer again — never poll it unfiltered |

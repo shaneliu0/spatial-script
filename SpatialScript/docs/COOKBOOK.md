@@ -36,6 +36,19 @@ Something wrong: [TROUBLESHOOTING.md](./TROUBLESHOOTING.md).
 20. [Static scenery with the matrixAutoUpdate hint](#20-static-scenery-with-the-matrixautoupdate-hint)
 21. [Polling a scene cheaply with a compact dump](#21-polling-a-scene-cheaply-with-a-compact-dump)
 
+**Phase 2**
+
+22. [A tapped sound with a positional source and mix groups](#22-a-tapped-sound-with-a-positional-source-and-mix-groups)
+23. [A video screen that plays and pauses on tap](#23-a-video-screen-that-plays-and-pauses-on-tap)
+24. [A scripted camera orbit and the pointer's scene position](#24-a-scripted-camera-orbit-and-the-pointers-scene-position)
+25. [A character walking over a floor with force fields](#25-a-character-walking-over-a-floor-with-force-fields)
+26. [Posing a loaded rig's joint and blend shape](#26-posing-a-loaded-rigs-joint-and-blend-shape)
+27. [A shader graph material with a fallback](#27-a-shader-graph-material-with-a-fallback)
+28. [Game controller polling with injected state](#28-game-controller-polling-with-injected-state)
+29. [Preserving state across a hot reload](#29-preserving-state-across-a-hot-reload)
+30. [Calling a host function and exchanging host events](#30-calling-a-host-function-and-exchanging-host-events)
+31. [A multi-material mesh](#31-a-multi-material-mesh)
+
 ---
 
 ## 1. A lit scene with a floor
@@ -1567,3 +1580,967 @@ curl -s 'http://127.0.0.1:8787/dump?objects=0' | jq '{frame, errors, droppedErro
 curl -s 'http://127.0.0.1:8787/dump?names=mote-0&fields=worldPosition' | jq '.objects[0]'
 curl -s 'http://127.0.0.1:8787/dump?compact=1' | jq '.objects | length'
 ```
+
+---
+
+## 22. A tapped sound with a positional source and mix groups
+
+`Spatial.audio` is the listener and the bus. A `PositionalAudio` parented to an
+object rides its transform, so moving the mesh moves the sound.
+
+```js runnable
+const Spatial = require("spatial");
+const {
+  Scene, Mesh, SphereGeometry, PlaneGeometry, MeshStandardMaterial,
+  AmbientLight, DirectionalLight, AudioLoader, PositionalAudio, AmbientAudio,
+} = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 0.4));
+const sun = new DirectionalLight(0xfff2e0, 2.4);
+sun.position.set(0.6, 1.1, 0.8);
+sun.castShadow = true;
+scene.add(sun);
+
+const floor = new Mesh(new PlaneGeometry(0.9, 0.9), new MeshStandardMaterial({ color: 0x22262c }));
+floor.name = "floor";
+floor.rotation.x = -Math.PI / 2;
+floor.position.y = -0.24;
+floor.receiveShadow = true;
+scene.add(floor);
+
+// The mixer: a master volume every source passes through, plus named groups.
+Spatial.audio.masterVolume = 0.85;
+Spatial.audio.setGroupVolume("effects", 0.9);
+Spatial.audio.setGroupVolume("ambience", 0.35);
+// Web audio needs a user gesture; this records the intent and reports "running".
+Spatial.audio.resume();
+
+const bell = new Mesh(new SphereGeometry(0.055, 24, 16), new MeshStandardMaterial({ color: 0x4488ff, metalness: 0.4 }));
+bell.name = "bell";
+bell.position.set(-0.2, 0, 0);
+bell.castShadow = true;
+scene.add(bell);
+
+// A source is a child of the object it belongs to.
+const chime = new PositionalAudio();
+chime.name = "chime";
+chime.group = "effects";           // joins a mix group by name alone
+chime.setVolume(0.9);
+chime.setRefDistance(0.3);         // the 1 m default never attenuates in a 0.4 m scene
+chime.setRolloffFactor(1.4);
+chime.setDistanceModel("inverse");
+chime.setDirectionalCone(60, 140, 0.25);   // degrees, aimed down the object's -Z
+chime.reverbLevel = -8;                    // decibels, not a 0..1 mix
+bell.add(chime);
+
+const bed = new AmbientAudio();     // arrives from every direction
+bed.name = "bed";
+bed.group = "ambience";
+bed.setLoop(true);
+bed.setVolume(0.6);
+scene.add(bed);
+
+const loader = new AudioLoader();
+loader.load(
+  "asset://spatial-tone.wav",
+  (buffer) => { chime.setBuffer(buffer); bed.setBuffer(buffer); bed.play(); scene.userData.loaded = buffer.url; },
+  undefined,
+  (error) => console.warn("tone failed:", error.message),
+);
+
+bell.addEventListener("tap", () => {
+  scene.userData.taps = (scene.userData.taps || 0) + 1;
+  chime.stop();
+  chime.play();
+});
+
+chime.addEventListener("ended", () => { scene.userData.chimeEnded = true; });
+
+Spatial.onFrame((deltaTime, elapsed) => {
+  bell.position.x = Math.cos(elapsed * 0.7) * 0.2;
+  bell.position.z = Math.sin(elapsed * 0.7) * 0.2;
+  bell.lookAt(0, 0, 0);
+  // Duck the bed while the effect is sounding: one call moves the whole group.
+  Spatial.audio.setGroupVolume("ambience", chime.isPlaying ? 0.12 : 0.35);
+});
+
+Spatial.mount(scene);
+```
+
+**Expect:** a blue ball orbiting the origin with a looping room tone under it;
+tapping the ball restarts a directional chime that pans as the ball moves, and
+ducks the bed while it sounds.
+
+**Confirm in the dump:** `audioMixer` is
+`{ masterVolume: 0.85, groups: { effects: 0.9, ambience: … }, state: "running" }`;
+the `chime` entry has `audio.spatial === true`, `audio.group === "effects"`,
+`audio.cone === [60, 140, 0.25]`, `audio.refDistance === 0.3`; the `bed` entry
+has `audio.ambient === true`. `audio.playing` and `audio.currentTime` come from
+the consumer, so they stay `false`/`0` in a headless run — that is expected, not
+a failure.
+
+**The trap:** `isPlaying` is native-driven, so it is **still `false` on the frame
+you call `play()`**. Toggle against it a frame later, or track your own intent.
+
+---
+
+## 23. A video screen that plays and pauses on tap
+
+A `VideoScreen` is a mesh, so it hit-tests like anything else. Supply both
+encodings and each backend takes the one it can decode.
+
+```js runnable
+const Spatial = require("spatial");
+const {
+  Scene, Mesh, BoxGeometry, MeshStandardMaterial, AmbientLight, DirectionalLight, VideoScreen,
+} = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 0.4));
+const sun = new DirectionalLight(0xffffff, 2.2);
+sun.position.set(0.4, 1, 0.7);
+scene.add(sun);
+
+const screen = new VideoScreen({
+  url: { mp4: "asset://spatial-bars.mp4", webm: "asset://spatial-bars.webm" },
+  width: 0.34,        // height follows the video's aspect once the consumer reports it
+  loop: true,
+  muted: false,
+  autoplay: false,
+});
+screen.name = "screen";
+screen.position.set(0, 0.05, 0);
+screen.volume = 0.7;
+scene.add(screen);
+
+// A bezel, so the panel reads as a panel before the first frame arrives.
+const bezel = new Mesh(new BoxGeometry(0.37, 0.23, 0.012), new MeshStandardMaterial({ color: 0x15181d }));
+bezel.name = "bezel";
+bezel.position.copy(screen.position);
+bezel.position.z -= 0.01;
+bezel.castShadow = true;
+scene.add(bezel);
+
+screen.addEventListener("loaded", (event) => {
+  scene.userData.pixels = [event.width, event.height];
+  scene.userData.metres = [screen.width, screen.height];
+});
+
+screen.addEventListener("error", (event) => {
+  scene.userData.videoError = event.message;
+  bezel.material.color.set(0x552222);
+});
+
+screen.addEventListener("tap", () => {
+  // Toggle against the transport the consumer reports, not a local guess.
+  if (screen.isPlaying) screen.pause();
+  else screen.play();
+  scene.userData.taps = (scene.userData.taps || 0) + 1;
+});
+
+screen.addEventListener("hoverenter", () => { screen.hoverEffect = "highlight"; });
+screen.addEventListener("hoverexit", () => { screen.hoverEffect = null; });
+
+Spatial.mount(scene);
+```
+
+**Expect:** a dark panel that fills with colour bars once the file loads, and
+toggles between playing and paused on each tap.
+
+**Confirm in the dump:** the `screen` entry has `type: "VideoScreen"`,
+`interactive.tap === true`, and
+`video: { url: { mp4, webm }, width: 0.34, height, loop: true, volume: 0.7, playing, currentTime, duration, error }`.
+After the `loaded` event `userData.metres[1]` is `width × (pixelHeight /
+pixelWidth)`.
+
+**The trap:** a screen whose surviving urls the backend cannot play dispatches
+`error`. Giving **only** a `webm` is a blank panel on RealityKit and vice versa.
+
+---
+
+## 24. A scripted camera orbit and the pointer's scene position
+
+```js runnable
+const Spatial = require("spatial");
+const S = require("spatial");
+
+const scene = new S.Scene();
+scene.add(new S.AmbientLight(0xffffff, 0.4));
+const sun = new S.DirectionalLight(0xffffff, 2.6);
+sun.position.set(0.5, 1.2, 0.7);
+sun.castShadow = true;
+scene.add(sun);
+
+const floor = new S.Mesh(new S.PlaneGeometry(0.9, 0.9), new S.MeshStandardMaterial({ color: 0x23262b }));
+floor.name = "floor";
+floor.rotation.x = -Math.PI / 2;
+floor.position.y = -0.22;
+floor.receiveShadow = true;
+scene.add(floor);
+
+const ball = new S.Mesh(new S.SphereGeometry(0.07, 28, 20), new S.MeshStandardMaterial({ color: 0xffaa33, metalness: 0.5 }));
+ball.name = "ball";
+ball.position.set(0.16, -0.08, 0.04);
+ball.castShadow = true;
+scene.add(ball);
+
+const ring = new S.Mesh(new S.TorusGeometry(0.07, 0.014, 14, 36), new S.MeshStandardMaterial({ color: 0x44dd99 }));
+ring.name = "ring";
+ring.position.set(0, 0.06, -0.12);
+scene.add(ring);
+
+// Start where the consumer's own camera is, so taking over is not a jump cut.
+const eye = new S.PerspectiveCamera(55, 1, 0.01, 20);
+eye.name = "eye";
+eye.position.set(0, 0.25, 1);
+eye.lookAt(0, 0, 0);
+Spatial.camera = eye;
+
+const flat = new S.OrthographicCamera(-0.3, 0.3, 0.3, -0.3, 0.01, 20);
+flat.name = "flat";
+flat.position.set(0, 0.6, 0.001);
+flat.lookAt(0, 0, 0);
+
+let orthographic = false;
+ring.addEventListener("tap", () => {
+  orthographic = !orthographic;
+  // null would hand the view back to the consumer's built-in camera.
+  Spatial.camera = orthographic ? flat : eye;
+  scene.userData.mode = orthographic ? "orthographic" : "perspective";
+});
+
+// A marker for where the pointer meets the scene.
+const cursor = new S.Mesh(new S.SphereGeometry(0.014, 16, 12), new S.MeshBasicMaterial({ color: 0xff4477 }));
+cursor.name = "cursor";
+cursor.visible = false;
+scene.add(cursor);
+
+const target = new S.Vector3();
+
+Spatial.onFrame((deltaTime, elapsed) => {
+  ring.rotation.z += deltaTime * 0.9;
+  ball.position.y = -0.08 + Math.sin(elapsed * 1.6) * 0.03;
+
+  // The camera is an Object3D: move it, parent it, lookAt with it.
+  const angle = elapsed * 0.25;
+  eye.position.set(Math.sin(angle), 0.25 + Math.sin(elapsed * 0.4) * 0.12, Math.cos(angle));
+  ball.getWorldPosition(target);
+  eye.lookAt(target);
+
+  // null on a headset, and whenever the pointer has left the window.
+  const under = Spatial.input.mouse.scenePosition;
+  cursor.visible = under !== null;
+  if (under !== null) cursor.position.copy(under);
+  scene.userData.hasPointer = under !== null;
+
+  // Also null on visionOS and without the consumer's hook.
+  const pointer = Spatial.input.mouse.position;
+  const ray = pointer === null ? null : Spatial.rayFromPoint(pointer.x, pointer.y);
+  scene.userData.hasRay = ray !== null;
+});
+
+Spatial.mount(scene);
+```
+
+**Expect:** the view orbits the props and keeps the ball centred; tapping the
+green ring cuts to a top-down orthographic view and back; a pink dot follows the
+pointer over the floor.
+
+**Confirm in the dump:** top-level `camera` is
+`{ kind: "perspective", fov: 55, near: 0.01, far: 20, … }` and becomes
+`kind: "orthographic"` after the tap; the `eye` object appears in `objects` with
+its own transform (the pose is **not** in the `camera` field). On visionOS
+`warnings` contains `On visionOS the user is the camera…` and nothing moves.
+
+---
+
+## 25. A character walking over a floor with force fields
+
+```js runnable
+const Spatial = require("spatial");
+const S = require("spatial");
+
+const scene = new S.Scene();
+scene.add(new S.AmbientLight(0xffffff, 0.4));
+const sun = new S.DirectionalLight(0xfff6ec, 2.6);
+sun.position.set(0.5, 1.2, 0.6);
+sun.castShadow = true;
+scene.add(sun);
+
+Spatial.physics.gravity.set(0, -9.81, 0);
+
+const ground = new S.Mesh(new S.BoxGeometry(0.8, 0.02, 0.8), new S.MeshStandardMaterial({ color: 0x2c3138 }));
+ground.name = "ground";
+ground.position.y = -0.26;
+ground.receiveShadow = true;
+ground.rigidBody = new S.RigidBody({ type: "static", shape: "box", friction: 0.9 });
+scene.add(ground);
+
+// A low step, so stepLimit has something to prove.
+const step = new S.Mesh(new S.BoxGeometry(0.26, 0.05, 0.14), new S.MeshStandardMaterial({ color: 0x3a4049 }));
+step.name = "step";
+step.position.set(0.22, -0.225, -0.2);
+step.castShadow = true;
+step.rigidBody = new S.RigidBody({ type: "static", shape: "box", friction: 0.9 });
+scene.add(step);
+
+const walker = new S.Mesh(new S.CapsuleGeometry(0.035, 0.09, 6, 14), new S.MeshStandardMaterial({ color: 0x5aa9ff }));
+walker.name = "walker";
+walker.position.set(-0.2, -0.16, 0.18);
+walker.castShadow = true;
+// The capsule the consumer collides with, sized to match what is drawn.
+walker.characterController = new S.CharacterController({
+  radius: 0.035,
+  height: 0.16,
+  slopeLimit: 0.7,     // radians, like every other angle
+  stepLimit: 0.06,
+  gravity: true,
+});
+scene.add(walker);
+
+// Loose bodies for the fields to act on.
+const debris = new S.Group();
+debris.name = "debris";
+scene.add(debris);
+const pebble = new S.SphereGeometry(0.03, 18, 12);
+[[0.08, -0.02, 0.06], [-0.06, 0.04, -0.05], [0.02, 0.1, 0.12]].forEach((at, i) => {
+  const mesh = new S.Mesh(pebble, new S.MeshStandardMaterial({ color: [0xff8855, 0xffd166, 0x9b7bff][i] }));
+  mesh.name = `pebble-${i}`;
+  mesh.position.set(at[0], at[1], at[2]);
+  mesh.castShadow = true;
+  mesh.rigidBody = new S.RigidBody({ type: "dynamic", shape: "sphere", mass: 0.25, restitution: 0.4 });
+  debris.add(mesh);
+});
+
+// Fields act on dynamic bodies within `radius` of their own world position.
+const repeller = new S.RadialForceField({
+  strength: 0.6,
+  minimumDistance: 0.04,     // stops the force going to infinity at the centre
+  falloff: "inverseSquare",
+  radius: 0.3,
+});
+repeller.name = "repeller";
+repeller.position.y = -0.1;
+scene.add(repeller);
+
+const molasses = new S.DragForceField({ coefficient: 1.6, radius: 0.45 });
+molasses.name = "molasses";
+molasses.position.y = -0.1;
+scene.add(molasses);
+
+const HOME = new S.Vector3(-0.2, -0.16, 0.18);
+const displacement = new S.Vector3();
+let verticalSpeed = 0;
+
+Spatial.onFrame((deltaTime, elapsed) => {
+  const keyboard = Spatial.input.keyboard;
+  const controller = walker.characterController;
+
+  displacement.set(0, 0, 0);
+  if (keyboard.isDown("KeyW")) displacement.z -= 1;
+  if (keyboard.isDown("KeyS")) displacement.z += 1;
+  if (keyboard.isDown("KeyA")) displacement.x -= 1;
+  if (keyboard.isDown("KeyD")) displacement.x += 1;
+  if (displacement.lengthSq() > 0) {
+    displacement.normalize().multiplyScalar(0.5 * deltaTime);
+    walker.rotation.y = Math.atan2(displacement.x, displacement.z);
+  }
+
+  // isOnGround is the consumer's answer after it resolved the last move.
+  if (controller.isOnGround) verticalSpeed = keyboard.wasPressed("Space") ? 1.4 : 0;
+  else verticalSpeed -= 9.81 * deltaTime;
+  displacement.y = verticalSpeed * deltaTime;
+
+  controller.move(displacement);          // one move per frame, applied next frame
+
+  if (keyboard.wasPressed("KeyR")) {
+    controller.teleport(HOME);            // ignores collision: a respawn, not a walk
+    verticalSpeed = 0;
+  }
+  if (keyboard.wasPressed("KeyF")) molasses.enabled = !molasses.enabled;
+
+  repeller.strength = 0.6 + Math.sin(elapsed * 1.2) * 0.35;
+  scene.userData.onGround = controller.isOnGround;
+});
+
+Spatial.mount(scene);
+```
+
+**Expect:** WASD walks the blue capsule around the slab, sliding along the step
+and climbing it; Space jumps; R teleports home; F toggles the drag field. The
+pebbles drift outward from the middle and settle.
+
+**Confirm in the dump:** the `walker` entry has
+`characterController: { radius: 0.035, height: 0.16, slopeLimit: 0.7, stepLimit: 0.06, gravity: true }`
+and a sibling `isOnGround`; `repeller.forceField.kind === "RadialForceField"`
+with `falloff: "inverseSquare"`, and `molasses.forceField.enabled` flips with F.
+
+**The trap:** a character controller is **native-driven**. Writing
+`walker.position` fights the consumer; use `move` for walking and `teleport` for
+placement. The controller never rotates anything — the facing above is the
+script's own `rotation.y`.
+
+---
+
+## 26. Posing a loaded rig's joint and blend shape
+
+```js runnable
+const Spatial = require("spatial");
+const {
+  Scene, Group, Mesh, BoxGeometry, PlaneGeometry, MeshStandardMaterial,
+  AmbientLight, DirectionalLight, Quaternion, Euler,
+} = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 0.45));
+const sun = new DirectionalLight(0xfff4e8, 2.5);
+sun.position.set(0.5, 1.2, 0.7);
+sun.castShadow = true;
+scene.add(sun);
+
+const floor = new Mesh(new PlaneGeometry(0.9, 0.9), new MeshStandardMaterial({ color: 0x23262b }));
+floor.name = "floor";
+floor.rotation.x = -Math.PI / 2;
+floor.position.y = -0.22;
+floor.receiveShadow = true;
+scene.add(floor);
+
+const holder = new Group();
+holder.name = "holder";
+holder.position.y = -0.22;
+scene.add(holder);
+
+const plinth = new Mesh(new BoxGeometry(0.3, 0.02, 0.3), new MeshStandardMaterial({ color: 0x333a44 }));
+plinth.name = "plinth";
+plinth.position.y = -0.23;
+plinth.receiveShadow = true;
+scene.add(plinth);
+
+// Mount before awaiting, so the scene is on screen while the model loads.
+Spatial.mount(scene);
+
+let rig = null;
+let shapes = null;
+let animations = [];
+let animationIndex = 0;
+let model = null;
+
+// The rig pair in the shared asset root: same skeleton, one file per backend.
+try {
+  model = await Spatial.loadAsset({ usdz: "asset://rig.usdz", glb: "asset://rig.glb" });
+  model.name = "figure";
+  holder.add(model);
+
+  // Fit whatever came out of the file into a 0.3 m box.
+  const size = model.boundingBox.max.clone().sub(model.boundingBox.min);
+  const largest = Math.max(size.x, size.y, size.z);
+  if (largest > 0) model.scale.setScalar(0.3 / largest);
+
+  animations = model.animations.slice();
+  if (animations.length > 0) model.playAnimation(animations[0], { loop: true });
+
+  // Both are null for an asset with no rig and no shapes.
+  if (model.skeleton !== null) {
+    rig = model.skeleton;
+    rig.track(true);        // ask for the real transforms back while an animation runs
+    holder.userData.joints = rig.joints.slice();
+  }
+  if (model.blendShapes !== null) {
+    shapes = model.blendShapes;
+    holder.userData.shapes = shapes.names.slice();
+  }
+} catch (error) {
+  console.warn("figure could not be loaded:", error.message);
+  holder.userData.assetError = error.message;
+}
+
+plinth.addEventListener("tap", () => {
+  if (model === null || animations.length === 0) return;
+  animationIndex = (animationIndex + 1) % (animations.length + 1);
+  if (animationIndex === animations.length) {
+    // Past the end: stop, which hands the pose back to the script's joint edits.
+    model.stopAnimation();
+    holder.userData.playing = null;
+    return;
+  }
+  model.playAnimation(animations[animationIndex], { loop: true });
+  holder.userData.playing = animations[animationIndex];
+});
+
+const rotation = new Quaternion();
+const euler = new Euler();
+
+Spatial.onFrame((deltaTime, elapsed) => {
+  holder.rotation.y += deltaTime * 0.25;
+
+  if (rig !== null && rig.joints.indexOf("head") !== -1) {
+    euler.set(0, Math.sin(elapsed * 0.9) * 0.35, Math.sin(elapsed * 1.7) * 0.12);
+    rig.setJointRotation("head", rotation.setFromEuler(euler));
+    // Where the joint really ended up, reported because tracking is on.
+    const actual = rig.getJointTransform("head");
+    if (actual !== null) holder.userData.headY = actual.position.y;
+  }
+
+  if (shapes !== null && shapes.names.indexOf("widen") !== -1) {
+    shapes.set("widen", (Math.sin(elapsed * 1.3) + 1) / 2);   // clamped to 0..1
+  }
+});
+```
+
+**Expect:** a small figure on a plinth, turning slowly, its head swaying and its
+body widening and narrowing. Tapping the plinth cycles its animations and then
+stops them, at which point the script's own head pose takes over again.
+
+**Confirm in the dump:** the `figure` entry has
+`skeleton: { joints: { head: [px,py,pz,qx,qy,qz,qw] }, track: true }` and
+`blendShapes: { widen: 0..1 }`; `holder.userData.joints` lists what the file
+actually names. An asset with no rig leaves both `null` and the recipe still
+runs.
+
+**The trap:** a playing native animation **overrides** script joint poses.
+`track(true)` is the only way to read where a joint actually is while one runs,
+and `stopAnimation()` is what hands the pose back.
+
+---
+
+## 27. A shader graph material with a fallback
+
+```js runnable
+const Spatial = require("spatial");
+const {
+  Scene, Mesh, BoxGeometry, SphereGeometry, MeshStandardMaterial, ShaderGraphMaterial,
+  AmbientLight, DirectionalLight, Color,
+} = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 0.45));
+const sun = new DirectionalLight(0xffffff, 2.3);
+sun.position.set(0.5, 1.1, 0.7);
+sun.castShadow = true;
+scene.add(sun);
+
+// The fallback is what every consumer without a shader graph renders, so it
+// should approximate the graph rather than being an obvious placeholder.
+const fallback = new MeshStandardMaterial({
+  color: 0xff5522,
+  emissive: 0x331100,
+  emissiveIntensity: 1.5,
+  roughness: 0.35,
+});
+
+const glow = new ShaderGraphMaterial({
+  source: "asset://spatial-materials.usda",   // a bundled, pre-authored USD graph
+  name: "Glow",                               // the graph's name inside that file
+  parameters: { glowAmount: 1 },
+  fallback,                                    // required: omitting it throws
+});
+
+const cube = new Mesh(new BoxGeometry(0.15, 0.15, 0.15), glow);
+cube.name = "cube";
+cube.position.x = -0.12;
+cube.castShadow = true;
+scene.add(cube);
+
+// A second mesh sharing the same material instance: one native material, and
+// both update when a parameter changes.
+const orb = new Mesh(new SphereGeometry(0.075, 24, 16), glow);
+orb.name = "orb";
+orb.position.x = 0.14;
+orb.castShadow = true;
+scene.add(orb);
+
+cube.addEventListener("tap", () => {
+  glow.setParameter("glowColor", new Color().setHSL(Math.random(), 0.85, 0.5));
+  scene.userData.generation = glow.generation;
+});
+
+Spatial.onFrame((deltaTime, elapsed) => {
+  cube.rotation.y += deltaTime * 0.6;
+  orb.position.y = Math.sin(elapsed * 1.4) * 0.04;
+  // Numbers, booleans, strings, Colors, Vector2/3/4, small float arrays, Textures.
+  glow.setParameter("glowAmount", 1 + Math.sin(elapsed * 2) * 0.5);
+  scene.userData.shaderGraph = Spatial.env.capabilities.shaderGraph;
+});
+
+Spatial.mount(scene);
+```
+
+**Expect:** on RealityKit, a cube and orb rendered by the `Glow` graph, pulsing
+with `glowAmount` and recolouring on tap. In the browser the same objects in the
+orange fallback material, with one warning.
+
+**Confirm in the dump:** the `cube` entry has
+`material.type === "ShaderGraphMaterial"` with `source`, `name: "Glow"`,
+`parameters: { glowAmount, glowColor }`, a `generation` that increases with every
+`setParameter`, and the full `fallback` snapshot. On the web `warnings` contains
+`ShaderGraphMaterial has no shader graph on this consumer; the fallback material
+is rendered` and `capabilities.shaderGraph` is `false`.
+
+**The trap:** a value the command stream cannot carry — a NaN, a plain object, an
+array of the wrong length — is refused with a warning naming the parameter, not
+sent as null.
+
+---
+
+## 28. Game controller polling with injected state
+
+No test rig has hardware attached, so `Spatial.inject.controller` is how a
+controller scene is verified.
+
+```js runnable
+const Spatial = require("spatial");
+const {
+  Scene, Mesh, BoxGeometry, ConeGeometry, PlaneGeometry, MeshStandardMaterial,
+  AmbientLight, DirectionalLight, Vector3,
+} = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 0.45));
+const sun = new DirectionalLight(0xffffff, 2.4);
+sun.position.set(0.5, 1.1, 0.7);
+sun.castShadow = true;
+scene.add(sun);
+
+const floor = new Mesh(new PlaneGeometry(0.9, 0.9), new MeshStandardMaterial({ color: 0x23262b }));
+floor.name = "floor";
+floor.rotation.x = -Math.PI / 2;
+floor.position.y = -0.2;
+floor.receiveShadow = true;
+scene.add(floor);
+
+const ship = new Mesh(new ConeGeometry(0.045, 0.11, 16), new MeshStandardMaterial({ color: 0x44dd99 }));
+ship.name = "ship";
+ship.rotation.x = Math.PI / 2;
+ship.castShadow = true;
+scene.add(ship);
+
+scene.addEventListener("controllerconnected", (event) => {
+  scene.userData.padName = event.controller ? event.controller.name : null;
+});
+scene.addEventListener("controllerdisconnected", () => { scene.userData.padName = null; });
+
+const velocity = new Vector3();
+const BOUND = 0.35;
+
+Spatial.onFrame((deltaTime) => {
+  scene.userData.pads = Spatial.input.controllers.connected;
+  // `current` is the pad whose input changed most recently, not the first one.
+  const pad = Spatial.input.controllers.current;
+  if (pad === null) return;
+
+  velocity.set(pad.leftThumbstick.x, 0, -pad.leftThumbstick.y);
+  if (velocity.lengthSq() > 0) {
+    ship.position.addScaledVector(velocity, 0.5 * deltaTime);
+    ship.position.x = Math.max(-BOUND, Math.min(BOUND, ship.position.x));
+    ship.position.z = Math.max(-BOUND, Math.min(BOUND, ship.position.z));
+  }
+
+  // Triggers report their travel; plain buttons report 0 or 1.
+  ship.scale.setScalar(1 + pad.rightTrigger * 0.4);
+
+  // pressed and released are one frame each; down is the level.
+  if (pad.a.pressed) {
+    scene.userData.boosts = (scene.userData.boosts || 0) + 1;
+    pad.rumble(0.6, 0.15);          // warns once where there are no haptics
+  }
+  if (pad.b.down) ship.rotation.z += deltaTime * 2;
+  if (pad.menu.pressCount === 2) scene.userData.menuDoubleTap = true;
+});
+
+// Drive it without hardware. Every field is optional; what is missing is zero.
+Spatial.onFrame(() => {
+  const frame = Spatial.time.frame;
+  if (frame === 5) {
+    Spatial.inject.controller({
+      id: "pad-1",
+      name: "Test Pad",
+      leftThumbstick: [0.6, 0.2],
+      rightTrigger: 0.5,
+      buttons: { a: true },
+      current: true,
+    });
+  }
+  if (frame === 20) Spatial.inject.controller({ id: "pad-1", buttons: { a: false } });
+  if (frame === 60) Spatial.inject.controller(null);      // disconnect them all
+});
+
+Spatial.mount(scene);
+```
+
+**Expect:** with a real pad, the left stick flies the cone around the floor, the
+right trigger swells it, A counts boosts and rumbles, B rolls it. Headless, the
+injections do the same on cue.
+
+**Confirm in the dump:** top-level `controllers` is
+`[{ id: "pad-1", name: "Test Pad", leftThumbstick: [0.6, 0.2], rightTrigger: 0.5, buttons: { a: 1, … } }]`
+while the pad is connected, and `[]` after the `null`; `scene.userData.boosts`
+is **1**, not one per frame — proof that `pressed` is an edge — and
+`scene.userData.padName` goes from `"Test Pad"` to `null`.
+
+---
+
+## 29. Preserving state across a hot reload
+
+```js runnable
+const Spatial = require("spatial");
+const {
+  Scene, Mesh, BoxGeometry, SphereGeometry, MeshStandardMaterial,
+  AmbientLight, DirectionalLight, Color,
+} = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 0.45));
+const sun = new DirectionalLight(0xffffff, 2.4);
+sun.position.set(0.5, 1.1, 0.7);
+scene.add(sun);
+
+const button = new Mesh(new BoxGeometry(0.14, 0.05, 0.14), new MeshStandardMaterial({ color: 0x3a6fd8 }));
+button.name = "button";
+button.position.x = -0.14;
+button.castShadow = true;
+scene.add(button);
+
+const lamp = new Mesh(new SphereGeometry(0.06, 24, 16), new MeshStandardMaterial({ color: 0x445066 }));
+lamp.name = "lamp";
+lamp.position.x = 0.14;
+scene.add(lamp);
+
+// The one thing the runtime reads out of a script before replacing it.
+// Keep it plain JSON: it is copied, and what the copy cannot carry is dropped.
+this.state = { presses: 0, hue: 0.58, activations: 0 };
+const state = this.state;
+
+function applyHue() {
+  lamp.material.color.copy(new Color().setHSL(state.hue, 0.65, 0.55));
+  lamp.material.emissive.copy(new Color().setHSL(state.hue, 0.7, 0.12));
+}
+applyHue();
+
+// Called after this script loaded and before its first frame, with the previous
+// script's `this.state` — only when the reload asked to preserve it.
+this.scriptChanged = (previous) => {
+  if (!previous) return;
+  if (typeof previous.presses === "number") state.presses = previous.presses;
+  if (typeof previous.hue === "number") state.hue = previous.hue;
+  if (typeof previous.activations === "number") state.activations = previous.activations;
+  applyHue();
+  scene.userData.carried = state.presses;
+};
+
+// Ticks pause between these two, so there is nothing to unwind.
+this.didActivate = () => { state.activations += 1; };
+this.willDeactivate = () => { Spatial.host.send("sceneInactive", { presses: state.presses }); };
+
+button.addEventListener("tap", () => {
+  state.presses += 1;
+  state.hue = (state.hue + 0.07) % 1;
+  applyHue();
+  button.scale.setScalar(0.92);
+});
+
+Spatial.onFrame((deltaTime) => {
+  const scale = button.scale.x + (1 - button.scale.x) * Math.min(1, deltaTime * 8);
+  button.scale.setScalar(scale);
+  scene.userData.presses = state.presses;
+  scene.userData.active = Spatial.isActive;
+});
+
+Spatial.mount(scene);
+```
+
+**Expect:** each tap on the blue button advances the lamp's hue. Push an edited
+copy of the script with `preserveState` and the count and hue survive the swap.
+
+Drive it from outside:
+
+```bash
+jq -n --rawfile source scene.js '{ source: $source, preserveState: true }' \
+  | curl -s -X POST --data-binary @- http://127.0.0.1:8787/script
+curl -s 'http://127.0.0.1:8787/dump?names=&objects=0' | jq '.loadGeneration'
+```
+
+**Confirm in the dump:** `loadGeneration` increments on every load, and after a
+preserving reload `scene.userData.carried` equals the pre-reload
+`scene.userData.presses`. Without `preserveState`, `scriptChanged` is not called
+at all and `carried` is absent.
+
+**The trap:** `this.state` is copied to JSON. A `Vector3`, a `Map`, a function or
+a scene object does not survive — store numbers, strings, booleans, arrays and
+plain objects, and rebuild the rest in `scriptChanged`.
+
+---
+
+## 30. Calling a host function and exchanging host events
+
+```js runnable
+const Spatial = require("spatial");
+const {
+  Scene, Mesh, BoxGeometry, SphereGeometry, MeshStandardMaterial,
+  AmbientLight, DirectionalLight, Color,
+} = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 0.45));
+const sun = new DirectionalLight(0xffffff, 2.4);
+sun.position.set(0.5, 1.1, 0.7);
+scene.add(sun);
+
+const dial = new Mesh(new BoxGeometry(0.12, 0.04, 0.12), new MeshStandardMaterial({ color: 0x3a6fd8 }));
+dial.name = "dial";
+dial.position.x = -0.14;
+dial.castShadow = true;
+scene.add(dial);
+
+const lamp = new Mesh(new SphereGeometry(0.06, 24, 16), new MeshStandardMaterial({ color: 0x445066 }));
+lamp.name = "lamp";
+lamp.position.x = 0.14;
+scene.add(lamp);
+
+let hue = 0.58;
+function applyHue() { lamp.material.color.copy(new Color().setHSL(hue, 0.65, 0.55)); }
+applyHue();
+
+// --- events from the app. `this.on` is the same channel as Spatial.host.on.
+this.on("setHue", (payload) => {
+  if (!payload || typeof payload.hue !== "number") return;
+  hue = Math.min(1, Math.max(0, payload.hue));
+  applyHue();
+  scene.userData.hue = hue;
+});
+
+// There is no reply channel: answering an event is another send.
+const onPing = (payload) => {
+  Spatial.host.send("pong", { at: Spatial.time.elapsed, echo: payload || null });
+};
+Spatial.host.on("ping", onPing);
+
+// --- events to the app. Fire and forget; the app may have no listener.
+dial.addEventListener("tap", () => {
+  hue = (hue + 0.1) % 1;
+  applyHue();
+  Spatial.host.send("hueChanged", { hue });
+  scene.userData.sends = (scene.userData.sends || 0) + 1;
+});
+
+// --- host functions. An unregistered name rejects immediately, so the guard is
+// a try/catch and not a timeout.
+scene.userData.functions = Spatial.host.functions.slice();
+if (Spatial.host.functions.indexOf("Preferences.read") !== -1) {
+  Spatial.host.call("Preferences.read", { key: "lampHue" })
+    .then((preferences) => {
+      if (preferences && typeof preferences.hue === "number") { hue = preferences.hue; applyHue(); }
+    })
+    .catch((error) => { scene.userData.callError = error.message; });
+} else {
+  scene.userData.usingDefaults = true;
+}
+
+// --- a consumer-performed fetch. Never awaited at the top level: a host with
+// no network never answers.
+Spatial.fetchJSON("asset://layout.json")
+  .then((layout) => { scene.userData.layout = layout && layout.name; })
+  .catch((error) => { scene.userData.fetchError = error.message; });
+
+// Handlers can be dropped again; a reload clears them all anyway.
+let listening = true;
+Spatial.onFrame((deltaTime, elapsed) => {
+  lamp.position.y = Math.sin(elapsed * 1.4) * 0.02;
+  if (listening && (scene.userData.sends || 0) >= 5) {
+    Spatial.host.off("ping", onPing);
+    listening = false;
+  }
+});
+
+Spatial.mount(scene);
+```
+
+**Expect:** tapping the dial recolours the lamp and sends `hueChanged` to the
+app; the app can push `setHue` back the other way.
+
+Drive both directions from outside:
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/event -d '{"name":"setHue","payload":{"hue":0.12}}'
+curl -s http://127.0.0.1:8787/events | jq '.events'
+```
+
+**Confirm in the dump:** `hostFunctions` lists what the app registered;
+`scene.userData.functions` is the same list as the script saw at load;
+`scene.userData.hue` changes after a `POST /event`; and `GET /events` drains the
+`hueChanged` sends once each.
+
+**The trap:** `Spatial.host.call` on an unregistered name rejects at once with
+`SpatialUnsupportedError` (`feature: "host-function"`). Check
+`Spatial.host.functions` first, or catch — never wait.
+
+---
+
+## 31. A multi-material mesh
+
+```js runnable
+const Spatial = require("spatial");
+const {
+  Scene, Mesh, BoxGeometry, CylinderGeometry, MeshStandardMaterial,
+  AmbientLight, DirectionalLight,
+} = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 0.45));
+const sun = new DirectionalLight(0xffffff, 2.4);
+sun.position.set(0.5, 1.1, 0.7);
+sun.castShadow = true;
+scene.add(sun);
+
+// A BoxGeometry already carries one group per face. Replace them with two
+// bands so a single mesh shows two materials.
+const geometry = new BoxGeometry(0.16, 0.16, 0.16);
+geometry.groups.length = 0;
+geometry.addGroup(0, 18, 0);        // start, count, materialIndex
+geometry.addGroup(18, 18, 1);
+
+const shell = new MeshStandardMaterial({ color: 0xff4455, roughness: 0.45 });
+const trim = new MeshStandardMaterial({ color: 0x44dd99, metalness: 0.7, roughness: 0.2 });
+
+const cube = new Mesh(geometry, [shell, trim]);
+cube.name = "cube";
+cube.position.x = -0.14;
+cube.castShadow = true;
+cube.accessibility = { label: "Two-tone cube", hint: "Tap to recolour", isButton: true };
+scene.add(cube);
+
+// A single material is still the common case and still just works.
+const post = new Mesh(new CylinderGeometry(0.03, 0.03, 0.18, 20), shell);
+post.name = "post";
+post.position.x = 0.14;
+post.castShadow = true;
+scene.add(post);
+
+cube.addEventListener("tap", () => {
+  // Mutating a shared material moves every mesh that uses it: the post too.
+  shell.color.setHSL(Math.random(), 0.7, 0.55);
+  scene.userData.recolours = (scene.userData.recolours || 0) + 1;
+});
+
+Spatial.onFrame((deltaTime) => {
+  cube.rotation.y += deltaTime * 0.7;
+  scene.userData.materialCount = Array.isArray(cube.material) ? cube.material.length : 1;
+});
+
+Spatial.mount(scene);
+```
+
+**Expect:** a cube split into a red band and a green metallic band, next to a
+red post. Tapping the cube recolours both the cube's red band and the post,
+because they share one material instance.
+
+**Confirm in the dump:** the `cube` entry's `material` is an **array** of two
+material snapshots and its `geometry` descriptor carries
+`groups: [{ start: 0, count: 18, materialIndex: 0 }, { start: 18, count: 18, materialIndex: 1 }]`;
+`post.material` is a single snapshot with the same `uuid` as the cube's first —
+that shared `uuid` is why one tap moves both. `scene.userData.materialCount` is
+`2`.
+
+**The trap:** fewer materials than the groups ask for is not an error — the last
+one is repeated, with a warning naming the mesh. Count them yourself if it
+matters.

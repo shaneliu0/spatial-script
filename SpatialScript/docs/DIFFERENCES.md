@@ -5,6 +5,10 @@ three.js class names, constructor signatures, property names and method names
 wherever a three.js equivalent exists — so most three.js habits transfer — but
 it is not three.js, and the differences below are the ones that break scripts.
 
+Much of what phase 1 sent you around no longer needs a workaround: cameras,
+audio, video, character controllers, force fields, rig control, multi-material
+meshes and game controllers all ship in phase 2. Section 10 lists what changed.
+
 Full reference: [API.md](./API.md). Symptom-first debugging:
 [TROUBLESHOOTING.md](./TROUBLESHOOTING.md).
 
@@ -13,7 +17,7 @@ Full reference: [API.md](./API.md). Symptom-first debugging:
 ## Contents
 
 - [The five-minute version](#the-five-minute-version)
-- [1. No renderer, no camera](#1-no-renderer-no-camera)
+- [1. No renderer, and a camera you do not own by default](#1-no-renderer-and-a-camera-you-do-not-own-by-default)
 - [2. mount instead of render](#2-mount-instead-of-render)
 - [3. Units are metres](#3-units-are-metres)
 - [4. The script body is async](#4-the-script-body-is-async)
@@ -35,7 +39,7 @@ Full reference: [API.md](./API.md). Symptom-first debugging:
 | three.js habit | SpatialScript |
 |---|---|
 | `new THREE.WebGLRenderer()`, `renderer.render(scene, camera)` | nothing — the host renders. Call `Spatial.mount(scene)` once |
-| `new THREE.PerspectiveCamera(...)` | no camera exists; the viewer is the camera |
+| `new THREE.PerspectiveCamera(...)` | the class exists; assign it to `Spatial.camera`. On visionOS the viewer is the camera and the assignment does nothing |
 | `requestAnimationFrame(animate)` loop | `Spatial.onFrame((deltaTime, elapsed) => ...)` |
 | `import * as THREE from "three"` | `const Spatial = require("spatial")` |
 | units of "1" for a cube | `0.1` — one metre is a big object |
@@ -46,26 +50,45 @@ Full reference: [API.md](./API.md). Symptom-first debugging:
 | `material.needsUpdate = true` after a change | not needed for materials or geometry method calls; still needed after editing an attribute array **in place** |
 | physics via an external library | built in: `mesh.rigidBody = new Spatial.RigidBody(...)` |
 | `object.visible` for fading | `object.visible` still works; `object.opacity` fades the whole subtree |
+| `new THREE.Audio(listener)` with an `AudioListener` on the camera | `Spatial.audio` **is** the listener and the mixer; `Audio`/`PositionalAudio` take no listener argument, and playback state is native-driven |
+| `new THREE.Mesh(geometry, [a, b])` | works, with `geometry.groups`, as in three.js |
 | `matrixAutoUpdate = false` to hand-manage a matrix | same, **plus** it is the static hint: a static object stops being polled and large static scenery becomes nearly free |
 | no enforced limits | `Spatial.limits` names every cap the runtime enforces (timers, listeners, depth, log size); crossing one warns, never fails silently |
 
 ---
 
-## 1. No renderer, no camera
+## 1. No renderer, and a camera you do not own by default
 
-There is no `WebGLRenderer`, no `PerspectiveCamera`, no `OrthographicCamera`,
-no `OrbitControls`, no render loop you own. The host renders the mounted scene;
-on visionOS the viewer's head *is* the camera, and on macOS the app owns the
-virtual camera.
+There is no `WebGLRenderer`, no `OrbitControls`, and no render loop you own. The
+host renders the mounted scene, and by default it also owns the camera: on macOS
+the app's virtual camera at `(0, 0.25, 1.4)`, on the web a preset that mirrors
+it, and on visionOS the viewer's head.
 
-Consequences:
+`PerspectiveCamera` and `OrthographicCamera` **do** exist (phase 2), and
+assigning one to `Spatial.camera` takes the view over on macOS and the web:
 
-- You cannot place, aim, or animate the camera. Compose the scene around the
-  origin instead and let the viewer move.
-- `object.getWorldDirection()` is relative to world axes, not to a view.
-- Screen-space work (projection, NDC, `Vector3.project`) has no meaning.
-- For "always faces me", set `object.billboard = true` — the consumer does the
-  facing.
+```js
+const eye = new PerspectiveCamera(55, 1, 0.01, 20);
+eye.position.set(0, 0.25, 1);
+eye.lookAt(0, 0, 0);
+Spatial.camera = eye;        // null hands the view back to the consumer
+```
+
+Consequences that remain:
+
+- **On visionOS the user is the camera.** The assignment is kept and reported and
+  warns once; `capabilities.camera` is `false` there. A script that must run
+  everywhere reads the capability rather than assuming it can frame the shot.
+- `aspect` belongs to the consumer, which owns the viewport; a script value is
+  ignored with a warning.
+- An `OrthographicCamera`'s visible width follows the viewport aspect, because
+  RealityKit's takes only a height.
+- Screen-space work (projection, NDC, `Vector3.project`) still has no meaning;
+  use [`Spatial.rayFromPoint`](./API.md#pointer-queries) and
+  `Spatial.input.mouse.scenePosition` instead, both of which are `null` on
+  visionOS.
+- For "always faces me", `object.billboard = true` is still the portable answer —
+  the consumer does the facing.
 
 ## 2. mount instead of render
 
@@ -267,26 +290,43 @@ Familiar classes with narrower contracts:
 ## 10. Not in scope, and what you get instead
 
 These names are simply **not exported**. Referencing one is a plain
-`ReferenceError` (`PerspectiveCamera is not defined`) or `TypeError`
-(`Spatial.ShaderMaterial is not a constructor`).
+`ReferenceError` (`ShaderMaterial is not defined`) or `TypeError`
+(`Spatial.EffectComposer is not a constructor`).
 
-| Missing | Do this instead |
+| Missing, permanently | Do this instead |
 |---|---|
-| cameras, camera controls | compose around the origin; `billboard` for facing |
-| `ShaderMaterial`, custom shaders, `onBeforeCompile` | `MeshStandardMaterial` / `MeshPhysicalMaterial` with maps |
+| `ShaderMaterial`, custom GLSL/Metal shaders, `onBeforeCompile` | RealityKit only accepts pre-authored graphs: use `ShaderGraphMaterial` with a required `fallback` |
 | post-processing, `EffectComposer` | nothing; bake the look into materials and lights |
+| animation graphs, compute graphs | no portable story |
+| synchronization (multi-user), reference components | not in scope |
 | `HemisphereLight`, `RectAreaLight` | `AmbientLight` + `DirectionalLight`, or `Spatial.environment` |
 | `Sprite`, `Points`, `Line`, `LineSegments` | `ParticleEmitter` for points; thin boxes or cylinders for lines; a `billboard` plane for sprites |
-| `SkinnedMesh`, morph targets | load a rigged asset and use `assetGroup.playAnimation(...)` |
-| audio, video | not available |
-| character controller, force effects, scene understanding, game controllers | not available |
-| multiple materials per mesh | split the mesh, or bake into one material |
+| skinned mesh **authoring**, morph target **authoring** | load a rigged asset and drive `asset.skeleton` / `asset.blendShapes` |
 | `Scene.background`, `Scene.fog` | throw; use `Spatial.environment` for lighting |
 | texture compression formats | supply PNG/JPEG |
 
-Three exceptions throw instead of being absent, because a silent no-op would
-be invisible: `Scene.background`, `Scene.environment`, `Scene.fog`, and
-`Mesh.material = [...]`.
+`Scene.background`, `Scene.environment` and `Scene.fog` throw instead of being
+absent, because a silent no-op there would be invisible.
+
+**Phase 2 shipped nine things this table used to send you around.** If you are
+working from older notes, these all exist now:
+
+| Was "not available" | Now |
+|---|---|
+| cameras and camera control | `PerspectiveCamera`, `OrthographicCamera`, `Spatial.camera` (not on visionOS) |
+| audio | `Spatial.audio`, `Audio`, `PositionalAudio`, `AmbientAudio`, `AudioLoader` |
+| video | `VideoScreen` with `mp4`/`hls`/`webm` |
+| character controller | `object.characterController = new CharacterController(...)` |
+| force effects | `ConstantForceField`, `RadialForceField`, `VortexForceField`, `DragForceField`, `TurbulenceForceField` |
+| scene understanding | `Spatial.sceneUnderstanding` (visionOS) |
+| game controllers | `Spatial.input.controllers`, `Spatial.inject.controller` |
+| multiple materials per mesh | `new Mesh(geometry, materials[])` with `geometry.groups` — **`Mesh.material = [...]` no longer throws** |
+| posing a loaded rig | `asset.skeleton`, `asset.blendShapes` |
+
+Plus things three.js has no equivalent for at all: a two-way host channel
+(`Spatial.host`), consumer-performed `Spatial.fetchText`/`fetchJSON`, activation
+hooks and hot reload with preserved state, accessibility metadata, and render
+and debug options. See [API.md phase 2](./API.md#phase-2).
 
 ## 11. Normalisation rules
 
