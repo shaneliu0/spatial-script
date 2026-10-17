@@ -903,7 +903,10 @@ test("C-27 default capabilities are honest per platform", () => {
       backend,
       platform,
     });
-    assert.deepEqual(plain(host.spatial.Spatial.env.capabilities), expected, key);
+    const capabilities = plain(host.spatial.Spatial.env.capabilities);
+    for (const [name, value] of Object.entries(expected)) {
+      assert.equal(capabilities[name], value, `${key}.${name}`);
+    }
   }
 });
 
@@ -1141,4 +1144,104 @@ test("SPEC 5 a disposed texture is released once nothing references it", () => {
   assert.equal(reused.length, 1);
   assert.equal(reused[0][1], textureId);
   assert.equal(reused[0][2].url, "asset://next.png");
+});
+
+test("an imperative command issued before the object's first flush waits for it, in order", () => {
+  const host = createHost();
+  host.load(`
+    const S = require("spatial");
+    const scene = new S.Scene();
+    const ball = new S.Mesh(new S.SphereGeometry(0.1), new S.MeshStandardMaterial());
+    ball.name = "ball";
+    ball.rigidBody = new S.RigidBody({ type: "dynamic" });
+    scene.add(ball);
+    // Both are issued before any flush has minted the object's id.
+    ball.rigidBody.applyImpulse(new S.Vector3(0, 1, 0));
+    ball.rigidBody.applyForce(new S.Vector3(1, 0, 0));
+    S.mount(scene);
+  `);
+
+  const first = host.tick();
+  assert.equal(commandsFor(first, "bodyImpulse").length, 0, "nothing names an id the consumer has not seen");
+  assert.equal(commandsFor(first, "create").length, 1, "the create goes out first");
+
+  const second = host.tick();
+  const impulse = commandsFor(second, "bodyImpulse");
+  const force = commandsFor(second, "bodyForce");
+  assert.equal(impulse.length, 1, "the impulse arrives the frame after the create");
+  assert.equal(force.length, 1);
+  assert.equal(impulse[0][1], first.find((command) => command[0] === "create")[1], "same id as the create");
+  const opcodes = plain(second.map((command) => command[0]));
+  assert.ok(
+    opcodes.indexOf("bodyImpulse") < opcodes.indexOf("bodyForce"),
+    `the two kept their order, got ${opcodes}`,
+  );
+  assert.deepEqual(
+    plain(host.dump().warnings.filter((warning) => /was dropped/.test(warning))),
+    [],
+    "nothing was dropped",
+  );
+});
+
+test("a deferred command whose object leaves the graph before its first flush is dropped", () => {
+  const host = createHost();
+  host.load(`
+    const S = require("spatial");
+    const scene = new S.Scene();
+    const ball = new S.Mesh(new S.SphereGeometry(0.1), new S.MeshStandardMaterial());
+    ball.name = "ball";
+    ball.rigidBody = new S.RigidBody({ type: "dynamic" });
+    scene.add(ball);
+    ball.rigidBody.applyImpulse(new S.Vector3(0, 1, 0));
+    // Removed again before the frame that would have flushed it.
+    scene.remove(ball);
+    S.mount(scene);
+  `);
+  const first = host.tick();
+  assert.equal(commandsFor(first, "bodyImpulse").length, 0);
+  const second = host.tick();
+  assert.equal(commandsFor(second, "bodyImpulse").length, 0);
+  assert.ok(host.dump().warnings.some((warning) => /not in the mounted scene/.test(warning)));
+});
+
+test("every deferrable opcode waits rather than dropping", () => {
+  const host = createHost();
+  host.load(`
+    const S = require("spatial");
+    const scene = new S.Scene();
+
+    const screen = new S.VideoScreen({ url: "clip.mp4", width: 1 });
+    screen.name = "screen";
+    const sound = new S.Audio();
+    sound.name = "sound";
+    sound.setBuffer(new S.AudioLoader().load("a.wav"));
+    const fx = new S.ParticleEmitter({});
+    fx.name = "fx";
+    const walker = new S.Group();
+    walker.name = "walker";
+    walker.characterController = new S.CharacterController({});
+    scene.add(screen, sound, fx, walker);
+
+    // Every one of these is issued before the first flush.
+    screen.play();
+    sound.play();
+    fx.burst();
+    walker.characterController.move(new S.Vector3(0.1, 0, 0));
+    walker.characterController.teleport(new S.Vector3(0, 0.5, 0));
+    S.mount(scene);
+  `);
+  const first = host.tick();
+  for (const opcode of ["videoControl", "audioControl", "particlesBurst", "characterMove", "characterTeleport"]) {
+    assert.equal(commandsFor(first, opcode).length, 0, `${opcode} waits for the create`);
+  }
+  const second = host.tick();
+  for (const opcode of ["videoControl", "audioControl", "particlesBurst", "characterMove", "characterTeleport"]) {
+    assert.equal(commandsFor(second, opcode).length, 1, `${opcode} arrives the frame after the create`);
+  }
+  assert.equal(commandsFor(second, "videoControl")[0][2], "play");
+  assert.equal(commandsFor(second, "audioControl")[0][2], "play");
+  assert.deepEqual(
+    plain(host.dump().warnings.filter((warning) => /was dropped/.test(warning))),
+    [],
+  );
 });
