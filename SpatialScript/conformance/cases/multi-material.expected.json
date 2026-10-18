@@ -4,22 +4,44 @@
       "count": 2,
       "isArray": true,
       "singleIsArray": false,
-      "groups": [[0, 18, 0], [18, 18, 1]]
+      "groups": [
+        [
+          0,
+          18,
+          0
+        ],
+        [
+          18,
+          18,
+          1
+        ]
+      ],
+      "warnings": 2
     }
   },
   "objects": [
     {
       "name": "two-tone",
-      "geometry": { "type": "BoxGeometry" },
+      "geometry": {
+        "type": "BoxGeometry"
+      },
       "material": [
         {
           "type": "MeshStandardMaterial",
-          "color": [1, 0, 0],
+          "color": [
+            1,
+            0,
+            0
+          ],
           "roughness": 0.3
         },
         {
           "type": "MeshStandardMaterial",
-          "color": [0, 1, 0],
+          "color": [
+            0,
+            1,
+            0
+          ],
           "metalness": 0.8
         }
       ]
@@ -28,8 +50,46 @@
       "name": "single",
       "material": {
         "type": "MeshStandardMaterial",
-        "color": [0, 1, 0]
+        "color": [
+          0,
+          1,
+          0
+        ]
       }
+    },
+    {
+      "name": "too-many",
+      "material": [
+        {
+          "type": "MeshStandardMaterial"
+        },
+        {
+          "type": "MeshStandardMaterial"
+        }
+      ]
+    },
+    {
+      "name": "too-few",
+      "material": [
+        {
+          "type": "MeshStandardMaterial",
+          "color": [
+            0.0331,
+            0.1329,
+            0.3185
+          ]
+        },
+        {
+          "type": "MeshStandardMaterial"
+        },
+        {
+          "type": "MeshStandardMaterial"
+        }
+      ]
     }
+  ],
+  "warnings": [
+    "carries 3 materials but its geometry groups ask for 2",
+    "asking for 3 materials but carries 1"
   ]
 }

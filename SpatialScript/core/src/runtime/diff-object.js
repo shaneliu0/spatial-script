@@ -5,8 +5,8 @@
 // and kind-specific state. Each appends to the frame's named command batch.
 // This is the hot path, so it keeps plain locals and captured builtins.
 
-import { SpatialUnsupportedError } from "../errors.js";
-import { hasShear, takeRawMatrix, markRawMatrix } from "../object-extensions.js";
+import { SpatialUnsupportedError } from "../util/errors.js";
+import { hasShear, takeRawMatrix, markRawMatrix } from "../scene/object-extensions.js";
 import {
   DIRTY,
   DIRTY_NAME,
@@ -19,15 +19,21 @@ import {
   DIRTY_MATERIAL,
   DIRTY_LIGHT,
   DIRTY_FEATURE,
-} from "../object-extensions.js";
-import { createSnapshot, lightSnapshot, lightSnapshotEquals, geometryPayload } from "../diff.js";
-import { kindFor, entryForKind } from "../kinds.js";
-import { GEOMETRY_REVISION } from "../diff.js";
-import { SUBSTITUTED } from "../scene-classes.js";
-import { rigidBodyJSONEquals } from "../physics.js";
-import { MATERIAL_FRAME, MATERIAL_PAYLOAD } from "../materials.js";
-import { labelFor } from "../sanitize.js";
-import { push } from "../builtins.js";
+} from "../scene/object-extensions.js";
+import { createSnapshot, lightSnapshot, lightSnapshotEquals, geometryPayload } from "../util/diff.js";
+import { kindFor, entryForKind } from "../util/kinds.js";
+import { GEOMETRY_REVISION } from "../util/diff.js";
+import { SUBSTITUTED } from "../scene/scene-classes.js";
+import { rigidBodyJSONEquals } from "../physics/physics.js";
+import {
+  MATERIAL_FRAME,
+  MATERIAL_PAYLOAD,
+  materialForSlot,
+  materialSlotCount,
+} from "../materials/materials.js";
+import { labelFor } from "../util/sanitize.js";
+import { MAX_PARAMETER_STRING } from "../util/limits.js";
+import { push } from "../util/builtins.js";
 import { SNAPSHOT, TRANSFORM_RECORD } from "./state.js";
 import { featuresFor, diffFeatures } from "./features.js";
 import { shallowJSONEquals, copyLightSnapshot } from "./payloads.js";
@@ -45,6 +51,9 @@ export function diffObject(runtime, object, parentId, parentDirty, frame, out) {
     let snapshot = object[SNAPSHOT];
     if (snapshot === undefined) {
       snapshot = runtime.createSnapshotFor(object);
+      // The id space is exhausted: this object is not tracked, and neither is
+      // anything under it (SPEC 2, FA-47).
+      if (snapshot === null) return null;
       push(out.create, ["create", snapshot.id, snapshot.kind, runtime.wireName(object)]);
     } else if (snapshot.liveFrame === frame) {
       return null;
@@ -326,8 +335,26 @@ export function diffObject(runtime, object, parentId, parentDirty, frame, out) {
               `Mesh ${label} was created without a geometry; an empty BufferGeometry was substituted`,
             );
           }
+          // A geometry with no vertices draws nothing on either backend; the
+          // core says so once here so neither consumer has to (SPEC 12).
+          const positions = snapshot.positionAttribute;
+          if (geometry[SUBSTITUTED] !== "geometry" && (positions === null || positions.count === 0)) {
+            const label = object.name ? `"${object.name}"` : object.type;
+            runtime.warnOnce(
+              `empty-geometry:${geometry.uuid}`,
+              `Mesh ${label} has a ${geometry.type} with no vertices and draws nothing`,
+            );
+          }
           const dropped = [];
-          const payload = geometryPayload(geometry, dropped);
+          const truncated = [];
+          const payload = geometryPayload(geometry, dropped, truncated);
+          if (truncated.length > 0) {
+            runtime.warnOnce(
+              `geometry-parameter-length:${geometry.uuid}`,
+              `${geometry.type} parameter ${truncated.join(", ")} was longer than ` +
+                `${MAX_PARAMETER_STRING} characters and was truncated on the wire`,
+            );
+          }
           if (dropped.length > 0) {
             runtime.warnOnce(
               `geometry-parameters:${geometry.uuid}`,
@@ -335,14 +362,16 @@ export function diffObject(runtime, object, parentId, parentDirty, frame, out) {
                 "stream can carry and were dropped",
             );
           }
-          // A parametric geometry the consumer has already built for this uuid
-          // and revision needs no buffers: both consumers key their mesh cache
-          // on the descriptor and skip the upload (PERF-06).
+          // A geometry the consumer has already been given at this uuid and
+          // revision needs no buffers again — a hand-built BufferGeometry as
+          // much as a parametric one, which is what makes 1500 meshes sharing
+          // one 20,000-vertex geometry one upload instead of 1500 (SPEC 5).
+          // A new revision carries its buffers, and the delivered record is
+          // refcounted by live users, so a geometry whose last user goes away
+          // is described in full again.
           const descriptor = payload.descriptor;
           runtime.noteGeometryUse(snapshot, descriptor.uuid);
-          const reusable =
-            descriptor.parameters !== null &&
-            runtime.sentGeometry.get(descriptor.uuid) === descriptor.revision;
+          const reusable = runtime.sentGeometry.get(descriptor.uuid) === descriptor.revision;
           if (reusable) {
             push(out.object, ["geometry", id, descriptor, null, null, null, null]);
           } else {
@@ -381,7 +410,7 @@ export function diffObject(runtime, object, parentId, parentDirty, frame, out) {
         let changed = !Array.isArray(previous) || previous.length !== wanted;
         const next = [];
         for (let i = 0; i < wanted; i += 1) {
-          const entry = material[i < material.length ? i : material.length - 1];
+          const entry = materialForSlot(material, i);
           if (entry === null || entry === undefined) {
             next[i] = null;
           } else {
@@ -434,8 +463,13 @@ export function diffObject(runtime, object, parentId, parentDirty, frame, out) {
         const next = lightSnapshot(object, runtime.boundWarnOnce, runtime.lightScratch);
         if (next !== null && !lightSnapshotEquals(snapshot.light, next)) {
           snapshot.light = copyLightSnapshot(next);
-          if (object.isPointLight && object.castShadow) {
-            runtime.warnOnce("pointlight-shadow", "PointLight shadows are unsupported; castShadow is ignored");
+          // RealityKit has no point-light shadow; three.js renders one, so
+          // the warning belongs to that backend only (FA-21).
+          if (object.isPointLight && object.castShadow && runtime.env.backend === "realitykit") {
+            runtime.warnOnce(
+              "pointlight-shadow",
+              "PointLight shadows are unsupported in RealityKit; castShadow is ignored",
+            );
           }
           push(out.object, ["light", id, snapshot.light]);
         }
@@ -481,13 +515,21 @@ export function diffObject(runtime, object, parentId, parentDirty, frame, out) {
         const groundingShadow = object.groundingShadow;
         if (snapshot.groundingShadow !== groundingShadow) {
           snapshot.groundingShadow = groundingShadow;
-          if (groundingShadow && runtime.env.backend === "three") {
+          // SPEC 3.2: meshes only. On anything else it is kept in the dump and
+          // reported, but never sent (FA-48).
+          if (groundingShadow && !snapshot.isMesh) {
+            runtime.warnOnce(
+              `grounding-shadow-nonmesh:${object.uuid}`,
+              `Object3D.groundingShadow applies to a Mesh; ${labelFor(object)} is a ${object.type} ` +
+                "and it was ignored",
+            );
+          } else if (groundingShadow && runtime.env.backend === "three") {
             runtime.warnOnce(
               "groundingShadow-web",
               "Object3D.groundingShadow is unsupported on the three.js backend",
             );
           }
-          push(out.object, ["groundingShadow", id, groundingShadow]);
+          if (snapshot.isMesh) push(out.object, ["groundingShadow", id, groundingShadow]);
         }
 
         const hoverEffect = object.hoverEffect;
@@ -603,23 +645,16 @@ export function diffObject(runtime, object, parentId, parentDirty, frame, out) {
    */
 
 /**
- * How many material slots the emitted array needs: one per material, extended
- * to cover the highest `materialIndex` the geometry's groups ask for. The
- * mismatch is warned about once per mesh, naming both counts, so every
- * consumer draws the same thing instead of inventing a fallback (P2-B-17).
+ * The slot count the wire carries, and the one-time diagnostic when the mesh
+ * and its geometry disagree about how many materials there are (P2-B-17,
+ * FA-09). The count itself is shared with the dump so both describe the same
+ * mesh.
  */
 function materialSlotsWanted(runtime, object, materials) {
-  const geometry = object.geometry;
-  const groups = geometry === null || geometry === undefined ? null : geometry.groups;
-  if (!Array.isArray(groups) || groups.length === 0) return materials.length;
+  const wanted = materialSlotCount(object, materials);
+  if (wanted === materials.length) return wanted;
 
-  let highest = -1;
-  for (let i = 0; i < groups.length; i += 1) {
-    const index = groups[i] === null || groups[i] === undefined ? 0 : groups[i].materialIndex | 0;
-    if (index > highest) highest = index;
-  }
-  if (highest < materials.length) return materials.length;
-
+  const groups = object.geometry === null || object.geometry === undefined ? [] : object.geometry.groups;
   if (materials.length === 0) {
     runtime.warnOnce(
       `material-groups:${object.uuid}`,
@@ -628,10 +663,18 @@ function materialSlotsWanted(runtime, object, materials) {
     );
     return 0;
   }
+  if (wanted > materials.length) {
+    runtime.warnOnce(
+      `material-groups:${object.uuid}`,
+      `${labelFor(object)} has geometry groups asking for ${wanted} materials but carries ` +
+        `${materials.length}; the last material was repeated for the rest`,
+    );
+    return wanted;
+  }
   runtime.warnOnce(
     `material-groups:${object.uuid}`,
-    `${labelFor(object)} has geometry groups asking for ${highest + 1} materials but carries ` +
-      `${materials.length}; the last material was repeated for the rest`,
+    `${labelFor(object)} carries ${materials.length} materials but its geometry groups ask for ` +
+      `${wanted}; the extra materials were ignored`,
   );
-  return highest + 1;
+  return wanted;
 }

@@ -36,7 +36,7 @@ THE SOFTWARE.
 
 ## Helvetiker Regular typeface
 
-`core/src/fonts/helvetiker_regular.typeface.json` is the default font used by
+`core/src/scene/fonts/helvetiker_regular.typeface.json` is the default font used by
 `TextGeometry`. It is the typeface.json conversion of MgOpen Helvetiker that
 ships with the three.js examples.
 

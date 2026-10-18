@@ -328,7 +328,7 @@ test("ROBUST-08 a throwing toString logs a placeholder instead of throwing", () 
   assert.match(log[3], /tick \[unstringifiable object\]/);
 });
 
-test("ROBUST-09 an error that varies per frame is throttled on its shape", () => {
+test("ROBUST-09 an error that varies per frame cannot flood the channel", () => {
   const host = createHost();
   host.load(`
     const S = require("spatial");
@@ -337,10 +337,17 @@ test("ROBUST-09 an error that varies per frame is throttled on its shape", () =>
     S.onFrame(() => { throw new Error("frame boom " + S.time.frame + " at " + Math.random()); });
     S.mount(scene);
   `);
-  for (let i = 0; i < 60; i += 1) host.tick();
+  // 55 frames at 1/60 s stay inside one second of scene time (SPEC 3.13).
+  for (let i = 0; i < 55; i += 1) host.tick();
   const dump = host.dump();
-  assert.equal(dump.errors.length, 1, `the varying message must collapse, got ${dump.errors.length}`);
-  assert.ok(host.spatial.runtime.errorTimes.size <= 4);
+  // SPEC 3.13 keys the throttle on the exact message, so a message that is
+  // never twice the same is bounded by the per-second cap instead (FA-42).
+  assert.ok(dump.errors.length <= 21, `the flood must be bounded, got ${dump.errors.length}`);
+  assert.ok(
+    dump.errors.some((error) => /distinct errors in one second/.test(error)),
+    "the drop is reported rather than silent",
+  );
+  assert.ok(host.spatial.runtime.errorTimes.size <= 80);
 });
 
 // ------------------------------------------------------------------ ROBUST-10
@@ -371,4 +378,41 @@ test("ROBUST-10 a throwing Proxy trap during add is recorded", () => {
     dump.errors.some((entry) => /could not inspect "proxied"/.test(entry)),
     `expected a diagnostic, got ${JSON.stringify(dump.errors)}`,
   );
+});
+
+test("ROBUST-13 a hand-built geometry with no vertices warns once from the core", () => {
+  const host = createHost();
+  host.load(`
+    const S = require("spatial");
+    const scene = new S.Scene();
+    const empty = new S.Mesh(new S.BufferGeometry(), new S.MeshStandardMaterial());
+    empty.name = "hollow";
+    scene.add(empty);
+    S.mount(scene);
+  `);
+  host.tick();
+  host.tick();
+  const warnings = host.dump().warnings.filter((w) => /"hollow" has a BufferGeometry with no vertices/.test(w));
+  assert.equal(warnings.length, 1, `one warning for the empty geometry, got ${JSON.stringify(host.dump().warnings)}`);
+});
+
+test("ROBUST-14 a geometry parameter string longer than the wire limit warns once and is truncated", () => {
+  const host = createHost();
+  host.load(`
+    const S = require("spatial");
+    const scene = new S.Scene();
+    const label = new S.Mesh(new S.TextGeometry("t".repeat(600), { size: 0.02, depth: 0.004 }), new S.MeshStandardMaterial());
+    label.name = "long";
+    scene.add(label);
+    S.mount(scene);
+  `);
+  const commands = host.tick();
+  host.tick();
+  const dump = host.dump();
+  const warnings = dump.warnings.filter((w) => /parameter text was longer than 256 characters and was truncated/.test(w));
+  assert.equal(warnings.length, 1, `one truncation warning, got ${JSON.stringify(dump.warnings)}`);
+  // The dump reports the script's own parameters; the wire is what is capped.
+  const wire = commandsFor(commands, "geometry")[0][2].parameters.text;
+  assert.equal(wire.length, 256, "the wire carries exactly the cap");
+  assert.equal(dump.objects.find((o) => o.name === "long").geometry.parameters.text.length, 600, "the script keeps its own text");
 });

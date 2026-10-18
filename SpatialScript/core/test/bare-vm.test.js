@@ -17,18 +17,22 @@ test("the bundle evaluates in a bare context with only globalThis and __spatialN
   };
   const context = createBareContext(native);
 
-  // Any read of a browser global must throw, so an accidental reference at
-  // load time or during tick fails loudly instead of silently no-oping.
+  // Recording getters, not throwing ones: a throw out of a getter on a
+  // contextified global proxy is swallowed by V8, so a guard built on it can
+  // never fail. What the core touched is asserted directly instead (FA-12).
+  const reads = [];
   for (const name of FORBIDDEN) {
     Object.defineProperty(context, name, {
-      configurable: false,
+      configurable: true,
       get() {
-        throw new Error(`the core must not reference ${name}`);
+        reads.push(name);
+        return undefined;
       },
     });
   }
 
   vm.runInContext(bundleSource, context, { filename: "spatial-core.js" });
+  assert.deepEqual(reads, [], `the bundle read a browser global at load: ${reads.join(", ")}`);
   assert.equal(typeof context.__spatial, "object");
   assert.equal(typeof context.__spatial.load, "function");
   assert.equal(typeof context.__spatial.tick, "function");
@@ -78,6 +82,7 @@ test("the bundle evaluates in a bare context with only globalThis and __spatialN
   `;
 
   context.__spatial.load(source, { backend: "realitykit", platform: "visionos" });
+  assert.deepEqual(reads, [], `the core read a browser global at script load: ${reads.join(", ")}`);
   for (let i = 0; i < 5; i += 1) {
     const commands = context.__spatial.tick(1 / 60);
     assert.ok(Array.isArray(commands) || commands.length >= 0);
@@ -88,6 +93,7 @@ test("the bundle evaluates in a bare context with only globalThis and __spatialN
   assert.equal(dump.objects.length, 7);
   assert.deepEqual(plain(dump.errors), []);
   context.__spatial.dispose();
+  assert.deepEqual(reads, [], `the core read a browser global during tick: ${reads.join(", ")}`);
 });
 
 test("the bundle source contains no top-level browser global references", () => {

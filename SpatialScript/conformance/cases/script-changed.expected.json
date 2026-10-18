@@ -6,6 +6,6 @@
     }
   },
   "loadGeneration": 2,
-  "objects": [{ "name": "marker" }],
+  "objects": [{ "name": "marker", "type": "Mesh", "parent": 0, "geometry": { "type": "BoxGeometry" } }],
   "errors": []
 }

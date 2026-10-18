@@ -2,6 +2,9 @@ const Spatial = require("spatial");
 const S = Spatial;
 
 const scene = new S.Scene();
+// A light keeps every consumer's no-lights warning out of a case that asserts
+// its warning list exactly.
+scene.add(new S.AmbientLight(0xffffff, 1));
 
 const material = new S.MeshStandardMaterial({ color: 0x808080 });
 material.opacity = 0.5;

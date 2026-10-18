@@ -16,7 +16,7 @@
         }
       },
       "video": {
-        "url": "assets/videos/clip.mp4",
+        "url": "asset://spatial-bars.mp4",
         "width": 1.6,
         "height": 0.9,
         "loop": true,
@@ -26,15 +26,13 @@
         "volume": 1,
         "rate": 1,
         "playing": true,
-        "currentTime": 0,
-        "duration": 0,
         "error": null
       },
       "userData": {
         "width": 1.6,
         "height": 0.9,
         "docking": true,
-        "url": "assets/videos/clip.mp4",
+        "url": "asset://spatial-bars.mp4",
         "isMesh": true,
         "autoplaying": true,
         "raycastHit": "screen"

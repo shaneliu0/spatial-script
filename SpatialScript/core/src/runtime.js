@@ -7,13 +7,13 @@ import {
   Raycaster,
   AdditiveBlending,
   PerspectiveCamera,
-} from "./three-exports.js";
+} from "./util/three-exports.js";
 import {
   SpatialLoadError,
   cleanMessage,
   extractLocation,
   probeLineOffset,
-} from "./errors.js";
+} from "./util/errors.js";
 import {
   installObjectExtensions,
   dispatchBubbling,
@@ -33,8 +33,8 @@ import {
   DIRTY_RIGIDBODY,
   DIRTY_MATERIAL,
   DIRTY_LIGHT,
-} from "./object-extensions.js";
-import { constructedScenes, resetConstructedScenes } from "./scene-classes.js";
+} from "./scene/object-extensions.js";
+import { constructedScenes, resetConstructedScenes } from "./scene/scene-classes.js";
 import {
   materialSnapshot,
   materialSnapshotEquals,
@@ -44,12 +44,12 @@ import {
   MATERIAL_PAYLOAD,
   MATERIAL_RAW,
   UNTRACKED_PROPERTIES,
-} from "./materials.js";
-import { PhysicsWorld, rigidBodyJSONEquals, jointJSONEquals } from "./physics.js";
-import { Anchor, anchorJSONEquals } from "./anchor.js";
-import { portalJSONEquals } from "./portal.js";
-import { SUBSTITUTED } from "./scene-classes.js";
-import { vector3Array, trsIsValid, cappedName, labelFor, jsonSafe } from "./sanitize.js";
+} from "./materials/materials.js";
+import { PhysicsWorld, rigidBodyJSONEquals, jointJSONEquals } from "./physics/physics.js";
+import { Anchor, anchorJSONEquals } from "./scene/anchor.js";
+import { portalJSONEquals } from "./scene/portal.js";
+import { SUBSTITUTED } from "./scene/scene-classes.js";
+import { vector3Array, trsIsValid, cappedName, labelFor, jsonSafe } from "./util/sanitize.js";
 import {
   MAX_NAME_LENGTH,
   MAX_LOG_MESSAGE,
@@ -60,30 +60,28 @@ import {
   MAX_DEFERRED_COMMANDS,
   MAX_INACTIVE_EVENTS,
   MAX_INACTIVE_SYNC_OBJECTS,
-} from "./limits.js";
-import { push, slice, safeString, safeStringify, cut } from "./builtins.js";
-import { InputState } from "./input.js";
-import { AudioMixer, Audio } from "./audio.js";
-import { VideoScreen } from "./video.js";
-import { HostChannel, FetchChannel } from "./host-channel.js";
-import { createCameraScratch, installCameraTracking, isCamera } from "./camera.js";
-import { installCharacterController } from "./character.js";
-import { TimerQueue } from "./timers.js";
+} from "./util/limits.js";
+import { push, slice, safeString, safeStringify, cut } from "./util/builtins.js";
+import { InputState } from "./input/input.js";
+import { AudioMixer, Audio } from "./media/audio.js";
+import { VideoScreen } from "./media/video.js";
+import { HostChannel, FetchChannel } from "./host/host-channel.js";
+import { createCameraScratch, installCameraTracking, isCamera } from "./scene/camera.js";
+import { installCharacterController } from "./physics/character.js";
+import { TimerQueue } from "./host/timers.js";
 import {
-  createSnapshot,
   installGeometryTracking,
   GEOMETRY_REVISION,
   lightSnapshot,
   lightSnapshotEquals,
   textureSnapshot,
   textureSnapshotEquals,
-  geometryPayload,
-} from "./diff.js";
-import { buildDump } from "./dump.js";
-import { kindFor } from "./kinds.js";
+} from "./util/diff.js";
+import { buildDump } from "./util/dump.js";
 import { SNAPSHOT, TRANSFORM_RECORD, createBatch, BATCH_ORDER } from "./runtime/state.js";
 import { shallowJSONEquals, copyLightSnapshot } from "./runtime/payloads.js";
 import { diffObject } from "./runtime/diff-object.js";
+import { createSnapshotFor, allocateSlot, noteGeometryUse, dropGeometryUser, releaseSnapshot } from "./runtime/slots.js";
 import { load, mount, destroy, DEFAULT_CAPABILITIES } from "./runtime/loading.js";
 import { tick } from "./runtime/frame.js";
 import { materialPayload } from "./runtime/material-cache.js";
@@ -121,6 +119,41 @@ import {
 // `Spatial` and `console` are installed as globals rather than passed as
 // parameters: a script is free to write `const Spatial = require("spatial")`
 // and a parameter of the same name would be a redeclaration error.
+/**
+ * Every event type a consumer may dispatch (SPEC 6, extended by SPEC 14.13).
+ * The list is closed: anything else is dropped with a warning.
+ */
+const DISPATCH_TYPES = new Set([
+  // 3.8 input and interaction
+  "tap",
+  "hoverenter",
+  "hoverexit",
+  "dragstart",
+  "drag",
+  "dragend",
+  "manipulationstart",
+  "manipulation",
+  "manipulationend",
+  "collisionstart",
+  "collisionend",
+  // 3.11 / 3.12 anchors, assets, textures
+  "anchored",
+  "unanchored",
+  "assetLoaded",
+  "assetError",
+  "textureLoaded",
+  "textureError",
+  // 14.13 phase 2
+  "ended",
+  "loaded",
+  "error",
+  "controllerconnected",
+  "controllerdisconnected",
+  "hostResult",
+  "fetchResult",
+  "audioState",
+]);
+
 const SCRIPT_PARAMETERS = ["require", "module", "exports"];
 
 // The script body is evaluated as an async function so top-level await works
@@ -208,6 +241,9 @@ export class Runtime {
     this.errors = [];
     this.droppedErrors = 0;
     this.errorTimes = new Map();
+    this.errorWindowStart = 0;
+    this.errorWindowCount = 0;
+    this.errorWindowReported = false;
 
     this.physics = new PhysicsWorld();
     this.gravitySnapshot = null;
@@ -281,6 +317,7 @@ export class Runtime {
     // up even with matrixAutoUpdate left on (SPEC 3.2).
     this.mtx = new Float64Array(16 * 256);
     this.freeIds = [];
+    this.idsExhausted = false;
     this.droppedErrors = 0;
     // Bound once so the hot path never allocates a closure.
     this.boundTextureIdFor = (texture) => this.textureIdFor(texture);
@@ -445,6 +482,16 @@ export class Runtime {
   }
 
   dispatch(type, id, payload) {
+    // SPEC 6 and 14.13 close the list: an unknown type is a typo or a version
+    // skew, and delivering it silently makes that undiagnosable (AR-29).
+    if (!DISPATCH_TYPES.has(type)) {
+      this.warnOnce(
+        `dispatch-type:${safeString(type)}`,
+        `dispatch("${safeString(type)}") is not one of the event types the protocol defines; ` +
+          "the event was dropped",
+      );
+      return;
+    }
     // Nothing drains the queue while the scene is inactive, so the backlog is
     // capped and the overflow is reported rather than delivered in one frame
     // once the view comes back (SPEC 14.10, P2-B-05).
@@ -503,86 +550,23 @@ export class Runtime {
   }
 
   createSnapshotFor(object) {
-    const id = this.idForObject(object);
-    const snapshot = createSnapshot(id, this.allocateSlot(), kindFor(object), object.isLight === true);
-    // `create` already carries the name, so record it as flushed.
-    snapshot.name = object.name;
-    object[SNAPSHOT] = snapshot;
-    this.snapshots.set(object, snapshot);
-    snapshot.index = this.trackedSnapshots.length;
-    push(this.trackedSnapshots, snapshot);
-    return snapshot;
+    return createSnapshotFor(this, object);
   }
 
   allocateSlot() {
-    let slot;
-    if (this.freeSlots.length > 0) {
-      slot = this.freeSlots.pop();
-    } else {
-      slot = this.slotCount;
-      this.slotCount += 1;
-      const needed = (slot + 1) * 10;
-      if (needed > this.trs.length) {
-        const grown = new Float64Array(Math.max(this.trs.length * 2, needed));
-        grown.set(this.trs);
-        this.trs = grown;
-      }
-      const matrixNeeded = (slot + 1) * 16;
-      if (matrixNeeded > this.mtx.length) {
-        const grownMatrix = new Float64Array(Math.max(this.mtx.length * 2, matrixNeeded));
-        grownMatrix.set(this.mtx);
-        this.mtx = grownMatrix;
-      }
-    }
-    // NaN never equals anything, so a fresh slot always reads as changed.
-    const base = slot * 10;
-    for (let i = 0; i < 10; i += 1) this.trs[base + i] = NaN;
-    const matrixBase = slot * 16;
-    for (let i = 0; i < 16; i += 1) this.mtx[matrixBase + i] = NaN;
-    return slot;
+    return allocateSlot(this);
   }
 
-  /**
-   * Records that this object is one of the live users of `uuid`. Moving to a
-   * different geometry releases the previous one first.
-   */
   noteGeometryUse(snapshot, uuid) {
-    const previous = snapshot.geometryUuid;
-    if (previous === uuid) return;
-    if (previous !== null) this.dropGeometryUser(previous);
-    snapshot.geometryUuid = uuid;
-    const users = this.geometryUsers.get(uuid);
-    this.geometryUsers.set(uuid, users === undefined ? 1 : users + 1);
+    noteGeometryUse(this, snapshot, uuid);
   }
 
-  /** Drops one user of `uuid`, forgetting the delivery when the last one goes. */
   dropGeometryUser(uuid) {
-    const users = this.geometryUsers.get(uuid);
-    if (users === undefined) return;
-    if (users > 1) {
-      this.geometryUsers.set(uuid, users - 1);
-      return;
-    }
-    this.geometryUsers.delete(uuid);
-    this.sentGeometry.delete(uuid);
+    dropGeometryUser(this, uuid);
   }
 
   releaseSnapshot(object, snapshot) {
-    if (snapshot.geometryUuid !== null) {
-      this.dropGeometryUser(snapshot.geometryUuid);
-      snapshot.geometryUuid = null;
-    }
-    this.snapshots.delete(object);
-    object[SNAPSHOT] = undefined;
-    push(this.freeSlots, snapshot.slot);
-    if (snapshot.parentId === -1) this.detachedCount -= 1;
-    // Swap-remove keeps the tracked array compact without shifting.
-    const tracked = this.trackedSnapshots;
-    const last = tracked.pop();
-    if (last !== snapshot) {
-      tracked[snapshot.index] = last;
-      last.index = snapshot.index;
-    }
+    releaseSnapshot(this, object, snapshot);
   }
 
   /**

@@ -1,17 +1,17 @@
 // The frame order of SPEC section 2: apply sync, apply input and dispatch
 // queued events, run timers, run the script callbacks, then diff and flush.
 
-import { push } from "../builtins.js";
-import { Vector3, Quaternion, Matrix4 } from "../three-exports.js";
-import { SpatialUnsupportedError } from "../errors.js";
-import { dispatchBubbling, worldToLocalMatrix, isDestroyed, DIRTY, DIRTY_FEATURE } from "../object-extensions.js";
+import { push } from "../util/builtins.js";
+import { Vector3, Quaternion, Matrix4 } from "../util/three-exports.js";
+import { SpatialUnsupportedError } from "../util/errors.js";
+import { dispatchBubbling, worldToLocalMatrix, isDestroyed, DIRTY, DIRTY_FEATURE } from "../scene/object-extensions.js";
 import { isAttached } from "./resources.js";
-import { Controller } from "../input.js";
-import { MAX_DEFERRED_FRAMES } from "../limits.js";
-import { Skeleton, BlendShapes } from "../skeleton.js";
-import { Anchor } from "../anchor.js";
-import { AssetGroup } from "../asset.js";
-import { trsIsValid, labelFor } from "../sanitize.js";
+import { Controller } from "../input/input.js";
+import { MAX_DEFERRED_FRAMES } from "../util/limits.js";
+import { Skeleton, BlendShapes } from "../scene/skeleton.js";
+import { Anchor } from "../scene/anchor.js";
+import { AssetGroup } from "../scene/asset.js";
+import { trsIsValid, labelFor } from "../util/sanitize.js";
 import { SNAPSHOT } from "./state.js";
 
 const syncMatrix = new Matrix4();
@@ -51,7 +51,7 @@ export function tick(runtime, deltaTime) {
  * graph or was destroyed in between is dropped with the same warning it would
  * have had at the call (SPEC 5 ordering).
  */
-export function promoteDeferredCommands(runtime) {
+function promoteDeferredCommands(runtime) {
     const deferred = runtime.deferredCommands;
     if (deferred.length === 0) return;
     const frame = runtime.time.frame;
@@ -87,7 +87,7 @@ export function promoteDeferredCommands(runtime) {
     runtime.deferredCommands = kept;
   }
 
-export function applySync(runtime) {
+function applySync(runtime) {
     for (const records of runtime.pendingSync) {
       for (let i = 0; i + 11 <= records.length; i += 11) {
         const object = runtime.idObjects.get(records[i]);
@@ -188,7 +188,7 @@ export function applySync(runtime) {
  * and character controllers. Each record names an object the core tracks; an
  * unknown id or a malformed record is dropped like any other sync.
  */
-export function applyMediaSync(runtime) {
+function applyMediaSync(runtime) {
     for (const records of runtime.pendingAudioSync) {
       for (let i = 0; i + 4 <= records.length; i += 4) {
         const object = runtime.idObjects.get(records[i]);
@@ -241,7 +241,7 @@ export function applyMediaSync(runtime) {
   }
 
   /** One error per object until that object syncs cleanly again. */
-export function reportSync(runtime, object, detail) {
+function reportSync(runtime, object, detail) {
     if (runtime.syncedObjects.has(object)) return;
     runtime.syncedObjects.add(object);
     const label = object.name ? `"${object.name}"` : object.type;
@@ -254,7 +254,7 @@ export function reportSync(runtime, object, detail) {
     );
   }
 
-export function applyInputAndEvents(runtime) {
+function applyInputAndEvents(runtime) {
     runtime.input.beginFrame(runtime.pendingInput, runtime.injectedKeys, runtime.time.elapsed);
     runtime.pendingInput = null;
     runtime.injectedKeys.length = 0;
@@ -289,7 +289,7 @@ export function applyInputAndEvents(runtime) {
     }
   }
 
-export function deliverEvent(runtime, entry) {
+function deliverEvent(runtime, entry) {
     const { type, id } = entry;
 
     if (type === "textureLoaded" || type === "textureError") {
@@ -304,6 +304,9 @@ export function deliverEvent(runtime, entry) {
       } else {
         const message = (entry.payload && entry.payload.message) || "texture failed to load";
         texture.error = message;
+        // The platform's own words stay in `texture.error` and the event; the
+        // warning is the same line on every backend (SPEC 3.5).
+        runtime.warnOnce(`texture-failed:${id}`, `Texture "${texture.requestedUrl ?? texture.url}" failed to load`);
         const error = new Error(message);
         if (texture._onError) texture._onError(error);
         if (texture._promise) texture._promise.reject(error);
@@ -421,6 +424,8 @@ export function deliverEvent(runtime, entry) {
     }
 
     if (type === "assetError" && object instanceof AssetGroup) {
+      const requested = Object.values(object.urls || {}).filter(Boolean);
+      runtime.warnOnce(`asset-failed:${id}`, `Asset "${requested[0] ?? ""}" failed to load`);
       const error = new Error(payload.message || "asset failed to load");
       if (object._reject) {
         object._reject(error);
@@ -443,7 +448,7 @@ export function deliverEvent(runtime, entry) {
     }
   }
 
-export function hydratePayload(runtime, raw) {
+function hydratePayload(runtime, raw) {
     const payload = {};
     if (!raw || typeof raw !== "object") return payload;
     for (const key of Object.keys(raw)) {
@@ -459,7 +464,7 @@ export function hydratePayload(runtime, raw) {
     return payload;
   }
 
-export function runCallbacks(runtime, dt) {
+function runCallbacks(runtime, dt) {
     const script = runtime.script;
     if (script && typeof script.update === "function") {
       try {

@@ -2,9 +2,9 @@
 
 import { Runtime } from "./runtime.js";
 import { createNamespace } from "./namespace.js";
-import { installGlobals } from "./globals.js";
-import { setHost } from "./host.js";
-import { SpatialLoadError, SpatialUnsupportedError } from "./errors.js";
+import { installGlobals } from "./host/globals.js";
+import { setHost } from "./host/host.js";
+import { SpatialLoadError, SpatialUnsupportedError } from "./util/errors.js";
 
 const runtime = new Runtime();
 setHost(runtime);

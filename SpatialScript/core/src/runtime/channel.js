@@ -3,15 +3,16 @@
 // Everything a script can produce without bound is capped here: message
 // length, messages per frame, and the retained warning and error lists.
 
-import { cleanMessage, extractLocation } from "../errors.js";
+import { cleanMessage, extractLocation } from "../util/errors.js";
 import {
+  MAX_ERROR_MESSAGES_PER_SECOND,
   MAX_LOG_MESSAGE,
   MAX_LOGS_PER_FRAME,
   MAX_RECORDED_WARNINGS,
   MAX_RECORDED_ERRORS,
-} from "../limits.js";
-import { push, cut, safeString, safeStringify } from "../builtins.js";
-import { labelFor } from "../sanitize.js";
+} from "../util/limits.js";
+import { push, cut, safeString, safeStringify } from "../util/builtins.js";
+import { labelFor } from "../util/sanitize.js";
 
 export function log(runtime, level, args) {
     // Budgeted per frame: a noisy loop pays for one summary line, not for a
@@ -30,6 +31,12 @@ export function log(runtime, level, args) {
 
 export function warnOnce(runtime, key, message) {
     if (runtime.warned.has(key)) return;
+    // A consumer warning that repeats a line already recorded is one fact told
+    // twice: keep the list at one line per fact (SPEC 12, AR-36).
+    if (runtime.warnings.includes(message)) {
+      runtime.warned.add(key);
+      return;
+    }
     runtime.warned.add(key);
     runtime.recordWarning(message);
     if (runtime.logQueue.length < MAX_LOGS_PER_FRAME) push(runtime.logQueue, ["log", 0, "warn", message]);
@@ -71,13 +78,39 @@ export function reportOnce(runtime, error) {
    */
 export function reportError(runtime, error) {
     const message = describe(runtime, error, true);
-    // Throttle on a shape, not on the text: a message carrying a frame number
-    // or a coordinate would otherwise never repeat and never be throttled.
-    const key = throttleKey(message);
-    const now = runtime.now();
-    const previous = runtime.errorTimes.get(key);
+    // SPEC 3.13's rate limit: each unique message is reported at most once per
+    // second, keyed on the exact text, and at most
+    // MAX_ERROR_MESSAGES_PER_SECOND (20) distinct messages are reported in one
+    // second, so a message that never repeats cannot flood the channel. One
+    // line reports how many were dropped when that budget is spent, and
+    // `Spatial.limits` names the cap.
+    // The clock is scene time, not wall time, so a fixed-dt plan reports the
+    // same count on every backend however fast the renderer ran (SPEC 3.13).
+    const now = runtime.time.elapsed * 1000;
+    const previous = runtime.errorTimes.get(message);
     if (previous !== undefined && now - previous < 1000) return;
-    runtime.errorTimes.set(key, now);
+
+    if (now - runtime.errorWindowStart >= 1000) {
+      runtime.errorWindowStart = now;
+      runtime.errorWindowCount = 0;
+      runtime.errorWindowReported = false;
+      // The key set is only useful for a second, and an unbounded one would
+      // be a leak for a script that never repeats itself.
+      if (runtime.errorTimes.size > MAX_ERROR_MESSAGES_PER_SECOND * 4) runtime.errorTimes.clear();
+    }
+    runtime.errorWindowCount += 1;
+    if (runtime.errorWindowCount > MAX_ERROR_MESSAGES_PER_SECOND) {
+      if (!runtime.errorWindowReported) {
+        runtime.errorWindowReported = true;
+        recordError(
+          runtime,
+          `More than ${MAX_ERROR_MESSAGES_PER_SECOND} distinct errors in one second; ` +
+            "the rest of this second was dropped",
+        );
+      }
+      return;
+    }
+    runtime.errorTimes.set(message, now);
     recordError(runtime, message);
     if (runtime.logQueue.length < MAX_LOGS_PER_FRAME) push(runtime.logQueue, ["log", 0, "error", message]);
     else runtime.suppressedLogs += 1;
@@ -101,12 +134,7 @@ export function describe(runtime, error, withLocation) {
   // ------------------------------------------------------------------- load
 
 
-/** Digits and float literals collapse so "frame 12" and "frame 13" share a key. */
-function throttleKey(message) {
-  return cut(message.replace(/[0-9]+(\.[0-9]+)?/g, "#"), 80);
-}
-
-export function formatLogArguments(args) {
+function formatLogArguments(args) {
   const parts = [];
   for (const value of args) {
     if (typeof value === "string") {

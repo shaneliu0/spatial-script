@@ -17,7 +17,11 @@
       }
     },
     {
-      "name": "cube"
+      "name": "cube",
+      "type": "Mesh",
+      "geometry": {
+        "type": "BoxGeometry"
+      }
     }
   ]
 }

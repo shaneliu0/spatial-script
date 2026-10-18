@@ -18,7 +18,9 @@
       }
     },
     {
-      "name": "fx"
+      "name": "fx",
+      "type": "ParticleEmitter",
+      "parent": 0
     },
     {
       "name": "loose",

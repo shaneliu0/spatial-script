@@ -144,7 +144,44 @@ test("PERF-06 an edited BufferGeometry still carries its vertices", () => {
   `);
   assert.ok(commandsFor(host.tick(), "geometry")[0][3].length > 0);
   const edited = commandsFor(host.tick(), "geometry")[0];
-  assert.ok(edited[3] !== null && edited[3][0] === 0.5, "a plain BufferGeometry always ships its data");
+  assert.ok(edited[3] !== null && edited[3][0] === 0.5, "an edit is a new revision, so the data is sent");
+});
+
+test("PERF-06 meshes sharing one BufferGeometry upload it once", () => {
+  const host = createHost();
+  host.load(`
+    const S = require("spatial");
+    const scene = new S.Scene();
+    const geometry = new S.BufferGeometry();
+    const positions = new Float32Array(300);
+    for (let i = 0; i < 100; i += 1) positions[i * 3] = i * 0.001;
+    geometry.setAttribute("position", new S.Float32BufferAttribute(positions, 3));
+    const material = new S.MeshStandardMaterial();
+    for (let i = 0; i < 20; i += 1) {
+      const mesh = new S.Mesh(geometry, material);
+      mesh.name = "m" + i;
+      scene.add(mesh);
+    }
+    S.onFrame(() => {
+      if (S.time.frame === 2) {
+        // A new revision has to carry its buffers again.
+        geometry.getAttribute("position").array[0] = 0.5;
+        geometry.getAttribute("position").needsUpdate = true;
+      }
+    });
+    S.mount(scene);
+  `);
+  const first = commandsFor(host.tick(), "geometry");
+  assert.equal(first.length, 20, "every mesh is still described");
+  assert.equal(first.filter((command) => command[3] !== null).length, 1, "the vertices cross once");
+  assert.equal(first[0][3].length, 300, "and the first one carries them");
+  const uuids = new Set(first.map((command) => command[2].uuid));
+  assert.equal(uuids.size, 1, "they all name the same geometry");
+
+  const edited = commandsFor(host.tick(), "geometry");
+  assert.equal(edited.length, 20, "a new revision reaches every mesh");
+  assert.equal(edited.filter((command) => command[3] !== null).length, 1, "and crosses once again");
+  assert.equal(edited.find((command) => command[3] !== null)[3][0], 0.5);
 });
 
 test("PERF-06 the last user of a geometry being destroyed restores its buffers", () => {
@@ -348,14 +385,25 @@ test("PERF-02 dump options narrow the work a polling host pays for", () => {
   assert.ok(full.objects[0].userData.big.length === 200);
   assert.notEqual(full.objects[0].material, null);
 
+  // SPEC 3.13 licenses exactly two omissions: geometry parameters and
+  // userData. Everything else the full entry carries stays (FA-41).
   const compact = host.spatial.dump({ compact: true });
   assert.equal(compact.objects.length, 200);
   assert.equal(compact.objects[0].userData, undefined, "no userData");
-  assert.equal(compact.objects[0].material, undefined, "no material payload");
+  assert.ok(!("parameters" in compact.objects[0].geometry), "no geometry parameters key");
+  assert.equal(compact.objects[0].geometry.type, "BoxGeometry", "the geometry type stays");
+  assert.notEqual(compact.objects[0].material, undefined, "the material payload stays");
+  assert.equal(compact.objects[0].material.type, "MeshStandardMaterial");
+  assert.equal(compact.objects[0].light, null, "the light slot stays");
+  assert.equal(compact.objects[0].rigidBody, null);
+  assert.equal(compact.objects[0].opacity, 1);
+  assert.equal(compact.objects[0].billboard, false);
+  assert.equal(compact.objects[0].world, false);
+  assert.notEqual(compact.objects[0].interactive, undefined);
   assert.equal(compact.objects[1].position[0], 0.0012, "positions are rounded to four decimals");
   assert.ok(
-    JSON.stringify(compact).length < JSON.stringify(full).length / 2,
-    "compact is much smaller on the wire",
+    JSON.stringify(compact).length < JSON.stringify(full).length,
+    "compact is still smaller on the wire",
   );
 
   const summary = host.spatial.dump({ objects: false });
@@ -535,6 +583,7 @@ test("Spatial.limits names every enforced cap and cannot be edited", () => {
   const expected = [
     "MAX_CALLBACKS_PER_TICK",
     "MAX_DEPTH",
+    "MAX_ERROR_MESSAGES_PER_SECOND",
     "MAX_ID",
     "MAX_LISTENERS_PER_EVENT",
     "MAX_LIVE_FRAME_CALLBACKS",
@@ -549,6 +598,11 @@ test("Spatial.limits names every enforced cap and cannot be edited", () => {
   assert.equal(probe.userData.limits.MAX_ID, 1 << 24);
   assert.equal(probe.userData.limits.MAX_RECORDED_ERRORS, 200);
   assert.equal(probe.userData.limits.MAX_RECORDED_WARNINGS, 500);
+  assert.equal(
+    probe.userData.limits.MAX_ERROR_MESSAGES_PER_SECOND,
+    20,
+    "the error rate limit SPEC 3.13 states is readable, not hidden",
+  );
   assert.ok(probe.userData.frozen, "the object stays frozen");
 });
 

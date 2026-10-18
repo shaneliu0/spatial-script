@@ -8,7 +8,10 @@
   ],
   "objects": [
     {
-      "name": "marker"
+      "name": "marker",
+      "type": "Group",
+      "parent": 0,
+      "visible": true
     }
   ]
 }

@@ -33,7 +33,9 @@
     {
       "name": "donut",
       "rigidBody": {
-        "type": "dynamic",
+        "type": "static",
+        "requestedType": "dynamic",
+        "mass": 0,
         "shape": "convex",
         "isTrigger": true,
         "gravity": false

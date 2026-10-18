@@ -5,11 +5,11 @@
 // these features costs a single integer compare in the per-object diff, which
 // is what keeps the steady-state tick where phase 1 left it.
 
-import { push } from "../builtins.js";
-import { audioJSONEquals } from "../audio.js";
-import { videoJSONEquals } from "../video.js";
+import { push } from "../util/builtins.js";
+import { audioJSONEquals } from "../media/audio.js";
+import { videoJSONEquals } from "../media/video.js";
 import { shallowJSONEquals } from "./payloads.js";
-import { shaderParameterValue } from "../shader-graph.js";
+import { shaderParameterValue } from "../materials/shader-graph.js";
 
 export const FEATURE_AUDIO = 1;
 export const FEATURE_VIDEO = 2;

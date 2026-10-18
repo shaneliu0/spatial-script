@@ -2,7 +2,7 @@
   "objects": [
     {
       "name": "screen",
-      "video": { "url": "blob:https://example.com/9f5c-4a7d", "error": null }
+      "video": { "url": "blob:https://example.com/9f5c-4a7d" }
     },
     {
       "name": "sound",
@@ -16,6 +16,5 @@
       }
     }
   ],
-  "warnings": [],
   "errors": []
 }

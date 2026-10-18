@@ -45,6 +45,12 @@ declare namespace Spatial {
     const MAX_RECORDED_ERRORS: 200;
     /** Entries kept in `dump().warnings`. */
     const MAX_RECORDED_WARNINGS: 500;
+    /**
+     * Distinct error messages reported in one second. Each unique message is
+     * reported at most once per second; past this many distinct messages the
+     * rest of that second is dropped and one line says how many.
+     */
+    const MAX_ERROR_MESSAGES_PER_SECOND: 20;
   }
 
   // ------------------------------------------------------------- 3.1 math
@@ -460,8 +466,6 @@ declare namespace Spatial {
     opacity: number;
     /** Faces the viewer. Default false. */
     billboard: boolean;
-    /** Mesh only. Unsupported on the three.js backend: warns once. */
-    groundingShadow: boolean;
     /** visionOS only; accepted with no visual elsewhere. */
     hoverEffect: HoverEffect;
     /** Enables the system grab/move/rotate/scale interaction. */
@@ -550,6 +554,12 @@ declare namespace Spatial {
      * so this only reads as null on a mesh whose material was cleared.
      */
     material: Material | Material[] | null;
+    /**
+     * A grounding shadow under this mesh (SPEC 3.2). Meshes only: set on any
+     * other Object3D it is kept in the dump, reported once, and never sent.
+     * Unsupported on the three.js backend, which warns once.
+     */
+    groundingShadow: boolean;
     readonly isMesh: true;
   }
 
@@ -792,7 +802,14 @@ declare namespace Spatial {
    */
   class Texture {
     constructor(url?: string | null);
+    /**
+     * The url the consumer was given, or `null` when containment refused it —
+     * so `if (texture.url === null)` actually fires (3.5). What the script
+     * asked for is kept in `requestedUrl`.
+     */
     url: string | null;
+    /** What the script asked for when the url was refused, else `null`. */
+    readonly requestedUrl: string | null;
     readonly repeat: Vector2;
     readonly offset: Vector2;
     wrapS: number;
@@ -906,11 +923,20 @@ declare namespace Spatial {
     restitution: number;
     linearDamping: number;
     angularDamping: number;
+    /**
+     * A trigger is never simulated: the core emits `type: "static"` with no
+     * mass and keeps the authored value as `requestedType` (3.7).
+     */
     isTrigger: boolean;
     gravity: boolean;
-    /** Updated by the consumer each frame. */
+    /**
+     * Updated by the consumer each frame. Read-only: assign through
+     * `setLinearVelocity`; a write is ignored and warns once.
+     */
     readonly linearVelocity: Vector3;
+    /** Read-only: assign through `setAngularVelocity`; a write warns once. */
     readonly angularVelocity: Vector3;
+    /** Read-only: reported by the consumer through `syncBodies`. */
     readonly isSleeping: boolean;
     /**
      * The object this body is attached to. Assigned by the runtime when the
@@ -1236,6 +1262,11 @@ declare namespace Spatial {
     texture?: Texture | null;
   }
 
+  /**
+   * A preset overrides every authored field except `isEmitting`, and the core
+   * resolves it at construction (3.10): reading `birthRate` back, the
+   * `particles` payload and `dump()` all report what is rendered.
+   */
   class ParticleEmitter extends Object3D {
     constructor(options?: ParticleEmitterOptions);
     preset: ParticlePreset | null;
@@ -1430,7 +1461,12 @@ declare namespace Spatial {
     getRolloffFactor(): number;
     setDistanceModel(model: DistanceModel): this;
     getDistanceModel(): DistanceModel;
-    /** Angles in degrees, gain 0..1. */
+    /**
+     * Cone angles in **degrees** (0..360), keeping three.js's `PannerNode`
+     * units — the one angle in the namespace that is not radians — and an
+     * `outerGain` of 0..1. The `audio` payload's `cone: [inner, outer, gain]`
+     * carries the same degrees.
+     */
     setDirectionalCone(innerAngle: number, outerAngle: number, outerGain: number): this;
     /** dB; RealityKit's SpatialAudioComponent.reverbLevel. */
     reverbLevel: number;
@@ -1565,7 +1601,14 @@ declare namespace Spatial {
 
   type ForceFalloff = "none" | "linear" | "inverseSquare";
 
-  /** Acts on dynamic bodies within `radius` of its world position. */
+  /**
+   * Acts on dynamic bodies within `radius` of its world position (14.4).
+   * Units: `force` is newtons, `strength` is newtons at one metre from the
+   * effect (falloff applies beyond that), `coefficient` is a dimensionless
+   * drag factor on velocity, `noiseScale` and `radius` are metres. Both
+   * consumers clamp the acceleration a field imparts to 1000 m/s² per step and
+   * warn once naming the field, so a mis-scaled recipe cannot launch a body.
+   */
   class ForceField extends Object3D {
     enabled: boolean;
     radius: number;
@@ -1641,10 +1684,13 @@ declare namespace Spatial {
     /** Bumps on every setParameter, so consumers can order edits. */
     readonly generation: number;
     /**
-     * Also updates a same-named property of the fallback where that property
-     * is one the fallback owns. A value the command stream cannot carry — a
-     * NaN, an object, an array of other than two to four finite numbers — is
-     * refused with a warning rather than sent as null.
+     * Also updates the same-named property of the fallback where the fallback
+     * has one, except its identity fields — `uuid`, `id`, `type`, `name` and
+     * `version` are never written and warn once, though the shader graph still
+     * receives the parameter. A name the fallback does not have warns once
+     * too. A value the command stream cannot carry — a NaN, an object, a
+     * string past 256 characters, an array of other than two to four finite
+     * numbers — is refused with a warning rather than sent as null or cut.
      */
     setParameter(name: string, value: ShaderParameterValue): this;
     getParameter(name: string): ShaderParameterValue | undefined;
@@ -1873,9 +1919,10 @@ declare namespace Spatial {
     /** Only these per-object keys; `id` and `name` are always present. */
     fields?: string[];
     /**
-     * Positions rounded to four decimals, and no geometry parameters,
-     * material, light, particle or userData payloads. Much cheaper to build
-     * and to serialise, for a host that polls.
+     * Every number rounded to four decimals, with only the geometry
+     * parameters and `userData` omitted (SPEC 3.13). Material, light, body,
+     * interactive and flag payloads all stay, so a polling host still sees the
+     * whole object — it is smaller on the wire, not narrower.
      */
     compact?: boolean;
     /** `false` omits the object list entirely, leaving the scene summary. */

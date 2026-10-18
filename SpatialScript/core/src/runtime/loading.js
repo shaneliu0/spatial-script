@@ -3,11 +3,11 @@
 // Everything here takes the runtime explicitly, so the file is readable on its
 // own and the class below stays a thin facade over the phases.
 
-import { SpatialLoadError, SpatialUnsupportedError, cleanMessage, extractLocation, probeLineOffset } from "../errors.js";
-import { markDestroyed } from "../object-extensions.js";
-import { constructedScenes } from "../scene-classes.js";
-import { labelFor } from "../sanitize.js";
-import { push } from "../builtins.js";
+import { SpatialLoadError, SpatialUnsupportedError, cleanMessage, extractLocation, probeLineOffset } from "../util/errors.js";
+import { markDestroyed } from "../scene/object-extensions.js";
+import { constructedScenes } from "../scene/scene-classes.js";
+import { labelFor } from "../util/sanitize.js";
+import { push } from "../util/builtins.js";
 import { SNAPSHOT } from "./state.js";
 
 // `Spatial` and `console` are installed as globals rather than passed as
@@ -155,7 +155,7 @@ export function load(runtime, source, options = {}) {
   }
 
   /** The auto-mount rule and didAdd, run once the script body has settled. */
-export function finishLoad(runtime, lineOffset) {
+function finishLoad(runtime, lineOffset) {
     if (runtime.scene === null) {
       if (constructedScenes.length === 1) {
         runtime.mount(constructedScenes[0]);
@@ -198,7 +198,7 @@ export function finishLoad(runtime, lineOffset) {
   }
 
   /** A load failure that surfaced after load() returned. */
-export function reportLoadFailure(runtime, error) {
+function reportLoadFailure(runtime, error) {
     const where =
       error.line === null || error.line === undefined ? "" : ` (line ${error.line}, column ${error.column})`;
     runtime.reportOnce({ name: error.name || "SpatialLoadError", message: `${cleanMessage(error.cause || error)}${where}` });

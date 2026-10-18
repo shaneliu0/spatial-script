@@ -51,7 +51,16 @@
       "name": "rain",
       "particles": {
         "preset": "rain",
-        "shape": "point",
+        "shape": "box",
+        "birthRate": 700,
+        "lifetime": 1.1,
+        "size": 0.004,
+        "acceleration": [
+          0,
+          -9.8,
+          0
+        ],
+        "loops": true,
         "isEmitting": true
       },
       "userData": {

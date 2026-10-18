@@ -488,7 +488,11 @@ test("CORE-11 a portal whose world is not in the scene warns and emits no portal
     S.mount(scene);
   `);
   const first = host.tick();
-  assert.deepEqual(plain(commandsFor(first, "portal")), []);
+  // The portal is described, but it names no world: a `worldId` the consumer
+  // has never been given would break SPEC 5's ordering guarantee (AR-20).
+  const missing = commandsFor(first, "portal");
+  assert.equal(missing.length, 1);
+  assert.equal(missing[0][2].worldId, null);
   assert.ok(host.dump().warnings.some((warning) => /world group that is not in the mounted scene/.test(warning)));
 
   host.tick();
@@ -597,12 +601,13 @@ test("CORE-15 an awaited asset does not leave the detach scan running every fram
 // ------------------------------------------------------------- CORE-16 / 17
 
 test("CORE-16 errors are capped and the dropped count is reported", () => {
+  // A second of scene time per frame, so every message is its own throttle
+  // window and the recorded-errors cap is what does the dropping.
   const host = createHost();
   host.load(`
     const S = require("spatial");
     const scene = new S.Scene();
     scene.add(new S.Group());
-    // Distinct shapes, not distinct numbers: the throttle keys on the shape.
     const letters = "abcdefghijklmnopqrstuvwxyz";
     S.onFrame(() => {
       const i = S.time.frame;
@@ -610,11 +615,11 @@ test("CORE-16 errors are capped and the dropped count is reported", () => {
     });
     S.mount(scene);
   `);
-  for (let i = 0; i < 400; i += 1) host.tick();
+  for (let i = 0; i < 400; i += 1) host.tick(1);
   const dump = host.dump();
   assert.equal(dump.errors.length, 200);
   assert.ok(dump.droppedErrors > 0);
-  assert.ok(host.spatial.runtime.errorTimes.size <= 800);
+  assert.ok(host.spatial.runtime.errorTimes.size <= 80, "the throttle key set stays bounded");
 });
 
 test("CORE-17 a single log message is truncated", () => {

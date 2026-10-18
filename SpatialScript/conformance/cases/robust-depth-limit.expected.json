@@ -17,7 +17,8 @@
       "parent": 0
     },
     {
-      "name": "level1023"
+      "name": "level1023",
+      "type": "Group"
     },
     {
       "name": "level1024",

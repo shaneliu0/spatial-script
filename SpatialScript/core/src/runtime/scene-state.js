@@ -2,9 +2,9 @@
 // scene understanding and the render options. All of it is id 0 and diffed
 // once per frame against a stored payload.
 
-import { push } from "../builtins.js";
-import { cameraPayload, cameraPayloadEquals, copyCameraPayload } from "../camera.js";
-import { clamp } from "../sanitize.js";
+import { push } from "../util/builtins.js";
+import { cameraPayload, cameraPayloadEquals, copyCameraPayload } from "../scene/camera.js";
+import { clamp } from "../util/sanitize.js";
 
 /** SPEC 14.11 constrains the debug model view to these. */
 const DEBUG_MODEL_VIEWS = ["normal", "uv", "baseColor", "roughness", "metallic", "occlusion", "emissive"];

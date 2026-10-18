@@ -12,8 +12,8 @@ import {
   MATERIAL_PAYLOAD,
   MATERIAL_RAW,
   UNTRACKED_PROPERTIES,
-} from "../materials.js";
-import { push } from "../builtins.js";
+} from "../materials/materials.js";
+import { push } from "../util/builtins.js";
 
 export function materialPayload(runtime, material, frame) {
     material[MATERIAL_FRAME] = frame;
@@ -70,7 +70,7 @@ export function materialPayload(runtime, material, frame) {
   }
 
   /** Properties three.js already defines an accessor for, compared by value. */
-export function untrackedUnchanged(runtime, material, raw) {
+function untrackedUnchanged(runtime, material, raw) {
     const names = UNTRACKED_PROPERTIES;
     for (let i = 0; i < names.length; i += 1) {
       if (raw.untracked[i] !== material[names[i]]) return false;

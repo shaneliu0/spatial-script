@@ -4,15 +4,15 @@
 // Ids must stay exact in the float32 `transforms` records, so released ids are
 // recycled and the space below 2^24 is guarded rather than overflowed.
 
-import { SpatialUnsupportedError } from "../errors.js";
-import { MAX_ID, MAX_DEPTH } from "../limits.js";
-import { isDestroyed } from "../object-extensions.js";
-import { labelFor } from "../sanitize.js";
-import { textureSnapshot, textureSnapshotEquals } from "../diff.js";
-import { jointJSONEquals } from "../physics.js";
-import { MATERIAL_MAP_SLOTS } from "../materials.js";
-import { portalJSONEquals } from "../portal.js";
-import { push } from "../builtins.js";
+import { SpatialUnsupportedError } from "../util/errors.js";
+import { MAX_ID, MAX_DEPTH } from "../util/limits.js";
+import { isDestroyed } from "../scene/object-extensions.js";
+import { labelFor } from "../util/sanitize.js";
+import { textureSnapshot, textureSnapshotEquals } from "../util/diff.js";
+import { jointJSONEquals } from "../physics/physics.js";
+import { MATERIAL_MAP_SLOTS } from "../materials/materials.js";
+import { portalJSONEquals } from "../scene/portal.js";
+import { push } from "../util/builtins.js";
 import { SNAPSHOT } from "./state.js";
 
 export function referenceIdFor(runtime, object) {
@@ -28,10 +28,16 @@ export function referenceIdFor(runtime, object) {
 export function allocateId(runtime) {
     if (runtime.freeIds.length > 0) return runtime.freeIds.pop();
     if (runtime.nextId >= MAX_ID) {
-      runtime.reportOnce({
-        name: "SpatialUnsupportedError",
-        message: `The scene has used every object id below ${MAX_ID}; new objects are not tracked`,
-      });
+      // SPEC 2: the error is recorded once and new objects stop being tracked
+      // altogether — id 0 is the native root, so emitting commands for it
+      // would rewrite the scene root every frame (FA-47).
+      if (!runtime.idsExhausted) {
+        runtime.idsExhausted = true;
+        runtime.reportOnce({
+          name: "SpatialUnsupportedError",
+          message: `The scene has used every object id below ${MAX_ID}; new objects are not tracked`,
+        });
+      }
       return 0;
     }
     const id = runtime.nextId;
@@ -105,13 +111,33 @@ export function objectForId(runtime, id) {
   }
 
 export function textureIdFor(runtime, texture) {
+    // A texture that was disposed and is used again would otherwise resolve to
+    // an id the consumer has already been told to free, and the material would
+    // name a texture that no longer exists (FA-58). It comes back as a new
+    // texture with a new id, and the script is told once.
+    if (texture.disposed === true) {
+      runtime.warnOnce(
+        `texture-reused:${texture.url}`,
+        `A disposed Texture ("${texture.url}") was used again; it was registered as a new texture. ` +
+          "Load it again rather than reusing a disposed one",
+      );
+      texture.disposed = false;
+      const stale = runtime.textureIds.get(texture);
+      if (stale !== undefined) {
+        runtime.textureIds.delete(texture);
+        runtime.idTextures.delete(stale);
+      }
+      runtime.pendingTextureRelease.delete(texture);
+      runtime.textureSnapshots.delete(texture);
+    }
+
     let id = runtime.textureIds.get(texture);
     if (id === undefined) {
       id = runtime.allocateId();
       if (id === 0) return 0;
       runtime.textureIds.set(texture, id);
       runtime.idTextures.set(id, texture);
-      if (texture.disposed !== true) runtime.textures.add(texture);
+      runtime.textures.add(texture);
     }
     return id;
   }
@@ -122,7 +148,7 @@ export function registerTexture(runtime, texture) {
   }
 
   /** True while any live material or emitter still names `texture`. */
-export function textureIsReferenced(runtime, texture, frame) {
+function textureIsReferenced(runtime, texture, frame) {
     for (const [object, snapshot] of runtime.snapshots) {
       if (snapshot.liveFrame !== frame) continue;
       const material = snapshot.materialObject;
@@ -229,15 +255,20 @@ export function diffPortals(runtime, frame, framePortals, cPortal) {
       const world = portal.world;
       // A world group that is not in the mounted scene has no `create`, so a
       // `portal` naming it would break SPEC 5's ordering guarantee.
-      if (world !== null && (world[SNAPSHOT] === undefined || world[SNAPSHOT].liveFrame !== frame)) {
+      const worldMissing =
+        world !== null && (world[SNAPSHOT] === undefined || world[SNAPSHOT].liveFrame !== frame);
+      if (worldMissing) {
         runtime.warnOnce(
           `portal-world:${portal.uuid}`,
           `Portal ${portal.name ? `"${portal.name}"` : portal.type} has a world group that is not in ` +
             "the mounted scene; add it to the scene for the portal to render",
         );
-        continue;
       }
-      const next = portal.toJSON(runtime.boundReferenceIdFor);
+      // A world that left the scene is retracted rather than left named: the
+      // consumer must stop rendering into a group it no longer has (AR-20).
+      const next = worldMissing
+        ? { worldId: null, width: portal.width, height: portal.height, crossing: portal.crossing }
+        : portal.toJSON(runtime.boundReferenceIdFor);
       if (!portalJSONEquals(snapshot.portal, next)) {
         snapshot.portal = next;
         cPortal.push(["portal", snapshot.id, next]);

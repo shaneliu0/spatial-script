@@ -50,8 +50,8 @@ import {
   LoopPingPong,
   PerspectiveCamera,
   OrthographicCamera,
-} from "./three-exports.js";
-import { Scene, Mesh } from "./scene-classes.js";
+} from "./util/three-exports.js";
+import { Scene, Mesh } from "./scene/scene-classes.js";
 import {
   BoxGeometry,
   SphereGeometry,
@@ -62,28 +62,28 @@ import {
   CapsuleGeometry,
   CircleGeometry,
   RingGeometry,
-} from "./geometry.js";
-import { TextGeometry } from "./text-geometry.js";
-import { OcclusionMaterial } from "./materials.js";
-import { Texture, TextureLoader } from "./texture.js";
-import { RigidBody, Joint } from "./physics.js";
-import { ParticleEmitter } from "./particles.js";
-import { Anchor } from "./anchor.js";
-import { Portal } from "./portal.js";
-import { ImageBasedLight } from "./asset.js";
-import { AudioLoader, AudioBuffer, Audio, PositionalAudio, AmbientAudio } from "./audio.js";
-import { VideoScreen } from "./video.js";
-import { CharacterController } from "./character.js";
+} from "./scene/geometry.js";
+import { TextGeometry } from "./scene/text-geometry.js";
+import { OcclusionMaterial } from "./materials/materials.js";
+import { Texture, TextureLoader } from "./materials/texture.js";
+import { RigidBody, Joint } from "./physics/physics.js";
+import { ParticleEmitter } from "./scene/particles.js";
+import { Anchor } from "./scene/anchor.js";
+import { Portal } from "./scene/portal.js";
+import { ImageBasedLight } from "./scene/asset.js";
+import { AudioLoader, AudioBuffer, Audio, PositionalAudio, AmbientAudio } from "./media/audio.js";
+import { VideoScreen } from "./media/video.js";
+import { CharacterController } from "./physics/character.js";
 import {
   ConstantForceField,
   RadialForceField,
   VortexForceField,
   DragForceField,
   TurbulenceForceField,
-} from "./force-fields.js";
-import { ShaderGraphMaterial } from "./shader-graph.js";
-import { SpatialUnsupportedError } from "./errors.js";
-import { createInject } from "./inject.js";
+} from "./physics/force-fields.js";
+import { ShaderGraphMaterial } from "./materials/shader-graph.js";
+import { SpatialUnsupportedError } from "./util/errors.js";
+import { createInject } from "./input/inject.js";
 import {
   MAX_NAME_LENGTH,
   MAX_LOG_MESSAGE,
@@ -96,7 +96,8 @@ import {
   MAX_ID,
   MAX_RECORDED_ERRORS,
   MAX_RECORDED_WARNINGS,
-} from "./limits.js";
+  MAX_ERROR_MESSAGES_PER_SECOND,
+} from "./util/limits.js";
 
 // The bounds a script can read, so a generator can stay inside them.
 const LIMITS = Object.freeze({
@@ -111,6 +112,7 @@ const LIMITS = Object.freeze({
   MAX_ID,
   MAX_RECORDED_ERRORS,
   MAX_RECORDED_WARNINGS,
+  MAX_ERROR_MESSAGES_PER_SECOND,
 });
 
 export function createNamespace(runtime) {

@@ -4,7 +4,7 @@ const S = Spatial;
 const scene = new S.Scene();
 
 const screen = new S.VideoScreen({
-  url: "videos/clip.mp4",
+  url: "asset://spatial-bars.mp4",
   width: 1.6,
   height: 0.9,
   loop: true,

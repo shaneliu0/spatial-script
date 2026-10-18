@@ -1,6 +1,6 @@
 // Small payload helpers shared by the diff and the flush.
 
-import { objectKeys } from "../builtins.js";
+import { objectKeys } from "../util/builtins.js";
 
 /** Structural equality for a flat JSON payload with array-valued fields. */
 export function shallowJSONEquals(a, b) {

@@ -5,8 +5,8 @@
 // is capped, rather than growing for as long as the app is backgrounded and
 // then flooding one frame (P2-B-05).
 
-import { push } from "../builtins.js";
-import { MAX_INACTIVE_SYNC_OBJECTS } from "../limits.js";
+import { push } from "../util/builtins.js";
+import { MAX_INACTIVE_SYNC_OBJECTS } from "../util/limits.js";
 
 /** Which pending list each sync channel drains into. */
 const INACTIVE_CHANNELS = {

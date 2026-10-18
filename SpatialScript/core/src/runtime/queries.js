@@ -3,13 +3,13 @@
 //
 // Each takes the runtime explicitly; `Runtime` keeps a thin facade over them.
 
-import { Vector3 } from "../three-exports.js";
-import { SpatialUnsupportedError } from "../errors.js";
-import { AssetGroup } from "../asset.js";
-import { refreshWorldMatrices } from "../object-extensions.js";
-import { worldNormal } from "../diff.js";
-import { resolveUrl as containUrl } from "../urls.js";
-import { push } from "../builtins.js";
+import { Vector3 } from "../util/three-exports.js";
+import { SpatialUnsupportedError } from "../util/errors.js";
+import { AssetGroup } from "../scene/asset.js";
+import { refreshWorldMatrices } from "../scene/object-extensions.js";
+import { worldNormal } from "../util/diff.js";
+import { resolveUrl as containUrl } from "../util/urls.js";
+import { push } from "../util/builtins.js";
 
 /** The asset url keys SPEC 3.12 defines, in the order loadAsset reports them. */
 const ASSET_KEYS = ["usdz", "reality", "glb", "gltf"];
@@ -59,7 +59,12 @@ export function raycast(runtime, origin, direction, options = {}) {
       Number.isFinite(maxDistance) ? maxDistance : -1,
       recursive,
     );
-    const hits = [];
+    // SPEC 3.7: at most one hit per object, nearest first. A consumer that
+    // reports a record per collision shape — one per child mesh of a loaded
+    // asset, say — must not turn into several hits here, and the nearest
+    // record wins even if the consumer did not sort (FA-11).
+    const nearest = new Map();
+    let understandingHit = null;
     if (flat && flat.length) {
       for (let i = 0; i + 8 <= flat.length; i += 8) {
         // Id 0 is the real-world mesh: a hit on scene understanding has no
@@ -67,15 +72,24 @@ export function raycast(runtime, origin, direction, options = {}) {
         const understanding = flat[i] === 0;
         const object = understanding ? null : runtime.objectForId(flat[i]);
         if (!understanding && !object) continue;
-        push(hits, {
+        const distance = flat[i + 7];
+        const previous = understanding ? understandingHit : nearest.get(object);
+        if (previous !== undefined && previous !== null && previous.distance <= distance) continue;
+        const hit = {
           object,
           point: new Vector3(flat[i + 1], flat[i + 2], flat[i + 3]),
           normal: new Vector3(flat[i + 4], flat[i + 5], flat[i + 6]),
-          distance: flat[i + 7],
+          distance,
           sceneUnderstanding: understanding,
-        });
+        };
+        if (understanding) understandingHit = hit;
+        else nearest.set(object, hit);
       }
     }
+
+    const hits = [];
+    for (const hit of nearest.values()) push(hits, hit);
+    if (understandingHit !== null) push(hits, understandingHit);
     hits.sort((a, b) => a.distance - b.distance);
     return hits;
   }

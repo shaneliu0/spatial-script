@@ -5,14 +5,14 @@
 // Each takes the runtime explicitly; `Runtime` keeps a thin facade over them,
 // the same way the phase 1 phases are split out.
 
-import { Vector3, Matrix4 } from "../three-exports.js";
-import { push } from "../builtins.js";
-import { jsonSafe } from "../sanitize.js";
-import { safeStringify } from "../builtins.js";
-import { MAX_STATE_BYTES } from "../limits.js";
-import { isCamera } from "../camera.js";
+import { Vector3, Matrix4 } from "../util/three-exports.js";
+import { push } from "../util/builtins.js";
+import { jsonSafe } from "../util/sanitize.js";
+import { safeStringify } from "../util/builtins.js";
+import { MAX_STATE_BYTES } from "../util/limits.js";
+import { isCamera } from "../scene/camera.js";
 import { SNAPSHOT } from "./state.js";
-import { isDestroyed } from "../object-extensions.js";
+import { isDestroyed } from "../scene/object-extensions.js";
 
 const worldMatrix = new Matrix4();
 const localPosition = new Vector3();

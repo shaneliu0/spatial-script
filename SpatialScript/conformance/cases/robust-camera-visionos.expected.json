@@ -28,7 +28,14 @@
       }
     },
     {
-      "name": "cube"
+      "name": "cube",
+      "type": "Mesh",
+      "geometry": {
+        "type": "BoxGeometry",
+        "parameters": {
+          "width": 0.12
+        }
+      }
     }
   ]
 }

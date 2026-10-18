@@ -1,6 +1,8 @@
 {
+  "backend": "realitykit",
+  "platform": "macos",
   "warnings": [
-    "PointLight shadows are unsupported"
+    "PointLight shadows are unsupported in RealityKit"
   ],
   "objects": [
     {
