@@ -156,7 +156,15 @@ struct CommandApplierTests {
         #expect(occlusion.model?.materials.first is OcclusionMaterial)
 
         #expect(scene.commandApplier.warnings.warnings.contains { $0.contains("wireframe") })
-        #expect(scene.commandApplier.warnings.warnings.contains { $0.contains("AdditiveBlending") })
+        // AR-36: additive blending is a fact the core warns about
+        // (`warnMaterial`, realitykit only), so this consumer only has to draw
+        // it — object 130 asks for it — as a transparent material, and say
+        // nothing.
+        let blended = try #require(basic.model?.materials.first as? UnlitMaterial)
+        if case .transparent = blended.blending {} else {
+            Issue.record("AdditiveBlending must at least render as transparent")
+        }
+        #expect(!scene.commandApplier.warnings.warnings.contains { $0.contains("AdditiveBlending") })
         scene.dispose()
     }
 
@@ -210,7 +218,10 @@ struct CommandApplierTests {
         let point = try #require(bulbHolder.components[PointLightComponent.self])
         #expect(abs(point.intensity - Float(10 * 4 * Float.pi)) < 0.01)
         #expect(abs(point.attenuationRadius - 4) < 1e-4)
-        #expect(scene.commandApplier.warnings.warnings.contains { $0.contains("PointLight.castShadow") })
+        // AR-36: RealityKit has no point-light shadow and the core says so for
+        // this backend, so the light is built without one and in silence.
+        #expect(bulbHolder.components[SpotLightComponent.Shadow.self] == nil)
+        #expect(!scene.commandApplier.warnings.warnings.contains { $0.contains("PointLight") })
 
         let spotHolder = try #require(try entity(scene, 152).children.first)
         let spot = try #require(spotHolder.components[SpotLightComponent.self])
@@ -540,9 +551,13 @@ struct CommandApplierTests {
         let position = try #require(cube["position"] as? [Float])
         #expect(abs(position[0] - 0.5) < 1e-4)
         let material = try #require(cube["material"] as? [String: Any])
-        #expect(material["nativeType"] as? String == "PhysicallyBasedMaterial")
+        #expect(material["type"] as? String == "MeshStandardMaterial")
+        // SPEC 8: native class names live in `components` and nowhere else, so
+        // the class RealityKit built for each slot is named there.
+        #expect(material["nativeType"] == nil)
         let components = try #require(cube["components"] as? [String])
         #expect(components.contains("ModelComponent"))
+        #expect(components.contains("nativeMaterial:PhysicallyBasedMaterial"))
         scene.dispose()
     }
 

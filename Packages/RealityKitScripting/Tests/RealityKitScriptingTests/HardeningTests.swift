@@ -237,7 +237,10 @@ struct HardeningTests {
         }
         // The parametric cache is what the cache exists for; a live buffer
         // geometry is not stored at all.
-        #expect(scene.commandApplier.resources.summary["cachedMeshes"] == 0)
+        // SPEC 5 caches by uuid and revision, so a per-frame edit supersedes
+        // its own entry rather than storing a fresh multi-megabyte resource
+        // every frame: one instance, one cached mesh, however many revisions.
+        #expect(scene.commandApplier.resources.summary["cachedMeshes"] == 1)
         scene.dispose()
     }
 
@@ -288,7 +291,10 @@ struct HardeningTests {
             options: ScriptingDumpFilter.options(compact: true, names: [], fields: []),
             to: dump
         )
-        #expect((compact["objects"] as? [[String: Any]])?.isEmpty == true)
+        // SPEC 3.13: `compact` is a reduction, not a deletion. The core rounds
+        // the numbers and drops geometry parameters and userData; the object
+        // list itself survives, which is what makes it a useful poll.
+        #expect((compact["objects"] as? [[String: Any]])?.count == 2)
         #expect(compact["objectCount"] as? Int == 2)
 
         let named = ScriptingDumpFilter.apply(
@@ -368,7 +374,7 @@ struct HardeningTests {
 
     @Test
     func theTextureStoreResolvesAndReleases() throws {
-        let store = ScriptingTextureStore(assetRoot: URL(fileURLWithPath: "/tmp"))
+        let store = ScriptingTextureStore(assetDirectory: URL(fileURLWithPath: "/tmp"))
         nonisolated(unsafe) var failures: [Int] = []
         store.onFailed = { id, _ in failures.append(id) }
         store.declare(id: 1, payload: [

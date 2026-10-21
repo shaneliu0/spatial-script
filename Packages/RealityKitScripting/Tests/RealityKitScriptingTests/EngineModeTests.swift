@@ -134,10 +134,16 @@ struct EngineModeTests {
             Spatial.mount(s);
             """)
         scene.tick(deltaTime: 1.0 / 60)
+        // `compact` is the core's to apply, so it rides the in-context
+        // serialiser; only `names` and `fields` take the Swift reader.
         let options = ScriptingDumpFilter.options(compact: true, names: [], fields: [])
-        #expect(scene.dumpJSON(options: options) == nil)
+        #expect(scene.dumpJSON(options: options) != nil)
+        let narrowed = ScriptingDumpFilter.options(compact: false, names: ["only"], fields: [])
+        #expect(scene.dumpJSON(options: narrowed) == nil)
         let compact = scene.dump(options: options)
-        #expect((compact["objects"] as? [[String: Any]])?.isEmpty == true)
+        // The core owns `compact`; the Swift filter only narrows `names` and
+        // `fields`, so the reduced object list comes through.
+        #expect((compact["objects"] as? [[String: Any]])?.count == 1)
         #expect(compact["objectCount"] as? Int == 1)
         scene.dispose()
     }
