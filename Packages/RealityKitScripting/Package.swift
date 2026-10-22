@@ -22,7 +22,12 @@ let package = Package(
         ),
         .testTarget(
             name: "RealityKitScriptingTests",
-            dependencies: ["RealityKitScripting"]
+            dependencies: ["RealityKitScripting"],
+            // The matcher fixtures and their node driver are read from the
+            // source tree by path, not from the test bundle: `match.mjs` lives
+            // beside them in the repository and both matchers must see the same
+            // file (SPEC 10).
+            exclude: ["Fixtures/matcher-fixtures.json", "Fixtures/run-match-fixtures.mjs"]
         ),
     ]
 )

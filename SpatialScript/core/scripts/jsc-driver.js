@@ -415,6 +415,7 @@
       records: records,
       commandCount: commandCount,
       budgetMs: entry.budgetMs,
+      budgetOn: entry.budgetOn,
     };
   }
 

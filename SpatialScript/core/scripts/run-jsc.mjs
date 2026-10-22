@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { matchDump } from "../../conformance/match.mjs";
+import { matchDump } from "../../verification/conformance/match.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const coreRoot = path.resolve(here, "..");
@@ -23,8 +23,8 @@ const root = path.resolve(coreRoot, "..");
 export const JSC_PATH =
   "/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc";
 
-const casesDir = path.join(root, "conformance/cases");
-const robustnessDir = path.join(root, "scenarios/robustness");
+const casesDir = path.join(root, "verification/conformance/cases");
+const robustnessDir = path.join(root, "verification/scenarios/robustness");
 
 // The syntax error the driver must locate, and the line it sits on.
 const SYNTAX_CASE = "syntax-error.js";
@@ -79,8 +79,12 @@ export function buildManifest() {
 }
 
 /**
- * The stress.js shape the macOS host runs: `count` meshes sharing one geometry,
- * each with its own material, every one moved each frame when `moving`.
+ * The stress.js shape the macOS host runs and the docs publish: `count` meshes
+ * sharing one geometry **and one material**, every one moved each frame when
+ * `moving`. The static variant sets `matrixAutoUpdate = false` after baking
+ * the transform, which is the static hint the docs point readers at — running
+ * anything else here makes the published table describe a scene nothing
+ * measures (AR-12).
  */
 export function benchmarkSource(count, moving) {
   return `
@@ -92,10 +96,11 @@ export function benchmarkSource(count, moving) {
     sun.position.set(1, 2, 2);
     scene.add(sun);
     const geo = new BoxGeometry(0.012, 0.012, 0.012);
+    const material = new MeshStandardMaterial({ color: 0x6699ff });
     const cubes = [];
     const N = ${count}, side = Math.ceil(Math.cbrt(N));
     for (let i = 0; i < N; i++) {
-      const m = new Mesh(geo, new MeshStandardMaterial({ color: (i * 2654435761) & 0xffffff }));
+      const m = new Mesh(geo, material);
       m.name = "c" + i;
       m.position.set(
         ((i % side) - side / 2) * 0.03,
@@ -105,6 +110,7 @@ export function benchmarkSource(count, moving) {
       scene.add(m);
       cubes.push(m);
     }
+    ${moving ? "" : `for (let i = 0; i < N; i++) { cubes[i].updateMatrix(); cubes[i].matrixAutoUpdate = false; }`}
     ${moving
       ? `Spatial.onFrame((dt, t) => {
       for (let i = 0; i < N; i++) {
@@ -133,8 +139,11 @@ export function benchmarkManifest() {
         name: `tick ${count} ${moving ? "moving" : "static"} meshes`,
         source: benchmarkSource(count, moving),
         frames: 60,
-        // Asserted only for the shape and size the macOS host runs.
-        budgetMs: count === 1500 && moving ? STRESS_BUDGET_MS : null,
+        // The 1500-mesh shape is the macOS host's; the 2000-mesh one is SPEC 12's
+        // own budget, and the spec states a per-tick bound, so that entry is
+        // asserted on the worst frame rather than the median (AR-10).
+        budgetMs: moving ? (count === 1500 ? STRESS_BUDGET_MS : count === 2000 ? SPEC_BUDGET_MS : null) : null,
+        budgetOn: count === 2000 && moving ? "worst" : "median",
       });
     }
   }
@@ -152,6 +161,9 @@ export function benchmarkManifest() {
 // The interpreter budget asserted for the 1500-mesh stress scene. The measured
 // median sits comfortably below it; see the note in the README.
 export const STRESS_BUDGET_MS = 6;
+
+/** SPEC 12: 2000 objects with transform changes apply within 8 ms per tick. */
+export const SPEC_BUDGET_MS = 8;
 
 export function runInJSC(manifest, extraArgs = []) {
   const manifestPath = path.join(
@@ -177,6 +189,11 @@ export function checkResult(result) {
 
   if (result.kind === "benchmark") {
     if (result.budgetMs === null || result.budgetMs === undefined) return [];
+    if (result.budgetOn === "worst") {
+      return result.worstMs < result.budgetMs
+        ? []
+        : [`worst frame ${result.worstMs} ms exceeds the ${result.budgetMs} ms budget`];
+    }
     return result.medianMs < result.budgetMs
       ? []
       : [`median ${result.medianMs} ms exceeds the ${result.budgetMs} ms budget`];
@@ -268,7 +285,13 @@ function main() {
     console.log(
       `JavaScriptCore (no JIT): ${result.name} - median ${result.medianMs} ms, worst ${result.worstMs} ms, ` +
         `${result.records} transform records, ${result.commandCount} commands` +
-        (result.budgetMs ? ` [budget ${result.budgetMs} ms]` : ""),
+        (result.budgetMs
+          ? ` [budget ${result.budgetMs} ms on the ${result.budgetOn === "worst" ? "worst frame" : "median"}` +
+            `, headroom ${(
+              (1 - (result.budgetOn === "worst" ? result.worstMs : result.medianMs) / result.budgetMs) *
+              100
+            ).toFixed(0)}%]`
+          : ""),
     );
   }
 

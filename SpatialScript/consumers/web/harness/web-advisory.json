@@ -1,0 +1,24 @@
+{
+  "asset-unsupported": {
+    "reason": "SPEC 3.12: glTF loads in a browser, so the RealityKit rejection this case asserts cannot happen here",
+    "paths": [
+      "objects[\"holder\"].userData.rejected",
+      "objects[\"holder\"].userData.feature"
+    ]
+  },
+  "robust-camera-visionos": {
+    "reason": "SPEC 14.3: on visionOS the user is the camera; a browser has one and answers rayFromPoint",
+    "paths": [
+      "warnings: no entry contains \"On visionOS the user is the camera\"",
+      "objects[\"probe\"].userData.cameraCapability",
+      "objects[\"probe\"].userData.ray",
+      "objects[\"probe\"].userData.rayIsNull"
+    ]
+  },
+  "shader-graph-material": {
+    "reason": "SPEC 14.6: ShaderGraphMaterial is a RealityKit capability; the web renders the required fallback",
+    "paths": [
+      "scene.userData.capability"
+    ]
+  }
+}

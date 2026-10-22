@@ -1,0 +1,562 @@
+{
+  "note": "SPEC 9 matching rules, one fixture per rule in both directions. Both the Swift port (SpatialDumpMatcher) and verification/conformance/match.mjs are run over this file and must return the same verdict for every fixture.",
+  "fixtures": [
+    {
+      "name": "every-expected-key-present",
+      "rule": "every key in expected must exist in actual with an equal value",
+      "expected": {
+        "backend": "realitykit",
+        "frame": 3
+      },
+      "actual": {
+        "backend": "realitykit",
+        "frame": 3,
+        "elapsed": 0.05
+      },
+      "matches": true
+    },
+    {
+      "name": "missing-expected-key",
+      "rule": "every key in expected must exist in actual with an equal value",
+      "expected": {
+        "backend": "realitykit",
+        "platform": "macos"
+      },
+      "actual": {
+        "backend": "realitykit"
+      },
+      "matches": false
+    },
+    {
+      "name": "unequal-string",
+      "rule": "every key in expected must exist in actual with an equal value",
+      "expected": {
+        "backend": "three"
+      },
+      "actual": {
+        "backend": "realitykit"
+      },
+      "matches": false
+    },
+    {
+      "name": "unequal-boolean",
+      "rule": "every key in expected must exist in actual with an equal value",
+      "expected": {
+        "isActive": true
+      },
+      "actual": {
+        "isActive": false
+      },
+      "matches": false
+    },
+    {
+      "name": "keys-absent-from-expected-are-unconstrained",
+      "rule": "keys absent from expected are unconstrained",
+      "expected": {
+        "frame": 1
+      },
+      "actual": {
+        "frame": 1,
+        "gravity": [
+          0,
+          -9.81,
+          0
+        ],
+        "joints": []
+      },
+      "matches": true
+    },
+    {
+      "name": "number-inside-tolerance",
+      "rule": "numbers match within 1e-3",
+      "expected": {
+        "elapsed": 0.1235
+      },
+      "actual": {
+        "elapsed": 0.1239
+      },
+      "matches": true
+    },
+    {
+      "name": "number-outside-tolerance",
+      "rule": "numbers match within 1e-3",
+      "expected": {
+        "elapsed": 0.1235
+      },
+      "actual": {
+        "elapsed": 0.1255
+      },
+      "matches": false
+    },
+    {
+      "name": "number-against-non-number",
+      "rule": "numbers match within 1e-3",
+      "expected": {
+        "elapsed": 1
+      },
+      "actual": {
+        "elapsed": "1"
+      },
+      "matches": false
+    },
+    {
+      "name": "array-element-wise-equal",
+      "rule": "arrays match element-wise",
+      "expected": {
+        "gravity": [
+          0,
+          -9.81,
+          0
+        ]
+      },
+      "actual": {
+        "gravity": [
+          0,
+          -9.8105,
+          0
+        ]
+      },
+      "matches": true
+    },
+    {
+      "name": "array-element-differs",
+      "rule": "arrays match element-wise",
+      "expected": {
+        "gravity": [
+          0,
+          -9.81,
+          0
+        ]
+      },
+      "actual": {
+        "gravity": [
+          0,
+          -1,
+          0
+        ]
+      },
+      "matches": false
+    },
+    {
+      "name": "array-length-differs",
+      "rule": "arrays match element-wise",
+      "expected": {
+        "gravity": [
+          0,
+          -9.81,
+          0
+        ]
+      },
+      "actual": {
+        "gravity": [
+          0,
+          -9.81
+        ]
+      },
+      "matches": false
+    },
+    {
+      "name": "array-against-non-array",
+      "rule": "arrays match element-wise",
+      "expected": {
+        "gravity": [
+          0,
+          -9.81,
+          0
+        ]
+      },
+      "actual": {
+        "gravity": 9.81
+      },
+      "matches": false
+    },
+    {
+      "name": "objects-matched-by-name-not-order",
+      "rule": "entries of objects are matched by name",
+      "expected": {
+        "objects": [
+          {
+            "name": "cube",
+            "visible": true
+          }
+        ]
+      },
+      "actual": {
+        "objects": [
+          {
+            "name": "sphere",
+            "visible": false
+          },
+          {
+            "name": "cube",
+            "visible": true
+          }
+        ]
+      },
+      "matches": true
+    },
+    {
+      "name": "object-not-found",
+      "rule": "entries of objects are matched by name",
+      "expected": {
+        "objects": [
+          {
+            "name": "ghost",
+            "visible": true
+          }
+        ]
+      },
+      "actual": {
+        "objects": [
+          {
+            "name": "cube",
+            "visible": true
+          }
+        ]
+      },
+      "matches": false
+    },
+    {
+      "name": "object-property-differs",
+      "rule": "entries of objects are matched by name",
+      "expected": {
+        "objects": [
+          {
+            "name": "cube",
+            "position": [
+              0,
+              1,
+              0
+            ]
+          }
+        ]
+      },
+      "actual": {
+        "objects": [
+          {
+            "name": "cube",
+            "position": [
+              0,
+              2,
+              0
+            ]
+          }
+        ]
+      },
+      "matches": false
+    },
+    {
+      "name": "object-without-a-name",
+      "rule": "entries of objects are matched by name",
+      "expected": {
+        "objects": [
+          {
+            "visible": true
+          }
+        ]
+      },
+      "actual": {
+        "objects": [
+          {
+            "name": "cube",
+            "visible": true
+          }
+        ]
+      },
+      "matches": false
+    },
+    {
+      "name": "objects-expectation-not-an-array",
+      "rule": "entries of objects are matched by name",
+      "expected": {
+        "objects": {
+          "name": "cube"
+        }
+      },
+      "actual": {
+        "objects": [
+          {
+            "name": "cube"
+          }
+        ]
+      },
+      "matches": false
+    },
+    {
+      "name": "absent-object-really-absent",
+      "rule": "an entry may carry absent: true to assert no such object exists",
+      "expected": {
+        "objects": [
+          {
+            "name": "removed",
+            "absent": true
+          }
+        ]
+      },
+      "actual": {
+        "objects": [
+          {
+            "name": "cube"
+          }
+        ]
+      },
+      "matches": true
+    },
+    {
+      "name": "absent-object-still-present",
+      "rule": "an entry may carry absent: true to assert no such object exists",
+      "expected": {
+        "objects": [
+          {
+            "name": "cube",
+            "absent": true
+          }
+        ]
+      },
+      "actual": {
+        "objects": [
+          {
+            "name": "cube"
+          }
+        ]
+      },
+      "matches": false
+    },
+    {
+      "name": "warning-substring-found",
+      "rule": "warnings, errors and logs match by substring",
+      "expected": {
+        "warnings": [
+          "wireframe is unsupported"
+        ]
+      },
+      "actual": {
+        "warnings": [
+          "MeshStandardMaterial.wireframe is unsupported in RealityKit"
+        ]
+      },
+      "matches": true
+    },
+    {
+      "name": "warning-substring-missing",
+      "rule": "warnings, errors and logs match by substring",
+      "expected": {
+        "warnings": [
+          "shadows are unsupported"
+        ]
+      },
+      "actual": {
+        "warnings": [
+          "MeshStandardMaterial.wireframe is unsupported"
+        ]
+      },
+      "matches": false
+    },
+    {
+      "name": "empty-warning-list-asserts-none",
+      "rule": "an empty substring list asserts nothing was recorded on that channel",
+      "expected": {
+        "warnings": []
+      },
+      "actual": {
+        "warnings": [
+          "something happened"
+        ]
+      },
+      "matches": false
+    },
+    {
+      "name": "empty-warning-list-with-none-recorded",
+      "rule": "an empty substring list asserts nothing was recorded on that channel",
+      "expected": {
+        "warnings": []
+      },
+      "actual": {
+        "warnings": []
+      },
+      "matches": true
+    },
+    {
+      "name": "logs-match-by-substring",
+      "rule": "warnings, errors and logs match by substring",
+      "expected": {
+        "logs": [
+          "pong"
+        ]
+      },
+      "actual": {
+        "logs": [
+          "log: pong from the script"
+        ]
+      },
+      "matches": true
+    },
+    {
+      "name": "unexpected-error-fails-when-expectation-is-silent",
+      "rule": "an unexpected error always fails the case",
+      "expected": {
+        "frame": 3
+      },
+      "actual": {
+        "frame": 3,
+        "errors": [
+          "TypeError: boom"
+        ]
+      },
+      "matches": false
+    },
+    {
+      "name": "declared-error-passes",
+      "rule": "an unexpected error always fails the case",
+      "expected": {
+        "errors": [
+          "boom"
+        ]
+      },
+      "actual": {
+        "errors": [
+          "TypeError: boom"
+        ]
+      },
+      "matches": true
+    },
+    {
+      "name": "declared-empty-errors-with-none",
+      "rule": "an unexpected error always fails the case",
+      "expected": {
+        "errors": []
+      },
+      "actual": {
+        "errors": []
+      },
+      "matches": true
+    },
+    {
+      "name": "null-expected-and-null-actual",
+      "rule": "a null expectation matches null or a missing value",
+      "expected": {
+        "environment": null
+      },
+      "actual": {
+        "environment": null
+      },
+      "matches": true
+    },
+    {
+      "name": "null-expected-and-missing-actual",
+      "rule": "a null expectation matches null or a missing value",
+      "expected": {
+        "environment": null
+      },
+      "actual": {
+        "frame": 1
+      },
+      "matches": true
+    },
+    {
+      "name": "null-expected-but-value-present",
+      "rule": "a null expectation matches null or a missing value",
+      "expected": {
+        "environment": null
+      },
+      "actual": {
+        "environment": {
+          "url": "asset://studio.exr"
+        }
+      },
+      "matches": false
+    },
+    {
+      "name": "nested-object-subset",
+      "rule": "nested objects are compared key by key",
+      "expected": {
+        "objects": [
+          {
+            "name": "cube",
+            "material": {
+              "color": [
+                1,
+                0,
+                0
+              ]
+            }
+          }
+        ]
+      },
+      "actual": {
+        "objects": [
+          {
+            "name": "cube",
+            "material": {
+              "type": "MeshStandardMaterial",
+              "color": [
+                1,
+                0,
+                0
+              ],
+              "opacity": 1
+            }
+          }
+        ]
+      },
+      "matches": true
+    },
+    {
+      "name": "nested-object-value-differs",
+      "rule": "nested objects are compared key by key",
+      "expected": {
+        "objects": [
+          {
+            "name": "cube",
+            "material": {
+              "opacity": 1
+            }
+          }
+        ]
+      },
+      "actual": {
+        "objects": [
+          {
+            "name": "cube",
+            "material": {
+              "opacity": 0.5
+            }
+          }
+        ]
+      },
+      "matches": false
+    },
+    {
+      "name": "object-expected-against-non-object",
+      "rule": "nested objects are compared key by key",
+      "expected": {
+        "objects": [
+          {
+            "name": "cube",
+            "material": {
+              "opacity": 1
+            }
+          }
+        ]
+      },
+      "actual": {
+        "objects": [
+          {
+            "name": "cube",
+            "material": null
+          }
+        ]
+      },
+      "matches": false
+    },
+    {
+      "name": "missing-actual-dump",
+      "rule": "a dump that is not an object fails",
+      "expected": {
+        "frame": 1
+      },
+      "actual": null,
+      "matches": false
+    }
+  ]
+}

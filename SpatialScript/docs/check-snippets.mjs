@@ -29,7 +29,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHost } from "../conformance/run-node.mjs";
+import { createHost } from "../verification/conformance/run-node.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
@@ -81,16 +81,22 @@ export function extractSnippets(source, file) {
 }
 
 function parseDirectives(line) {
-  const directives = { expectError: null, backend: "realitykit", platform: "macos" };
+  const directives = { expectError: null, expectWarning: null, asset: "loaded", backend: "realitykit", platform: "macos" };
 
   const expected = /<!--\s*expect-error:\s*(.+?)\s*-->/.exec(line);
   if (expected) directives.expectError = expected[1];
+
+  // A snippet that sits under a documented warning declares it, and the runner fails if it is
+  // absent — the mirror of expect-error (AR-08).
+  const expectedWarning = /<!--\s*expect-warning:\s*(.+?)\s*-->/.exec(line);
+  if (expectedWarning) directives.expectWarning = expectedWarning[1];
 
   const options = /<!--\s*snippet:\s*(.+?)\s*-->/.exec(line);
   if (options) {
     for (const pair of options[1].split(/[,\s]+/)) {
       const [key, value] = pair.split("=");
-      if (key === "backend" || key === "platform") directives[key] = value;
+      // `asset=error` makes the runner refuse loads, for a snippet whose point is the failure path.
+      if (key === "backend" || key === "platform" || key === "asset") directives[key] = value;
     }
   }
   return directives;
@@ -117,6 +123,39 @@ async function runSnippet(bundleSource, snippet) {
     return { problems, dump: null };
   }
 
+  // Callbacks the runner is able to answer. Each is removed once the snippet's
+  // own handler has run, so anything left is a body that never executed.
+  const pendingCallbacks = new Set();
+  const spatial = host.spatial.Spatial;
+  const trackedLoadAsset = spatial.loadAsset.bind(spatial);
+  spatial.loadAsset = (urls) => {
+    const promise = trackedLoadAsset(urls);
+    pendingCallbacks.add("loadAsset");
+    return {
+      then: (onOk, onErr) =>
+        promise.then(
+          (value) => {
+            pendingCallbacks.delete("loadAsset");
+            return onOk ? onOk(value) : value;
+          },
+          (error) => {
+            // The runner answers every asset with an error, so a recipe that
+            // only wrote a success handler has nothing to run. That is the
+            // snippet's own shape, not a failure, and the rejection must not
+            // escape into the checker.
+            pendingCallbacks.delete("loadAsset");
+            return onErr ? onErr(error) : undefined;
+          },
+        ),
+      catch: (onErr) =>
+        promise.catch((error) => {
+          pendingCallbacks.delete("loadAsset");
+          return onErr(error);
+        }),
+      finally: (fn) => promise.finally(fn),
+    };
+  };
+
   let answered = 0;
   for (let frame = 0; frame < TICKS; frame += 1) {
     try {
@@ -131,7 +170,13 @@ async function runSnippet(bundleSource, snippet) {
     // nothing in Node answers the `asset` command the core emitted.
     for (const command of host.recorded.slice(answered)) {
       if (command[0] === "asset") {
-        host.spatial.dispatch("assetError", command[1], { message: "no asset loader in the snippet checker" });
+        // Answer the load the way a real consumer would, so a recipe's success path runs; a
+        // snippet whose subject is the failure asks for `asset=error` (AR-08).
+        if (snippet.asset === "error") {
+          host.spatial.dispatch("assetError", command[1], { message: "the snippet checker was asked to refuse this load" });
+        } else {
+          host.spatial.dispatch("assetLoaded", command[1], { animations: [], boundingBox: [-0.5, -0.5, -0.5, 0.5, 0.5, 0.5] });
+        }
       }
     }
     answered = host.recorded.length;
@@ -143,6 +188,35 @@ async function runSnippet(bundleSource, snippet) {
 
   const dump = host.spatial.dump();
   const errors = dump.errors;
+
+  // A snippet that never ran is not a passing snippet. "It ran" is: it built
+  // something the consumer would see, or it printed something on purpose, or
+  // it declared itself an error case (AR-08).
+  if (!snippet.expectError) {
+    const printed = host.logs.some((line) => line.startsWith("log:") || line.startsWith("info:"));
+    if (dump.objects.length === 0 && !printed) {
+      problems.push(
+        "the snippet mounted no objects and logged nothing, so nothing in its body is known to have run",
+      );
+    }
+    // A snippet that registers a callback the runner can answer must see it
+    // fire: an asset recipe whose `.then` never runs is a recipe that rots.
+    if (pendingCallbacks.size > 0) {
+      problems.push(
+        `registered ${pendingCallbacks.size} callback(s) the runner answered and none of them ran: ` +
+          `${Array.from(pendingCallbacks).join(", ")}`,
+      );
+    }
+  }
+
+  if (snippet.expectWarning) {
+    const matched = dump && dump.warnings.some((warning) => warning.includes(snippet.expectWarning));
+    if (!matched) {
+      problems.push(
+        `expected a warning containing ${JSON.stringify(snippet.expectWarning)}, got ${JSON.stringify(dump ? dump.warnings : [])}`,
+      );
+    }
+  }
 
   if (snippet.expectError) {
     const matched = errors.some((entry) => entry.includes(snippet.expectError));

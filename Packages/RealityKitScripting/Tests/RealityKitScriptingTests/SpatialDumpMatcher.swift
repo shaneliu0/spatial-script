@@ -7,7 +7,7 @@
 
 import Foundation
 
-/// The subset matcher from SPEC section 9, matching `conformance/match.mjs`.
+/// The subset matcher from SPEC section 9, matching `verification/conformance/match.mjs`.
 ///
 /// Every key in `expected` must exist in `actual` with an equal value; numbers
 /// match within 1e-3; arrays match element wise; entries of `objects` are
@@ -99,6 +99,15 @@ enum SpatialDumpMatcher {
     ) {
         guard let expected else {
             diffs.append("\(key): expectation must be an array of substrings")
+            return
+        }
+        // An empty list asserts that nothing was recorded on that channel at
+        // all, which is how `match.mjs` reads it: writing `[]` must not be a
+        // way to switch the check off.
+        guard !expected.isEmpty else {
+            if !actual.isEmpty {
+                diffs.append("\(key): expected none, got \(actual)")
+            }
             return
         }
         for needle in expected where !actual.contains(where: { $0.contains(needle) }) {

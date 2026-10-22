@@ -8,17 +8,7 @@ importers:
 
   .: {}
 
-  core:
-    dependencies:
-      three:
-        specifier: 0.186.0
-        version: 0.186.0
-    devDependencies:
-      esbuild:
-        specifier: ^0.25.0
-        version: 0.25.12
-
-  web:
+  consumers/web:
     dependencies:
       '@dimforge/rapier3d-compat':
         specifier: ^0.14.0
@@ -33,6 +23,16 @@ importers:
       playwright:
         specifier: ^1.56.0
         version: 1.63.0
+
+  core:
+    dependencies:
+      three:
+        specifier: 0.186.0
+        version: 0.186.0
+    devDependencies:
+      esbuild:
+        specifier: ^0.25.0
+        version: 0.25.12
 
 packages:
 

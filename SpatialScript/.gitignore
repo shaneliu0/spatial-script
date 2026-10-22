@@ -1,3 +1,5 @@
 node_modules/
-web/harness/out/
+consumers/web/dist/
+consumers/web/harness/out/
+verification/parity/out/
 *.log

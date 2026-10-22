@@ -1,6 +1,6 @@
 packages:
   - core
-  - web
+  - consumers/web
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:

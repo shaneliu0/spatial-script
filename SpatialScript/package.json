@@ -4,9 +4,15 @@
   "version": "0.1.0",
   "packageManager": "pnpm@11.21.0",
   "scripts": {
-    "build": "pnpm -r --filter ./core --filter ./web build",
+    "build": "pnpm -r --filter ./core --filter ./consumers/web build",
     "test": "pnpm -r test",
-    "conformance:node": "node conformance/run-node.mjs",
-    "conformance:web": "node web/harness/run.mjs"
+    "conformance:node": "node verification/conformance/run-node.mjs",
+    "conformance:web": "node consumers/web/harness/run.mjs",
+    "conformance:jsc": "pnpm --filter @spatialscript/core test:jsc",
+    "robustness": "node verification/scenarios/run-robustness.mjs",
+    "scenarios": "node verification/scenarios/run-node.mjs",
+    "docs:check": "node docs/check-snippets.mjs",
+    "parity": "verification/parity/run-all.sh",
+    "perf": "node verification/perf/check.mjs"
   }
 }
