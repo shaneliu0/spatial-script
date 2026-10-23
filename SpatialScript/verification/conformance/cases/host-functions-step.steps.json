@@ -1,0 +1,7 @@
+[
+  { "frames": 1 },
+  { "hostFunctions": ["Late.compute"] },
+  { "frames": 2 },
+  { "dispatch": { "type": "hostResult", "call": "Late.compute", "payload": { "value": { "answer": 42 } } } },
+  { "frames": 2 }
+]

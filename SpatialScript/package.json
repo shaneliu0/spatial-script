@@ -12,7 +12,11 @@
     "robustness": "node verification/scenarios/run-robustness.mjs",
     "scenarios": "node verification/scenarios/run-node.mjs",
     "docs:check": "node docs/check-snippets.mjs",
+    "parity:comparator": "node verification/parity/compare.test.mjs",
     "parity": "verification/parity/run-all.sh",
-    "perf": "node verification/perf/check.mjs"
+    "perf": "node verification/perf/check.mjs",
+    "verify": "pnpm test && pnpm conformance:matcher && pnpm conformance:node && pnpm conformance:jsc && pnpm robustness && pnpm scenarios && pnpm docs:check && pnpm parity:comparator && pnpm conformance:web && node consumers/web/harness/scenarios.mjs",
+    "gauntlet": "node verification/scenarios/run-gauntlet.mjs",
+    "conformance:matcher": "node verification/conformance/match.test.mjs"
   }
 }

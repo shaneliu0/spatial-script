@@ -1,0 +1,18 @@
+{
+  "objects": [
+    {
+      "name": "probe",
+      "userData": {
+        "seenEarly": [],
+        "seenLate": [
+          "Late.compute"
+        ],
+        "result": {
+          "answer": 42
+        },
+        "callError": null
+      }
+    }
+  ],
+  "errors": []
+}
