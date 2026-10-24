@@ -67,11 +67,32 @@ it, and on visionOS the viewer's head.
 `PerspectiveCamera` and `OrthographicCamera` **do** exist (phase 2), and
 assigning one to `Spatial.camera` takes the view over on macOS and the web:
 
-```js
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, BoxGeometry, MeshStandardMaterial, AmbientLight, PerspectiveCamera } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+const cube = new Mesh(new BoxGeometry(0.15, 0.15, 0.15), new MeshStandardMaterial());
+cube.name = "cube";
+scene.add(cube);
+
 const eye = new PerspectiveCamera(55, 1, 0.01, 20);
+eye.name = "eye";
 eye.position.set(0, 0.25, 1);
 eye.lookAt(0, 0, 0);
 Spatial.camera = eye;        // null hands the view back to the consumer
+
+Spatial.mount(scene);
+
+Spatial.onFrame(() => {
+  if (Spatial.time.frame !== 3) return;
+  // The camera reaches the consumer as its own object: the parameters are the
+  // top-level `camera` field, the pose travels with `objects`.
+  scene.userData.cameraKind = Spatial.dump().camera.kind;   // "perspective"
+  scene.userData.cameraIsObject = Spatial.find("eye") !== null || eye.isObject3D === true;
+  scene.userData.canFrame = Spatial.env.capabilities.camera; // false on visionOS
+});
 ```
 
 Consequences that remain:
@@ -118,9 +139,30 @@ The practical rule: content lives within about half a metre of the origin, and
 the viewer is roughly a metre away. Every parametric geometry defaults to
 **one metre**, which is a wall, not a prop — always pass explicit sizes.
 
-```js
-new BoxGeometry(0.2, 0.2, 0.2)     // a chunky, visible cube
-new BoxGeometry()                   // a 1 m cube: you are inside it
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, BoxGeometry, MeshStandardMaterial, AmbientLight } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+
+const prop = new Mesh(new BoxGeometry(0.2, 0.2, 0.2), new MeshStandardMaterial());
+prop.name = "prop";                  // a chunky, visible cube
+scene.add(prop);
+
+const wall = new Mesh(new BoxGeometry(), new MeshStandardMaterial());
+wall.name = "wall";                  // a 1 m cube: you are inside it
+wall.position.x = 2;
+scene.add(wall);
+
+Spatial.mount(scene);
+
+Spatial.onFrame(() => {
+  if (Spatial.time.frame !== 3) return;
+  const of = (name) => Spatial.dump().objects.find((entry) => entry.name === name);
+  scene.userData.propWidth = of("prop").geometry.parameters.width;   // 0.2
+  scene.userData.wallWidth = of("wall").geometry.parameters.width;   // 1
+});
 ```
 
 ## 4. The script body is async
@@ -159,10 +201,31 @@ Drag is the one that surprises people: **the script owns the position.** The
 consumer reports `event.translation`, the world-space displacement since
 `dragstart`, and never moves the object itself.
 
-```js
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, BoxGeometry, MeshStandardMaterial, AmbientLight, Vector3 } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+const box = new Mesh(new BoxGeometry(0.12, 0.12, 0.12), new MeshStandardMaterial());
+box.name = "box";
+scene.add(box);
+
+// The whole pattern: capture where the drag began, add the world-space
+// displacement the consumer reports. It never moves the object for you.
 const origin = new Vector3();
 box.addEventListener("dragstart", () => origin.copy(box.position));
 box.addEventListener("drag", (event) => box.position.copy(origin).add(event.translation));
+box.addEventListener("dragend", (event) => { scene.userData.total = event.translation.toArray(); });
+
+Spatial.mount(scene);
+
+Spatial.onFrame(() => {
+  // inject.drag interpolates `steps` drag events, each carrying the
+  // displacement since dragstart — not since the previous event.
+  if (Spatial.time.frame === 5) Spatial.inject.drag("box", new Vector3(0.1, 0, 0), { steps: 4 });
+  if (Spatial.time.frame === 20) scene.userData.movedX = box.position.x;   // 0.1, not 0.25
+});
 ```
 
 Polled input has no three.js counterpart at all: `Spatial.input.keyboard`,
@@ -183,10 +246,39 @@ mounted scene, not "no children of the objects I pass" (you pass none). A
 three.js has no physics. SpatialScript does, and it runs in the consumer
 (RealityKit physics, or Rapier on web).
 
-```js
-mesh.rigidBody = new Spatial.RigidBody({ type: "dynamic", mass: 1, restitution: 0.5 });
+```js runnable
+const Spatial = require("spatial");
+const S = require("spatial");
+
+const scene = new S.Scene();
+scene.add(new S.AmbientLight(0xffffff, 1));
 Spatial.physics.gravity.set(0, -9.81, 0);
-Spatial.physics.add(new Spatial.Joint({ type: "revolute", bodyA, bodyB, axis }));
+
+const anchor = new S.Mesh(new S.BoxGeometry(0.06, 0.06, 0.06), new S.MeshStandardMaterial());
+anchor.name = "anchor";
+anchor.position.y = 0.2;
+anchor.rigidBody = new S.RigidBody({ type: "static" });
+scene.add(anchor);
+
+const bob = new S.Mesh(new S.SphereGeometry(0.04, 16, 12), new S.MeshStandardMaterial());
+bob.name = "bob";
+bob.rigidBody = new S.RigidBody({ type: "dynamic", mass: 1, restitution: 0.5 });
+scene.add(bob);
+
+Spatial.physics.add(new S.Joint({
+  type: "revolute", bodyA: anchor, bodyB: bob, axis: new S.Vector3(0, 0, 1),
+}));
+
+Spatial.mount(scene);
+
+Spatial.onFrame(() => {
+  if (Spatial.time.frame !== 3) return;
+  const dump = Spatial.dump();
+  scene.userData.gravity = dump.gravity;                       // [0, -9.81, 0]
+  scene.userData.joints = dump.joints.length;                  // 1
+  // Read-only, consumer-owned: the setters are the way to write them.
+  scene.userData.velocity = bob.rigidBody.linearVelocity.toArray();
+});
 ```
 
 Six rules that have no three.js analogue:
@@ -306,7 +398,50 @@ These names are simply **not exported**. Referencing one is a plain
 | texture compression formats | supply PNG/JPEG |
 
 `Scene.background`, `Scene.environment` and `Scene.fog` throw instead of being
-absent, because a silent no-op there would be invisible.
+absent, because a silent no-op there would be invisible — while
+`Mesh.material = [...]`, which phase 1 also threw on, is now supported:
+
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, BoxGeometry, MeshStandardMaterial, AmbientLight } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+
+// Phase 2: an array of materials with geometry.groups is supported, where
+// phase 1 threw SpatialUnsupportedError on the assignment.
+const geometry = new BoxGeometry(0.15, 0.15, 0.15);
+geometry.groups.length = 0;
+geometry.addGroup(0, 18, 0);
+geometry.addGroup(18, 18, 1);
+const cube = new Mesh(geometry, [
+  new MeshStandardMaterial({ color: 0xff4455 }),
+  new MeshStandardMaterial({ color: 0x44dd99 }),
+]);
+cube.name = "cube";
+scene.add(cube);
+
+Spatial.mount(scene);
+
+Spatial.onFrame(() => {
+  if (Spatial.time.frame !== 3) return;
+  scene.userData.materials = cube.material.length;                              // 2, no throw
+  scene.userData.dumped = Spatial.dump().objects.find((o) => o.name === "cube").material.length;
+});
+```
+
+The three that still throw, unchanged:
+
+<!-- expect-error: Scene.background is not in scope -->
+```js runnable
+const Spatial = require("spatial");
+const scene = new Spatial.Scene();
+scene.name = "world";
+scene.add(new Spatial.AmbientLight(0xffffff, 1));
+Spatial.mount(scene);
+
+scene.background = new Spatial.Color(0x101014);   // SpatialUnsupportedError
+```
 
 **Phase 2 shipped nine things this table used to send you around.** If you are
 working from older notes, these all exist now:
@@ -358,7 +493,52 @@ are `receiveShadow` on RealityKit (its surfaces always receive shadows) and
 | unparseable colour string | stays white, three.js logs `THREE.Color: Unknown color` |
 
 The invariant: **no script input may crash the host or stop the frame loop.**
-One bad object never stops the others from updating.
+One bad object never stops the others from updating:
+
+<!-- expect-error: would make the scene graph cyclic -->
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Group, Mesh, BoxGeometry, MeshStandardMaterial, AmbientLight } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+
+// A negative size becomes its absolute value, with a warning naming the change.
+const squashed = new Mesh(new BoxGeometry(-0.2, 0.1, 0.1), new MeshStandardMaterial());
+squashed.name = "squashed";
+scene.add(squashed);
+
+// null is ignored with a warning, as in three.js.
+scene.add(null);
+
+// A cycle is refused and recorded, not thrown.
+const outer = new Group();
+outer.name = "outer";
+const inner = new Group();
+inner.name = "inner";
+outer.add(inner);
+scene.add(outer);
+inner.add(outer);            // would make the graph cyclic
+
+const healthy = new Mesh(new BoxGeometry(0.1, 0.1, 0.1), new MeshStandardMaterial());
+healthy.name = "healthy";
+scene.add(healthy);
+
+Spatial.mount(scene);
+
+Spatial.onFrame((deltaTime) => {
+  healthy.rotation.y += deltaTime;      // keeps running through all of it
+  if (Spatial.time.frame !== 5) return;
+  const dump = Spatial.dump();
+  scene.userData.width = dump.objects.find((o) => o.name === "squashed").geometry.parameters.width;
+  scene.userData.warnings = dump.warnings.length;      // the normalisation notes
+  scene.userData.stillTurning = healthy.rotation.y > 0;
+  scene.userData.innerParent = inner.parent === outer;  // the cycle was refused
+});
+```
+
+The cyclic-parent refusal is recorded in `dump().errors`, so this snippet is
+expected to have one — that is the contract, not a failure.
 
 ## 12. Errors never stop the scene
 
@@ -368,6 +548,32 @@ One bad object never stops the others from updating.
 | top-level, after an `await` | runtime error — recorded, scene keeps running |
 | inside `onFrame`, `this.update`, an event listener, a timer | runtime error — that call is abandoned, the rest of the frame proceeds, the other listeners still run |
 | core validation (shear, non-finite transform, cycle) | runtime error — that object is skipped for the frame |
+
+A throw inside a callback costs that callback, not the scene:
+
+<!-- expect-error: boom from onFrame -->
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, BoxGeometry, MeshStandardMaterial, AmbientLight } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+const box = new Mesh(new BoxGeometry(0.12, 0.12, 0.12), new MeshStandardMaterial());
+box.name = "box";
+scene.add(box);
+
+Spatial.mount(scene);
+
+// This one throws every frame. It is caught, reported once a second, and the
+// callbacks after it still run.
+Spatial.onFrame(() => { throw new Error("boom from onFrame"); });
+
+Spatial.onFrame((deltaTime) => {
+  box.rotation.y += deltaTime;
+  scene.userData.frame = Spatial.time.frame;
+  scene.userData.stillTurning = box.rotation.y > 0;
+});
+```
 
 Runtime errors are deduplicated by message and reported at most once per
 second, so a throw on every frame does not flood the log. They accumulate in

@@ -1141,7 +1141,8 @@ Spatial.onFrame(() => {
 
 **Confirm in the dump:** `shelf.userData.report.foundGreen === true`,
 `foundMissing === false`, `sharedGeometry === true` (all three cubes share one
-geometry `uuid`, so they are one native mesh resource), and `errors === 0`.
+geometry `uuid`, so they are one native mesh resource on both backends — see
+[Geometry caching](./API.md#geometry-caching)), and `errors === 0`.
 From outside the app: `curl -s http://127.0.0.1:8787/dump | jq '.objects[] | select(.name=="shelf") | .userData.report'`.
 
 ---
@@ -1230,11 +1231,11 @@ collision }`), check the object is a `Mesh`, and do a real click.
 **When the screenshot has to match the dump**, use `POST /parity` instead: it
 runs the same step plan with a fixed `dt` and then holds the final frame until
 the next push, so a `screencapture` corresponds exactly to the returned dump.
-`parity/run-parity.mjs` does that on the Mac and in headless Chromium at once
+`verification/parity/run-parity.mjs` does that on the Mac and in headless Chromium at once
 and diffs both dumps, both native dumps and the console:
 
 ```bash
-node parity/run-parity.mjs scene.js --steps parity/steps/basics.json --label mine
+node verification/parity/run-parity.mjs scene.js --steps verification/parity/steps/basics.json --label mine
 ```
 
 Put the same steps in a file and the two backends are running the identical
@@ -1409,9 +1410,11 @@ and `flipY: false` flips the decoded image.
 
 Most of a scene never moves. `matrixAutoUpdate = false` tells the core so: the
 matrix becomes authoritative and the object costs sixteen array compares per
-frame instead of a full transform read. Measured on the development Mac in the
-interpreter (the visionOS execution mode), 8000 static objects cost 22 ms per
-frame without the hint and 8.4 ms with it.
+frame instead of a full transform read. Measured on the running macOS host with the
+JIT on, 1500 static meshes cost 0.260 ms of core tick and 0.059 ms of apply per
+frame, against 0.381 ms and about 2 ms for the same 1500 moving; in the no-JIT
+JavaScriptCore driver — the visionOS execution mode — it is 1.7 ms static
+against 3.8 ms moving.
 
 ```js runnable
 const Spatial = require("spatial");
@@ -1442,8 +1445,9 @@ const city = new Group();
 city.name = "city";
 scene.add(city);
 
-// One geometry and one material for the whole field: both consumers cache
-// native resources by uuid, so this is one native mesh and one material.
+// One geometry and one material for the whole field: both consumers cache by
+// uuid and revision, so sharing the instance is one native mesh and one
+// material — parametric or hand-built alike.
 const block = new BoxGeometry(0.02, 0.02, 0.02);
 const stone = new MeshStandardMaterial({ color: 0x6b7280, roughness: 0.9 });
 
@@ -1565,15 +1569,17 @@ Spatial.onFrame((deltaTime, elapsed) => {
 `userData`.
 
 **Confirm in the dump:** `swarm.userData.poll.compactCount === 63` (the two
-lights, the group and its 60 motes), `compactBytes` is a small fraction of
-`fullBytes` — about 11 KB against 74 KB for this scene — and `watchedPosition`
-tracks the rotation. A compact object entry has exactly
-`id`, `name`, `type`, `parent`, `visible`, `position`, `quaternion`, `scale`,
-`worldPosition` — no geometry, material, light, rigid body, flags or
-`userData`.
+lights, the group and its 60 motes) and `watchedPosition` tracks the rotation.
 
-From outside the macOS host the same narrowing is available as query parameters,
-answered from a 100 ms cache:
+`compact` keeps every object and every field except `userData` and
+`geometry.parameters`, rounding the transforms — on this scene that is 61 KB
+against 74 KB full, because these motes carry almost no `userData`. The saving
+grows with what a scene stores; when you want a genuinely small answer,
+`objects: false` is the one to reach for (**~600 bytes and 14 ms even on a
+10 000-object scene**), and `names`/`fields` when you want particular objects.
+
+From outside the macOS host the same four options are query parameters, answered
+from a 100 ms cache:
 
 ```bash
 curl -s 'http://127.0.0.1:8787/dump?objects=0' | jq '{frame, errors, droppedErrors}'
@@ -1630,7 +1636,9 @@ chime.setVolume(0.9);
 chime.setRefDistance(0.3);         // the 1 m default never attenuates in a 0.4 m scene
 chime.setRolloffFactor(1.4);
 chime.setDistanceModel("inverse");
-chime.setDirectionalCone(60, 140, 0.25);   // degrees, aimed down the object's -Z
+// Degrees, not radians: setDirectionalCone keeps three.js's PannerNode units,
+// unlike every other angle in the namespace. Aimed down the object's -Z.
+chime.setDirectionalCone(60, 140, 0.25);
 chime.reverbLevel = -8;                    // decibels, not a 0..1 mix
 bell.add(chime);
 
@@ -1680,8 +1688,9 @@ has `audio.ambient === true`. `audio.playing` and `audio.currentTime` come from
 the consumer, so they stay `false`/`0` in a headless run — that is expected, not
 a failure.
 
-**The trap:** `isPlaying` is native-driven, so it is **still `false` on the frame
-you call `play()`**. Toggle against it a frame later, or track your own intent.
+**The trap:** `isPlaying` is your intent and flips on the calling frame, but
+`currentTime` and `duration` are the consumer's and stay `0` until its first
+`syncAudio` — so a progress readout computed on the first frame divides by zero.
 
 ---
 
@@ -1733,7 +1742,7 @@ screen.addEventListener("error", (event) => {
 });
 
 screen.addEventListener("tap", () => {
-  // Toggle against the transport the consumer reports, not a local guess.
+  // play()/pause() set isPlaying on this frame, so the toggle is correct at once.
   if (screen.isPlaying) screen.pause();
   else screen.play();
   scene.userData.taps = (scene.userData.taps || 0) + 1;
@@ -1914,9 +1923,16 @@ const pebble = new S.SphereGeometry(0.03, 18, 12);
 });
 
 // Fields act on dynamic bodies within `radius` of their own world position.
+//
+// `strength` is newtons AT ONE METRE, and this scene lives inside 0.4 m, so an
+// inverseSquare field is far stronger than its number looks: F = strength / d^2.
+// Working backwards from the drift we want, 2 m/s^2 on a 0.25 kg pebble at
+// 0.15 m:  strength = a * mass * d^2 = 2 * 0.25 * 0.0225 = 0.011 N at 1 m.
+// `minimumDistance` holds the force at its 0.15 m value closer in, which is what
+// stops it running away at the centre.
 const repeller = new S.RadialForceField({
-  strength: 0.6,
-  minimumDistance: 0.04,     // stops the force going to infinity at the centre
+  strength: 0.011,
+  minimumDistance: 0.15,
   falloff: "inverseSquare",
   radius: 0.3,
 });
@@ -1960,7 +1976,7 @@ Spatial.onFrame((deltaTime, elapsed) => {
   }
   if (keyboard.wasPressed("KeyF")) molasses.enabled = !molasses.enabled;
 
-  repeller.strength = 0.6 + Math.sin(elapsed * 1.2) * 0.35;
+  repeller.strength = 0.011 + Math.sin(elapsed * 1.2) * 0.005;
   scene.userData.onGround = controller.isOnGround;
 });
 
@@ -1969,12 +1985,23 @@ Spatial.mount(scene);
 
 **Expect:** WASD walks the blue capsule around the slab, sliding along the step
 and climbing it; Space jumps; R teleports home; F toggles the drag field. The
-pebbles drift outward from the middle and settle.
+pebbles drift gently outward from the middle, drop onto the slab and stop.
+Measured on the three.js consumer with these numbers: after one second the
+furthest pebble is 0.26 m from the field's centre and moving at 0.12 m/s; after
+two seconds, 0.32 m and 0.02 m/s; by four seconds every pebble is at rest at
+y = -0.221, sitting on the slab. If yours leave the arena instead, the field
+strength is wrong for the scale: see the arithmetic in the comment above, and
+watch for `warnings` naming the field, which is the consumers' 1000 m/s² clamp
+saying the number is too large.
 
 **Confirm in the dump:** the `walker` entry has
 `characterController: { radius: 0.035, height: 0.16, slopeLimit: 0.7, stepLimit: 0.06, gravity: true }`
 and a sibling `isOnGround`; `repeller.forceField.kind === "RadialForceField"`
 with `falloff: "inverseSquare"`, and `molasses.forceField.enabled` flips with F.
+Each pebble's `worldPosition` should stay within about `radius` of
+`(0, -0.1, 0)` — measured, the furthest settles at 0.32 m against a 0.3 m
+`radius`, because a pebble keeps the speed it had when it left the field — and
+`warnings` should stay empty.
 
 **The trap:** a character controller is **native-driven**. Writing
 `walker.position` fights the consumer; use `move` for walking and `teleport` for
@@ -2357,7 +2384,7 @@ Drive it from outside:
 ```bash
 jq -n --rawfile source scene.js '{ source: $source, preserveState: true }' \
   | curl -s -X POST --data-binary @- http://127.0.0.1:8787/script
-curl -s 'http://127.0.0.1:8787/dump?names=&objects=0' | jq '.loadGeneration'
+curl -s 'http://127.0.0.1:8787/dump?names=' | jq '.loadGeneration'
 ```
 
 **Confirm in the dump:** `loadGeneration` increments on every load, and after a

@@ -114,7 +114,7 @@ curl -s http://127.0.0.1:8787/dump | jq '{errors, droppedErrors, warnings, count
 curl -s http://127.0.0.1:8787/dump | jq '.objects[] | select(.name=="cube")'
 
 # the cheap forms, for polling (see below)
-curl -s 'http://127.0.0.1:8787/dump?compact=1'
+curl -s 'http://127.0.0.1:8787/dump?objects=0'
 curl -s 'http://127.0.0.1:8787/dump?names=cube,floor&fields=position,visible'
 
 # the same shape rebuilt from the live RealityKit entities: compare the two to
@@ -158,21 +158,48 @@ server.
 
 | Parameter | Effect |
 |---|---|
-| `compact=1` | each object reduced to `id`, `name`, `type`, `parent`, `visible`, `position`, `quaternion`, `scale`, `worldPosition`, rounded to four decimals |
+| `objects=0` | no object list at all — just the scene summary, `warnings`, `errors` and `droppedErrors` |
+| `compact=1` | every object, with transforms rounded to four decimals, `geometry.parameters` dropped and **`userData` dropped** |
 | `names=a,b,c` | only objects with those names |
 | `fields=position,visible` | only those per-object keys (`id` and `name` are always present) |
-| `objects=0` | no object list at all — just the scene summary, `warnings`, `errors` and `droppedErrors` |
 
-The top-level fields survive every combination, so `?objects=0` is the cheapest
-health check there is.
+All four ride the in-context serializer, and all four take the same query string
+on `/native-dump`. The top-level fields survive every combination, so
+`?objects=0` is the cheapest health check there is.
 
-**Poll a narrowed dump, and never poll a full `/native-dump`.** An unfiltered
-`/dump` is serialised inside JavaScriptCore in one pass, so even a 10 000-object
-scene costs about **90 ms** — tolerable once, still a dropped frame if you do it
-in a loop. `/native-dump` has no such fast path: it is rebuilt value by value
-from the live entities, and the same scene costs about **0.6 s**. Use the full
-native dump for a one-shot comparison, and `?compact=1` or `?names=` when you
-need to watch it. The pattern that scales:
+**Poll a narrowed dump, and never poll a full `/native-dump`.** No tool in
+`verification/perf` times a dump, so measure it yourself — build a big scene,
+then time each route:
+
+```bash
+node verification/perf/gen-stress.mjs --count 10000 --static --shared-geometry --shared-material \
+  | curl -s -X POST --data-binary @- http://127.0.0.1:8787/script
+
+for q in '' '?objects=0' '?names=c1' '?fields=position'; do
+  printf '%-18s ' "/dump$q"
+  curl -s -o /tmp/d.json -w '%{time_total}s ' "http://127.0.0.1:8787/dump$q"
+  wc -c < /tmp/d.json
+  sleep 0.4     # the routes carry a 100 ms cache; do not measure the cache
+done
+printf '%-18s ' /native-dump
+curl -s -o /tmp/n.json -w '%{time_total}s ' http://127.0.0.1:8787/native-dump; wc -c < /tmp/n.json
+```
+
+One 10 000-object run of that, for scale — re-measure rather than quoting these:
+
+| Route | Time | Bytes |
+|---|---|---|
+| `GET /dump` (full) | ~50 ms | 11.2 MB |
+| `GET /dump?objects=0` | 7–8 ms | 596 bytes |
+| `GET /dump?names=c1` | — | 1.8 KB |
+| `GET /dump?fields=position` | — | 955 KB |
+| `GET /native-dump` (full) | ~620 ms | 10.7 MB |
+
+The ordering is the durable part: `/dump` is serialised inside JavaScriptCore in
+one pass, while `/native-dump` is rebuilt value by value from the live entities
+and costs **an order of magnitude more**. Use the full native dump for a
+one-shot comparison and a narrowed one for anything repeated. The pattern that
+scales:
 
 ```bash
 # once, to learn the scene
@@ -235,9 +262,20 @@ reads its options once when its VM is first created — and does two things:
    the app. `GET /health` reports `"watchdog": "armed"` once it is on.
 2. **It mirrors visionOS performance.** visionOS never allows the JIT, so an
    interpreter run on the Mac is the closest local measurement of what a scene
-   will cost on device. Measured here: 1500 independently moving meshes run at
-   about **83 fps with a 3.7 ms core tick** in interpreter mode, against
-   **120 fps** with the JIT.
+   will cost on device.
+
+The size of that difference, from the no-JIT JavaScriptCore driver
+(`corepack pnpm --filter @spatialscript/core test:jsc`, medians of the best of
+two runs):
+
+| 1500 meshes, one shared geometry and material | core tick, no JIT | core tick, JIT on |
+|---|---|---|
+| moving every frame | **3.8 ms** | 0.381 ms |
+| static (`matrixAutoUpdate = false`) | **1.7 ms** | 0.260 ms |
+
+Roughly **an order of magnitude**, which is the number to plan against for
+visionOS. An end-to-end frame rate for the app in interpreter mode has not been
+re-measured on this machine; do not quote one until it has been.
 
 `GET /stats` reports `jit` alongside the timings, so a saved measurement always
 says which mode produced it. Compare interpreter runs with interpreter runs.
@@ -248,18 +286,24 @@ says which mode produced it. Compare interpreter runs with interpreter runs.
 curl -s http://127.0.0.1:8787/stats | jq
 ```
 
+Measured with `verification/perf/measure.sh --count 1500 --shared-geometry
+--shared-material` — 1500 independently moving meshes, one shared geometry and
+one shared material, DEBUG build, **JIT on**:
+
+One run of it (each field also carries `mean` and `max`, elided here):
+
 ```json
 {
   "frames": 120,
-  "coreTickMs":       { "mean": 0.42, "median": 0.38, "max": 1.9 },
-  "applyMs":          { "mean": 0.31, "median": 0.28, "max": 2.4 },
-  "frameIntervalMs":  { "mean": 8.31, "median": 8.30, "max": 9.1 },
-  "commandCount":     { "mean": 1.0,  "median": 1,    "max": 42 },
-  "framesPerSecond": 120.3,
+  "coreTickMs":       { "median": 0.381 },
+  "applyMs":          { "median": 1.879 },
+  "frameIntervalMs":  { "median": 8.34 },
+  "commandCount":     { "median": 1 },
+  "framesPerSecond": 121.0,
   "entityCount": 1503,
   "jit": true,
   "paused": false,
-  "pushToFirstFrameMs": 214,
+  "pushToFirstFrameMs": 264,
   "resourceCache": {
     "meshHits": 1499, "meshBuilds": 1, "materialHits": 1499, "materialBuilds": 1,
     "shapeHits": 0, "shapeBuilds": 0,
@@ -267,6 +311,13 @@ curl -s http://127.0.0.1:8787/stats | jq
   }
 }
 ```
+
+Every number here is a median over the last 120 frames on that one scene shape
+and that one engine mode, and they move between runs: `applyMs` on this scene
+has measured **1.88–2.12 ms** across passes, so read it as **about 2 ms**, not
+as a constant. Change the scene or turn the JIT off and they all move further —
+see [interpreter mode](#interpreter-mode) and the
+[performance guidance](docs/TROUBLESHOOTING.md#memory-and-performance).
 
 Over the last 120 frames:
 
@@ -280,7 +331,8 @@ Over the last 120 frames:
 | `entityCount` | live native entities | should track `dump().objects.length`; if it keeps growing, something is not being destroyed |
 | `jit` | whether JavaScriptCore is running with the JIT | `false` is interpreter mode, the visionOS-like measurement. Never compare a JIT number with an interpreter one |
 | `paused` | whether the scene is held on a frame | `true` after a `/parity` plan completes |
-| `pushToFirstFrameMs` | the last `POST /script` to its first rendered frame | the SPEC 12 target is under 1000 ms for 1500 meshes |
+| `pendingLoads` | resource loads in flight (textures, assets, environment, media) | a `/parity` plan does not advance a frame while this is non-zero |
+| `pushToFirstFrameMs` | the last `POST /script` to its first rendered frame | the SPEC 12 target is under 1000 ms for 1500 meshes. Measured: **289–305 ms** sharing one geometry and material, **337–364 ms** with a unique material per mesh |
 | `resourceCache` | native mesh, material and collision-shape cache counters | `meshBuilds: 1` with `meshHits: 1499` is what sharing one geometry looks like. `meshBuilds` climbing every frame means you are creating geometries in a loop |
 
 ### `POST /parity` — a deterministic run you can screenshot
@@ -300,10 +352,12 @@ screencapture -x -o -l <windowID> parity.png
 `steps` is the conformance step format (SPEC section 9): `{ "frames": N }` and
 the four `inject` forms, in order. The app loads the script and then runs the
 plan **deterministically** — every tick uses exactly `dt`, one tick per display
-frame, each inject applied at the exact frame the plan reaches it — and when the
-plan finishes it **stops ticking and holds the final frame** until the next
-`/script` or `/parity`. That is what makes a window capture match the returned
-state.
+frame, each inject applied at the exact frame the plan reaches it, and **no frame
+advances while a texture, asset, environment or media load is in flight** (the
+plan waits for the load to succeed or fail, up to 10 s, so a load result lands on
+the same frame on every backend) — and when the plan finishes it **stops ticking
+and holds the final frame** until the next `/script` or `/parity`. That is what
+makes a window capture match the returned state.
 
 Response:
 `{ ok, error, dump, nativeDump, console: [{ level, message }], hostEvents, frames }`.
@@ -324,27 +378,27 @@ headless Chromium.
 cd SpatialScript
 corepack pnpm install
 corepack pnpm --filter @spatialscript/core build      # core/dist/spatial-core.js
-corepack pnpm --filter @spatialscript/web build       # web/dist/page.js
+corepack pnpm --filter @spatialscript/web build       # consumers/web/dist/page.js
 
 # render one script and write a PNG plus a dump
-node web/harness/screenshot.mjs scene.js
+node consumers/web/harness/screenshot.mjs scene.js
 
 # with injected input and extra settle frames
-node web/harness/screenshot.mjs scene.js \
+node consumers/web/harness/screenshot.mjs scene.js \
   --frames 30 --inject tap:cube --inject 'drag:cube:0.1,0,0' --settle 60 \
   --out cube.png --camera 0,0.3,1
 ```
 
-Output lands in `web/harness/out/`: `<name>.png` and `<name>.dump.json`. The
+Output lands in `consumers/web/harness/out/`: `<name>.png` and `<name>.dump.json`. The
 tool prints both paths and any console errors. Options: `--frames N` (ticks
 before the injections), `--settle N` (ticks after them), `--inject
 type:target[:x,y,z]`, `--out`, `--out-dir`, `--camera x,y,z`, `--width`,
 `--height`, and `--camera-preset mac` (the macOS host's camera and viewport, for a
 shot you can hold next to a `screencapture`).
 
-Other harness entry points: `node web/harness/scenarios.mjs` (every scenario and
-robustness script, summarised), `node web/harness/bench.mjs` (frame rate under
-the real animation loop), `node web/harness/parity.mjs` (the web half of the
+Other harness entry points: `node consumers/web/harness/scenarios.mjs` (every scenario and
+robustness script, summarised), `node consumers/web/harness/bench.mjs` (frame rate under
+the real animation loop), `node consumers/web/harness/parity.mjs` (the web half of the
 parity gate).
 
 ## Verifying a scene
@@ -353,9 +407,10 @@ Three tools, in increasing order of what they prove.
 
 | Tool | Proves |
 |---|---|
-| `Spatial.inject` + `Spatial.dump(options)` | your listeners, bubbling and state machine are right. **Does not** prove an object is reachable by a real pointer — injection bypasses hit testing. Poll `?compact=1` or `?objects=0`, not the full dump |
+| `Spatial.inject` + `Spatial.dump(options)` | your listeners, bubbling and state machine are right. **Does not** prove an object is reachable by a real pointer — injection bypasses hit testing. Poll `?objects=0` or `?names=`, not the full dump |
 | the parity gate | the same script produces the same scene on both backends, in the core dump, the native dump and the console |
-| `perf/check.mjs` | the scene meets the SPEC 12 load-time, frame-rate and memory targets |
+| `verification/perf/check.mjs` | the scene meets the SPEC 12 load-time, frame-rate and memory targets |
+| `verification/scenarios/run-gauntlet.mjs` | the app survives every checked-in script, eleven hostile scripts and twenty-two malformed dev-server payloads with no crash report and a loadable scene afterwards |
 
 ### The parity gate
 
@@ -365,8 +420,8 @@ console output, and leaves the two screenshots side by side.
 
 ```bash
 # the macOS host must be running with its dev server up
-node parity/run-parity.mjs examples/basics.js --steps parity/steps/basics.json --label basics
-parity/run-all.sh        # every example and scenario that has a steps file
+node verification/parity/run-parity.mjs examples/basics.js --steps verification/parity/steps/basics.json --label basics
+verification/parity/run-all.sh        # every example and scenario that has a steps file
 ```
 
 A steps file is a JSON array in the conformance format:
@@ -380,7 +435,7 @@ A steps file is a JSON array in the conformance format:
 ```
 
 Scripts with no steps file get `[{ "frames": 120 }]`. Artefacts land in
-`parity/out/<label>/`: `mac.png`, `screenshot.png` (web), `mac.dump.json`,
+`verification/parity/out/<label>/`: `mac.png`, `screenshot.png` (web), `mac.dump.json`,
 `mac.native.json`, `mac.console.json`, `dump.json`, `native.json`,
 `console.json`, and `issues.json`. Output is one line per script:
 
@@ -396,9 +451,9 @@ macOS host is not reachable.
 ### The performance check
 
 ```bash
-node perf/check.mjs                                   # the macOS host must be running
-perf/measure.sh --count 1500 --shared-geometry        # one ad-hoc measurement
-node perf/gen-stress.mjs --count 1500 --shared-geometry --shared-material > stress.js
+node verification/perf/check.mjs                                   # replaces the running scene
+verification/perf/measure.sh --count 1500 --shared-geometry        # one ad-hoc measurement
+node verification/perf/gen-stress.mjs --count 1500 --shared-geometry --shared-material > stress.js
 ```
 
 `gen-stress.mjs` prints a stress scene; its flags are `--count N`,
@@ -409,11 +464,25 @@ Defaults are the hard case: unique geometry and material per mesh, all moving.
 
 ```
 ok   script loads: null
-ok   push to first frame under 1 s: 214 ms
-ok   1500 moving meshes at 60 fps or better: 120.3 fps (interval median 8.30 ms, core tick 0.38 ms, apply 0.28 ms)
+ok   push to first frame under 1 s: 254 ms
+ok   1500 moving meshes at 60 fps or better: 120.5 fps (jit true, interval median 8.36 ms,
+       core tick 0.38 ms, apply 1.98 ms)
 ok   steady state emits one command per frame: 1
-ok   memory does not grow between large-scene cycles: cold 310 MB, after cycle 1 372 MB, after cycle 2 375 MB
+ok   memory does not grow between large-scene cycles: cold 744 MB, after cycle 1 743 MB, after cycle 2 743 MB
 ```
+
+That run is 1500 moving meshes sharing one geometry and one material, JIT on;
+the apply figure varies between **1.88 and 2.12 ms** across passes. The memory
+line is a **ratio** check, not an absolute: the figures track the running
+instance's resident size, which depends on how long it has been up, and it is
+order-sensitive enough to fail on one run and pass on the next — re-run before
+believing a failure. The load-time check passes on that shared-resource scene
+and **fails** on the `gen-stress` default (unique geometry and material per
+mesh), which takes 1.2 s — see the table in
+[TROUBLESHOOTING](docs/TROUBLESHOOTING.md#memory-and-performance).
+
+**`check.mjs` replaces whatever scene is running** — it pushes its own stress
+scenes and leaves the last one mounted. Re-push your script when it finishes.
 
 `measure.sh` pushes one generated scene and prints load time, measured frame
 rate, the `/stats` medians, the resource-cache build counts, and the process's
@@ -445,7 +514,7 @@ top half on both backends.
 
 ```bash
 # rig.glb — three's GLTFExporter needs browser APIs, so it runs in the harness
-node web/harness/make-rig.mjs
+node consumers/web/harness/make-rig.mjs
 
 # rig.usdz — Pixar's USD Python package, written with UsdUtils.CreateNewUsdzPackage
 python3 -m pip install --user usd-core
@@ -460,26 +529,27 @@ cases compare them against each other.
 ```bash
 cd SpatialScript
 
-# conformance: every case in conformance/cases against the core, in Node
-node conformance/run-node.mjs                 # or: corepack pnpm conformance:node
-node conformance/run-node.mjs input-tap       # one case
+# conformance: every case in verification/conformance/cases against the core, in Node
+node verification/conformance/run-node.mjs                 # or: corepack pnpm conformance:node
+node verification/conformance/run-node.mjs input-tap       # one case
 
 # conformance in a real browser, with a screenshot per case
-node web/harness/run.mjs                      # or: corepack pnpm conformance:web
+node consumers/web/harness/run.mjs                      # or: corepack pnpm conformance:web
 
 # demo scenarios: 400 ticks each, reporting errors, warnings and userData
-node scenarios/run-node.mjs
+node verification/scenarios/run-node.mjs
 
 # robustness: every hostile script must survive load and 200 ticks
-node scenarios/run-robustness.mjs
+node verification/scenarios/run-robustness.mjs
 
 # unit tests for the core and the web consumer
 corepack pnpm -r test
 corepack pnpm --filter @spatialscript/core test:jsc   # the core under JavaScriptCore
 
 # cross-backend parity and performance (both need the macOS host running)
-parity/run-all.sh
-node perf/check.mjs
+verification/parity/run-all.sh
+node verification/perf/check.mjs
+node verification/scenarios/run-gauntlet.mjs   # hostile scripts and payloads; the app must survive
 
 # documentation snippets: every ```js runnable block in docs/ and this README
 node docs/check-snippets.mjs
@@ -509,42 +579,53 @@ and fails if it throws at load, throws out of a tick, or leaves anything in
       TROUBLESHOOTING.md          symptom to cause to fix
       check-snippets.mjs          runs every runnable snippet in these docs
     types/spatial.d.ts            TypeScript declarations for scripts
-    core/                         the shared runtime
-      src/                        ESM sources
+    core/                         the shared runtime (@spatialscript/core)
+      src/                        ESM sources: index.js, namespace.js, runtime.js and
+                                  runtime/, scene/, materials/, media/, physics/,
+                                  input/, host/, util/
       dist/spatial-core.js        committed esbuild bundle, loaded by both consumers
       test/                       Node unit tests
       scripts/                    build, JavaScriptCore driver, sync-to-swift
-    web/                          the three.js consumer
-      src/                        renderer, Rapier physics, command applier
-      harness/                    dev server, Playwright runners, screenshot, parity,
-                                  bench, make-rig.mjs (authors assets/rig.glb)
-      assets/                     textures and models the harness serves
-    conformance/
-      cases/                      <name>.js + <name>.expected.json (+ .steps.json)
-      run-node.mjs                Node runner; exports createHost(bundleSource)
-      match.mjs                   the subset matcher shared by the runners
-    parity/                       the cross-backend gate
-      run-parity.mjs              one script on both backends, same plan
-      run-all.sh                  every example and scenario
-      compare.mjs                 the dump, native-dump and log comparisons
-      steps/<name>.json           per-script step plans
-      out/<label>/                screenshots, dumps and issues per run
-    perf/                         the SPEC 12 targets
-      check.mjs                   asserts load time, frame rate and memory
-      measure.sh                  one ad-hoc measurement against the macOS host
-      gen-stress.mjs              prints a stress scene
+    consumers/
+      web/                        the three.js consumer (@spatialscript/web)
+        src/                      consumer/, physics/, media/, input/, dump/, page/
+        harness/                  static server, Playwright runners, screenshot,
+                                  parity, bench, make-rig.mjs (authors assets/rig.glb)
+        test/                     Node unit tests and browser checks
+        index.html                the dev page the harness serves
     assets/                       the one shared asset root (`asset://`), the only
                                   part Release builds bundle
-    tools/make-rig-usdz.py        authors assets/rig.usdz
     examples/                     phase 1: basics, interaction, physics, animation, effects
                                   phase 2: audio-video, camera, character,
                                   host-channel, asset-control
       push.sh                     posts a script to the macOS host's dev server
-    scenarios/                    longer demo scripts and their runners
-      robustness/                 deliberately hostile scripts
+    verification/
+      conformance/
+        cases/                    <name>.js + <name>.expected.json (+ .steps.json)
+        run-node.mjs              Node runner; exports createHost(bundleSource)
+        match.mjs                 the subset matcher shared by the runners
+        README.md                 how a case is written and run
+      scenarios/                  longer demo scripts and their runners
+        robustness/               deliberately hostile scripts
+        run-node.mjs              every scenario through the core in Node
+        run-robustness.mjs        every robustness script through the core in Node
+        run-gauntlet.mjs          hostile scripts and payloads against the running app
+      parity/                     the cross-backend gate
+        run-parity.mjs            one script on both backends, same plan
+        run-all.sh                every example and scenario
+        compare.mjs               the dump, native-dump and log comparisons
+        steps/<name>.json         per-script step plans
+        out/<label>/              screenshots, dumps and issues per run
+      perf/                       the SPEC 12 targets
+        check.mjs                 asserts load time, frame rate and memory
+        measure.sh                one ad-hoc measurement against the macOS host
+        gen-stress.mjs            prints a stress scene
+    tools/make-rig-usdz.py        authors assets/rig.usdz
   Packages/RealityKitScripting/   Swift package: JavaScriptCore host, RealityKit consumer
-    Sources/RealityKitScripting/  JavaScriptScene, command appliers, input, native dump
-      Resources/spatial-core.js   a copy of the core bundle
+    Sources/RealityKitScripting/  Host/, Runtime/, Applier/, Geometry/, Materials/,
+                                  Physics/, Media/, Input/, Camera/, Dump/, Parity/,
+                                  DevTransport/
+      Resources/spatial-core.js   a copy of the core bundle, written by `pnpm build`
     Tests/RealityKitScriptingTests/
 ```
 

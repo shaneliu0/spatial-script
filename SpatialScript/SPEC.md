@@ -29,7 +29,7 @@ implementation is wrong.
                |            |
    +-----------v---+   +----v-----------------+
    | RealityKit    |   | three.js consumer    |
-   | consumer      |   | web/                 |
+   | consumer      |   | consumers/web/       |
    | (Swift, JSC)  |   | WebGLRenderer +      |
    | entities,     |   | Rapier physics       |
    | RK physics    |   |                      |
@@ -168,7 +168,7 @@ SpatialScript members added to `Object3D`:
 
 - `opacity: number` default 1. Applies to the object and its descendants (OpacityComponent
   semantics). Consumer-side; does not touch material opacity.
-- `billboard: boolean` default false. Object faces the viewer.
+- `billboard: boolean` default false. Object faces the viewer. The facing is applied by the consumer at render time (RealityKit's `BillboardComponent`, a per-frame camera-facing rotation on the web); the object's own transform is untouched, and both dumps report the authored `quaternion`.
 - `groundingShadow: boolean` default false. Mesh only. Unsupported on web: warn once.
 - `hoverEffect: "highlight" | "lift" | "spotlight" | null` default null. visionOS only. macOS and
   web: accepted, no visual, no warning. Where the SDK has no lift style, RealityKit uses highlight
@@ -181,8 +181,8 @@ SpatialScript members added to `Object3D`:
   `manipulationend` events.
 - `rigidBody: RigidBody | null` default null. See 3.7.
 
-`Mesh(geometry, material)`: `geometry`, `material` (a single material; arrays are not in scope and
-throw on assignment).
+`Mesh(geometry, material)`: `geometry`, `material` (a single material in the common case; a
+material array with geometry groups is section 14.12).
 
 `Scene`: a `Group` with `type === "Scene"`. `background`, `environment`, `fog` are not in scope
 and throw on assignment.
@@ -248,7 +248,7 @@ resolves asynchronously. `TextureLoader().loadAsync(url)` returns a Promise.
 `asset://name` for an asset bundled with the app. The shared asset root is
 `SpatialScript/assets/`: the web consumer serves `asset://` from it, and the Mac and visionOS host
 targets bundle its contents so the same `asset://name` resolves on every backend (examples and
-conformance cases reference only names that exist there). On failure the consumer emits an `error` event on the texture and logs. The same
+conformance cases reference only names that exist there). On failure the consumer dispatches `textureError` with the platform's message; the core sets `texture.error`, fires the texture's `error` event, and warns once with the backend-neutral line `Texture "<url>" failed to load`. An asset that fails to load rejects its promise with the platform's message and the core warns once `Asset "<url>" failed to load`. Consumers never add a warning of their own for a load failure, so the warning list is identical on every backend while the platform's words stay in `texture.error` and the rejection. The same
 rules apply to `loadAsset` and `ImageBasedLight` URLs: the core normalizes every URL before it
 reaches a consumer (`.` and `..` segments collapsed, a path that escapes the asset root refused,
 schemes limited to http, https, file, data, blob, and asset, userinfo stripped), each refusal
@@ -294,7 +294,7 @@ mesh.rigidBody = new Spatial.RigidBody({
   shape: "auto" | "box" | "sphere" | "capsule" | "convex" | "mesh",  // default "auto"
   friction: 0.5, restitution: 0.2,
   linearDamping: 0, angularDamping: 0,
-  isTrigger: false,                            // trigger volumes emit collision events but do not push (see below)
+  isTrigger: false,                            // trigger volumes emit collision events but do not push (see below); the core normalizes a trigger's type to "static" on the wire
   gravity: true,
 });
 ```
@@ -307,6 +307,9 @@ a dynamic body throws.
 `applyTorque(v: Vector3)`, `setLinearVelocity(v)`, `setAngularVelocity(v)`, `linearVelocity:
 Vector3` (read-only, updated by sync), `angularVelocity: Vector3` (read-only), `isSleeping`
 (read-only). Property assignment after creation (`body.mass = 2`) re-emits RIGIDBODY.
+`applyForce` and `applyTorque` act for the simulation step in which they arrive and are then
+cleared by the consumer (RealityKit's `addForce` semantics; the web consumer resets Rapier's
+accumulated force after each step). A sustained push calls them every frame.
 
 Dynamic bodies are native-driven: the consumer syncs their world transform into the core each
 frame. Writing `position`, `quaternion`, or `scale` on a dynamic body's object from script
@@ -383,7 +386,7 @@ collision shape) automatically.
 | `tap` | `point: Vector3` world | click | pinch | click |
 | `hoverenter`, `hoverexit` | | mouse over | gaze | mouse over |
 | `dragstart`, `drag`, `dragend` | `translation: Vector3` world delta since start, `point: Vector3` | mouse drag | pinch drag | mouse drag |
-| `manipulationstart`, `manipulation`, `manipulationend` | | when `manipulable` | system | emulated |
+| `manipulationstart`, `manipulation`, `manipulationend` | | not available (capability false) | system | emulated |
 | `collisionstart`, `collisionend` | see 3.7 | physics | physics | physics |
 
 Events bubble: an event on a child dispatches to ancestors with the same payload and
@@ -452,7 +455,9 @@ scene.add(fx); fx.burst(); fx.isEmitting = false;
 ```
 
 `ParticleEmitter` is an `Object3D`. RealityKit maps to `ParticleEmitterComponent`; a preset
-overrides other fields except `isEmitting`. Web implements a CPU point-sprite emitter that honors
+overrides other fields except `isEmitting`, and the core resolves the preset's field values so
+the wire payload and the dump report what is rendered (the `impact` preset is one-shot,
+`loops: false`). Web implements a CPU point-sprite emitter that honors
 every field except presets, which map to the nearest hand-tuned parameter set.
 
 ### 3.11 Anchoring and portals (ours)
@@ -480,7 +485,9 @@ scene.add(portal);   // portal is a Mesh with a PlaneGeometry; worldGroup is ren
 (WorldComponent) so it renders only through the portal. If the world group is not in the mounted
 scene the portal warns once and emits nothing until the group is added. `width` and `height` are
 writable after construction and regenerate the portal plane. Web renders the world group to a render
-target from a camera mirrored through the portal plane and maps it onto the portal mesh.
+target from the viewer's own camera and samples it at each fragment's screen position, so the
+portal behaves as a window into the world, and world content appears only where the portal mesh
+is drawn.
 `crossing` is implemented on RealityKit only; web accepts it with a one-time warning. RealityKit
 portals show the part of the world that lies behind the portal plane from the viewer, so author
 world content behind the portal.
@@ -514,10 +521,12 @@ and do not sync transforms back (they animate the asset's internal skeleton, not
   are false, `manipulation` is true (emulated), `portals`, `particles`, `shadows` true.
 - `Spatial.dump(options?)` returns the scene dump (section 8) as a plain object. `options`:
   `names: string[]` restricts `objects` to those names, `fields: string[]` restricts each object's
-  keys, `compact: true` rounds numbers to four decimals and omits geometry parameters and
-  userData, `objects: false` returns only the top-level fields. Hosts use these for cheap polling.
+  keys, `compact: true` rounds numbers to four decimals and omits the `geometry.parameters` and
+  `userData` keys entirely, `objects: false` returns the top-level fields with `objects: []`;
+  the dev server's `?compact=1` and `?objects=0` return exactly these. Hosts use these for cheap polling.
 - `Spatial.limits` exposes the enforced caps (timers, animation frame callbacks, callbacks per
-  tick, listeners per object per event, hierarchy depth, ids, errors kept, log message length).
+  tick, listeners per object per event, hierarchy depth, ids, errors kept, warnings kept, name
+  length, log message length, distinct error messages per second).
 - `Spatial.find(name)` is `scene.getObjectByName`.
 - `Spatial.destroy(object)` frees `object` and its descendants. It emits `destroy` for the whole
   subtree with descendants before their ancestors, detaches `object` from its parent, releases the
@@ -532,7 +541,11 @@ and do not sync transforms back (they animate the asset's internal skeleton, not
 Errors thrown during load abort the script; the consumer reports the message with line and column
 where JavaScriptCore or the browser provide them. Errors thrown inside `onFrame`, `update`, event
 listeners, or timers are caught, reported with the same channel, and do not stop the scene. Each
-unique message is reported at most once per second to avoid floods.
+unique message is reported at most once per second to avoid floods, and at most 20 distinct
+messages per second are reported (a message that never repeats cannot flood); one line reports
+how many were dropped when that budget is spent. The second is measured on the scene clock
+(`Spatial.time.elapsed`), not wall time, so a fixed-dt plan reports the same count on every
+backend however fast the renderer ran.
 
 ---
 
@@ -565,7 +578,7 @@ booleans, `null`, plain JSON objects, or typed arrays. Consumers apply commands 
 | `transform` | id, px, py, pz, qx, qy, qz, qw, sx, sy, sz | Local TRS for one object. Accepted by consumers, but the core emits `transforms` instead. On a dynamic body this is a teleport. |
 | `transforms` | 0, Float32Array | All transform changes of the frame as packed records `[id, px, py, pz, qx, qy, qz, qw, sx, sy, sz]` (11 floats each; ids are exact in float32 below 2^24). Consumers read the array once through the typed-array bytes pointer. Semantics per record are identical to `transform`. The core reuses its buffer across frames, so consumers must copy what they need before returning. |
 | `visible` | id, bool | |
-| `geometry` | id, { type, parameters, uuid, revision }, positions: Float32Array or null, normals: Float32Array or null, uvs: Float32Array or null, indices: Uint32Array or null | `uuid` is the three.js geometry uuid, stable for the life of the geometry object and shared by every mesh using the same geometry instance; `revision` is an opaque token that changes on every mutation (the core encodes the geometry revision and the attribute versions in it; consumers compare it for equality only). Consumers cache native mesh resources by uuid and revision (and by a parameters hash for parametric types) so 1500 meshes sharing one geometry create one native mesh. For a parametric geometry the consumer has already received at that uuid and revision, the buffers are `null` and the consumer reuses its resource; a plain `BufferGeometry` always carries its buffers. | RealityKit uses native generators for `BoxGeometry`, `SphereGeometry`, `PlaneGeometry`, `CylinderGeometry`, `ConeGeometry`, `TextGeometry` and buffers otherwise. Web always uses the buffers, including for TextGeometry. |
+| `geometry` | id, { type, parameters, uuid, revision }, positions: Float32Array or null, normals: Float32Array or null, uvs: Float32Array or null, indices: Uint32Array or null | `uuid` is the three.js geometry uuid, stable for the life of the geometry object and shared by every mesh using the same geometry instance; `revision` is an opaque token that changes on every mutation (the core encodes the geometry revision and the attribute versions in it; consumers compare it for equality only). Consumers cache native mesh resources by uuid and revision (and by a parameters hash for parametric types) so 1500 meshes sharing one geometry create one native mesh. For any geometry the consumer has already received at that uuid and revision, parametric or `BufferGeometry`, the buffers are `null` and the consumer reuses its cached resource; a new revision always carries the buffers. | RealityKit uses native generators for `BoxGeometry`, `SphereGeometry`, `PlaneGeometry`, `CylinderGeometry`, `ConeGeometry`, `TextGeometry` and buffers otherwise. Web always uses the buffers, including for TextGeometry. |
 | `material` | id, { type, uuid, color:[r,g,b], opacity, transparent, side, wireframe, metalness, roughness, emissive:[r,g,b], emissiveIntensity, clearcoat, clearcoatRoughness, depthWrite, depthTest, blending, maps: { map, normalMap, roughnessMap, metalnessMap, emissiveMap } as texture ids or null } | Full material state every time; consumers replace. `uuid` identifies the material instance so consumers may share native materials between meshes and must update every user when a shared material changes. |
 | `texture` | textureId, { url, repeat:[x,y], offset:[x,y], wrapS, wrapT, flipY } or null | Emitted before any material that references it. Re-emitted on property change. `null` releases the texture: the consumer frees the native resource, drops the id, and ignores any in-flight load for it; the core emits it from `Texture.dispose()` once no material references the texture. |
 | `light` | id, { type, color:[r,g,b], intensity, distance, decay, angle, penumbra, castShadow, direction:[x,y,z] world or null } | Full state. |
@@ -577,7 +590,7 @@ booleans, `null`, plain JSON objects, or typed arrays. Consumers apply commands 
 | `manipulable` | id, bool | |
 | `renderOrder` | id, int | |
 | `interactive` | id, { tap, hover, drag, manipulation, collision } booleans | Emitted when the first listener of a type is added or the last removed. Consumers make the object an input target and build its collider for `tap`, `hover`, and `drag`; `manipulation` and `collision` are informational. |
-| `rigidBody` | id, body JSON or null | Full state or removal. The JSON carries the options of 3.7 with `shape` resolved (never `"auto"`) and `requestedShape` holding the authored value. |
+| `rigidBody` | id, body JSON or null | Full state or removal. The JSON carries the options of 3.7 with `shape` resolved (never `"auto"`) and `requestedShape` holding the authored value, and with a trigger's `type` normalized to `"static"` and `mass` to 0 while `requestedType` holds the authored type. Consumers accept both `requested*` keys without warning. |
 | `bodyImpulse` | id, x, y, z, px, py, pz or nulls | |
 | `bodyForce` | id, x, y, z | |
 | `bodyTorque` | id, x, y, z | |
@@ -681,15 +694,35 @@ Objects of other kinds carry their own fields in addition: `particles` (emitter 
 `velocity` and `isSleeping` are present only on objects with a rigid body and reflect the last
 `syncBodies` from the consumer.
 
-`Spatial.dump()` in the core produces this from the core scene. The Swift consumer additionally
-exposes `nativeDump()` producing the same shape from RealityKit entities (transform, hierarchy,
-component presence, material type and color). Conformance compares both.
+`Spatial.dump()` in the core produces this from the core scene. Both consumers additionally
+expose a native dump producing the same shape from what they actually built (transform,
+hierarchy, component presence, material type and color, and the phase 2 fields).
+
+**Native dump shape rule.** A native dump has exactly the key set of the core dump for the same
+scene, at every depth, with these and only these differences:
+
+- omitted everywhere: `userData`, `coreSource`, and `uuid` (inside `geometry` and `material`);
+- added: `scene.childCount`; per object `nativeType` (the native class) and `components` (a list
+  of native component names present on the entity or object). Backend-specific facts such as
+  "the audio component is attached" live in `components`, never as extra keys elsewhere.
+
+Every other key mirrors the value the consumer actually applied, with the core's defaults where
+the platform has no notion of the field (a light's `distance`, `decay`, `angle` and `penumbra`
+are numbers on every light type, never `null`; `render.adaptiveResolution` and the four
+`sceneUnderstanding` flags are booleans; `environmentLighting.intensityExponent` defaults to 1;
+`loadGeneration` starts at 1; `environment` is `null` until the script installs one;
+`scene.name` is the script's scene name; `particles` carries the whole emitter state;
+`audioMixer.state` is `"suspended"` until a sound is played, so a consumer creates its audio
+engine lazily). The two native dumps therefore compare key for key, and the parity gate
+(14.13a) does so with only the additions above exempt. Each consumer ships a test that builds
+one fixture scene exercising every object kind and asserts its native key set equals the core
+dump's under this rule.
 
 ---
 
 ## 9. Conformance suite
 
-`conformance/cases/<name>.js` is a script. `conformance/cases/<name>.expected.json` is a subset
+`verification/conformance/cases/<name>.js` is a script. `verification/conformance/cases/<name>.expected.json` is a subset
 of the dump that must match after `frames` ticks (default 3, at 1/60 s) plus any `inject` steps
 listed in an optional `<name>.steps.json` (`[{ "inject": "tap", "target": "cube" }, { "frames": 60 }]`).
 
@@ -700,10 +733,10 @@ actual warning.
 
 Runners:
 
-- `conformance/run-node.mjs`: runs the core in Node with a recording consumer (no rendering).
+- `verification/conformance/run-node.mjs`: runs the core in Node with a recording consumer (no rendering).
   Fast structural check for the core itself.
-- `web/harness/run.mjs`: runs each case in headless Chromium through Playwright, compares the
-  dump, and writes a screenshot per case to `web/harness/out/<name>.png`.
+- `consumers/web/harness/run.mjs`: runs each case in headless Chromium through Playwright, compares the
+  dump, and writes a screenshot per case to `consumers/web/harness/out/<name>.png`.
 - Swift: `RealityKitScriptingPackageTests` loads every case from the repository path, runs it
   through `JavaScriptScene`, ticks, compares both `dump()` and `nativeDump()` against expected.
 
@@ -717,25 +750,72 @@ unless expected lists the error.
 ```
 ./
   SpatialScript/
+    README.md                     the guide; SPEC.md is the contract
     SPEC.md                       this document
     package.json                  pnpm workspace root
-    pnpm-workspace.yaml
+    pnpm-workspace.yaml           packages: core, consumers/web
+    .npmrc  .gitignore
     types/spatial.d.ts            TypeScript declarations for scripts (the agent-facing contract)
-    core/                         shared runtime, ESM sources, esbuild to dist/spatial-core.js
+    core/                         shared runtime `@spatialscript/core`, ESM sources,
+                                  esbuild to dist/spatial-core.js
       src/
+        index.js                  bundle entry
+        namespace.js              the Spatial namespace surface
+        runtime.js                the runtime facade over runtime/
+        runtime/                  script loading, frame loop, diff, flush, resources
+        scene/                    scene graph classes, geometry, anchors, portals,
+                                  particles, assets, skeletons, camera, fonts/
+        materials/                materials, textures, shader graphs
+        media/                    audio, video
+        physics/                  bodies, joints, force fields, character controllers
+        input/                    input routing and Spatial.inject
+        host/                     the native bridge, host channel, globals, timers
+        util/                     three exports, limits, sanitisation, errors, diff, dump
       dist/spatial-core.js        committed build artifact
       test/                       node unit tests
+      scripts/build.mjs           esbuild bundle
       scripts/sync-to-swift.sh    copies dist into the Swift package resources
-    web/                          three.js consumer, dev page, Playwright harness
-      src/
-      harness/
-    conformance/
-      cases/
-      run-node.mjs
-      match.mjs                   shared subset matcher used by node and web runners
-    examples/                     demo scripts used by the macOS host and by verification
+      scripts/run-jsc.mjs         the JavaScriptCore suite; jsc-driver.js is its shell script
+    consumers/
+      web/                        three.js consumer `@spatialscript/web`, dev page, harness
+        src/                      consumer/, physics/, media/, input/, dump/, page/
+        harness/                  static server rooted at SpatialScript/, Playwright
+                                  runners, screenshot, parity, bench
+        test/
+        index.html
+    assets/                       SPEC 3.5's one asset root, bundled by the apps and
+                                  served by the web consumer at /assets
+    examples/                     demo scripts used by the macOS host and by verification,
+                                  plus push.sh
+    verification/
+      conformance/
+        cases/
+        run-node.mjs
+        match.mjs                   subset matcher used by the node and web runners; the Swift runner keeps a port (SpatialDumpMatcher.swift) that a shared-fixture test holds equal to it
+        README.md
+      scenarios/                  longer scripts, robustness/, and their node runners
+      parity/                     the cross-backend gate: run-parity.mjs, run-all.sh,
+                                  compare.mjs, steps/, out/
+      perf/                       check.mjs, measure.sh, gen-stress.mjs
+    tools/                        one-off generators (make-rig-usdz.py)
+    docs/                         API.md, COOKBOOK.md, DIFFERENCES.md,
+                                  TROUBLESHOOTING.md, check-snippets.mjs
   Packages/RealityKitScripting/   Swift package: JavaScriptCore host and RealityKit consumer
-    Sources/RealityKitScripting/
+    Sources/RealityKitScripting/  grouped by responsibility; SwiftPM picks up nested
+                                  sources automatically
+      Host/                       JavaScriptScene, the value reader, log levels
+      Runtime/                    the component, system, strategies, resource cache
+      Applier/                    the command applier and its scene, component,
+                                  sync, lights and phase 2 halves
+      Geometry/                   the mesh factory and skeleton commands
+      Materials/                  material factory, colour, textures, shader graphs
+      Physics/                    bodies, collision, characters, the joint graveyard
+      Media/                      audio and video commands
+      Input/                      input routing, drag, hands, game controllers, raycast
+      Camera/                     camera commands
+      Dump/                       the native dump and its filter
+      Parity/                     the SPEC 9 step interpreter and the SPEC 11 parity plan
+      DevTransport/               frame stats and the execution watchdog
       Resources/spatial-core.js   copy of the core bundle
     Tests/
 ```
@@ -762,7 +842,7 @@ The macOS host starts an HTTP server on `127.0.0.1:8787` inside `#if DEBUG`. Rou
   app stops ticking and holds the final frame until the next `/script` or `/parity`, so a window
   capture matches the returned state. Response: `{ ok, error, dump, nativeDump, console:
   [{ level, message }], frames }`. This is the Mac side of the cross-backend parity gate in
-  `SpatialScript/parity`, whose web side is `web/harness/parity.mjs` with the same plan.
+  `SpatialScript/verification/parity`, whose web side is `consumers/web/harness/parity.mjs` with the same plan.
 
 `examples/push.sh <file.js>` posts a script. Screenshots are taken from outside the app with
 `screencapture -l <windowID>`. Release builds compile none of this.
@@ -785,8 +865,11 @@ The macOS host starts an HTTP server on `127.0.0.1:8787` inside `#if DEBUG`. Rou
   real engine boundary (JavaScriptCore values or the browser), not native arrays.
 - End-to-end targets on this machine for the RealityKit consumer, measured in the macOS host:
   1500 independently moving meshes that share one geometry render at 60 frames per second or
-  better, a scene of 1500 meshes loads in under one second from script push to first frame, and
-  memory returns to within 10 percent of baseline after the scene is replaced. The macOS host's
+  better, a scene of 1500 meshes loads in under one second from script push to first frame
+  whether the meshes share one material or carry a distinct material each (measured: about
+  0.3 s shared, about 0.35 s unique), and memory returns to within 10 percent of its baseline
+  after a large scene is replaced and does not grow between consecutive large-scene cycles
+  after a warmup cycle. The macOS host's
   DEBUG dev server exposes `GET /stats` with the last 120 frames' core tick time, command apply
   time, command count, frame interval, and native entity count so these can be measured.
 - Unsupported behavior warns once per feature per scene through `console.warn` and appears in
@@ -822,8 +905,10 @@ audible effect; "visionOS only" means the same for RealityKit on macOS. Nothing 
   cone.
 - `AmbientAudio` (ours): an `Object3D` whose sound comes from every direction at its position
   (RealityKit `AmbientAudioComponent`; web: a non-spatial `Audio` scaled by distance).
-- Playback state is native-driven: consumers sync `isPlaying`, `currentTime`, and `duration`
-  through a `syncAudio` channel (section 14.13) and dispatch `ended`. Consumers dispatch
+- `isPlaying` reflects the script's intent the moment `play()`, `pause()`, or `stop()` is
+  called, on `Audio` and `VideoScreen` alike; `currentTime` and `duration` are native-driven:
+  consumers sync them through a `syncAudio` channel (section 14.13), correct `isPlaying` when the
+  engine refuses or finishes, and dispatch `ended`. Consumers dispatch
   `audioState` with `"running"` once their engine has started (RealityKit on the first play).
 - Release: `audio.dispose()` (or `Spatial.destroy(audio)`) stops the sound, emits `audio id null`,
   and frees the object; a playback call on a destroyed sound is dropped with a warning and never
@@ -858,8 +943,10 @@ camera: assigning `Spatial.camera` is accepted, kept in the dump, and warns once
 managed by the consumer from the viewport; a script-set value is ignored with a warning. For an
 `OrthographicCamera` the visible height is `top - bottom` and the visible width follows the
 viewport aspect on both backends (RealityKit's orthographic camera takes only a height); `left`
-and `right` are honored when they match that width and otherwise warn once. Images never
-stretch anisotropically.
+and `right` are honored when they match that width and otherwise warn once with one string on
+both backends, `OrthographicCamera asks for a visible width of W but the viewport shows V at
+that height; the height is kept and the width follows the viewport`, W and V printed with three
+decimals. Images never stretch anisotropically.
 Consumers emit `camera` commands with the camera's kind, parameters, and world transform.
 
 Pointer queries: `Spatial.input.mouse.scenePosition` is the world point under the pointer on the
@@ -881,6 +968,11 @@ null; `Spatial.rayFromPoint(x, y)` returns `{ origin, direction }` in world spac
   radius })`, `TurbulenceForceField({ strength, noiseScale, radius })`. They act on dynamic
   bodies within `radius` of the effect's world position (RealityKit `ForceEffectComponent` with
   the matching effect; web: a per-frame force loop in the physics step). `enabled` toggles.
+  Units: `force` is newtons; `strength` is newtons at one meter from the effect (falloff applies
+  beyond that); `coefficient` is a dimensionless drag factor applied to velocity; `noiseScale` is
+  meters. Both consumers clamp the acceleration a field imparts to a body to 1000 m/s² per step
+  and warn once naming the field when the clamp engages, so a mis-scaled recipe cannot launch
+  bodies to infinity.
 
 ### 14.5 Skeletons and blend shapes on loaded assets (ours)
 
@@ -900,15 +992,18 @@ runs, and the consumer reports joint transforms through `syncSkeleton` when requ
 fallback: new MeshStandardMaterial({ ... }) })`. RealityKit loads the named material from the
 bundled USD file and exposes `setParameter(name, value)` for numbers, vectors, colors, and
 textures. Web renders `fallback` (required) and warns once; `setParameter` updates the fallback
-where a same-named property exists. The dump reports `material.type: "ShaderGraphMaterial"` with
+where a same-named property exists, except the material's identity fields (`uuid`, `id`,
+`type`, `name`, `version`), which are never written and warn once. The dump reports `material.type: "ShaderGraphMaterial"` with
 `source`, `name`, and the parameters.
 
 ### 14.7 Scene understanding (visionOS only)
 
 `Spatial.sceneUnderstanding = { collision: false, occlusion: false, physics: false, shadows:
 false }`. Setting any flag adds `SceneUnderstandingComponent` with those options to the root on
-visionOS; macOS and web keep the state and warn once. Raycasts against the real-world mesh report
-`object === null` with `sceneUnderstanding: true` on the hit.
+visionOS; macOS and web keep the state and warn once. RealityKit does not return the reconstruction mesh from `scene.raycast`, so no hit with
+`object === null` is produced on any platform today; the `sceneUnderstanding` flag on hits stays
+in the contract for a future RealityKit that reports it, and consumers warn once when the flags
+are enabled that raycasts will not see the real world.
 
 ### 14.8 Game controllers (ours, Apple-shaped)
 
@@ -1018,7 +1113,8 @@ New consumer-to-core entry points: `syncAudio(records)` `[id, playing, currentTi
 px, py, pz, isOnGround, vx, vy, vz]`, `setActive(bool)`, `hostEvent(name, payload)`, and the
 `controllers` member of `setInput`. The `material` command may carry an array payload (14.12).
 `dispatch` accepts the new event types `ended`, `loaded`, `controllerconnected`,
-`controllerdisconnected`, `hostResult`, `fetchResult`, `audioState`. Additional entry points:
+`controllerdisconnected`, `hostResult`, `fetchResult`, `audioState`. The list of accepted
+types is closed: an unknown type is recorded as a warning and dropped. Additional entry points:
 `setHostFunctions(names)` (also accepted as a `hostFunctions` load option and preserved across a
 reload) and `captureState()`; `load(source, env, { previousState })` delivers state to
 `scriptChanged`. Conformance step kinds: `syncAudio`, `syncVideo`, `syncCharacter`,
@@ -1030,6 +1126,14 @@ by `call` or `fetch` id or with no target.
 While a `POST /parity` plan runs, the Mac consumer feeds the core only injected input; live
 keyboard, mouse, and controller state are excluded so a plan is deterministic. Release builds do
 not bundle the examples, scenarios, or conformance cases; only `SpatialScript/assets` ships.
+
+**Loads settle between plan frames.** A `frames` step does not advance while the consumer has a
+resource load in flight (texture, asset, environment, or media metadata): before each frame the
+harness waits for every pending load to succeed or fail, then ticks, so a load result reaches
+the script on the same frame on every backend regardless of how fast the renderer or the fetch
+ran. A load that neither succeeds nor fails within 10 s is reported as a plan error naming the
+url. Both consumers expose the count of loads in flight for this purpose (`GET /stats`
+`pendingLoads` on the Mac; `spatialConsumer.pendingLoads` on the web).
 
 ### 14.14 Capabilities and verification
 

@@ -477,9 +477,12 @@ write first, so both forms behave the same.
 semantics — the matrix becomes authoritative and `position`/`rotation`/`scale`
 are no longer read for it — and the core exploits that: a static object costs
 sixteen array compares per frame and no property reads at all. That is what
-makes large static scenery nearly free. Measured on the development Mac in the
-interpreter (the visionOS execution mode), 8000 static objects cost **22 ms per
-frame** with `matrixAutoUpdate` left on and **8.4 ms** with the hint.
+makes large static scenery nearly free. Measured on the running macOS host with the
+JIT on, 1500 static meshes cost **0.260 ms** of core tick and **0.059 ms** of
+apply per frame, against **0.381 ms** and **about 2 ms** (1.88–2.12 across runs) for the same 1500 moving;
+in the no-JIT JavaScriptCore driver — the visionOS execution mode, where the
+core tick is the visible cost — it is **1.7 ms** static against **3.8 ms**
+moving (medians of two runs: 1.72–1.74 ms and 3.78–3.79 ms).
 
 The rule for using it: set the transform, call `updateMatrix()` once, then turn
 the flag off. To move the object later, write `matrix` directly, or write the
@@ -533,7 +536,7 @@ it just stops being polled for changes.
 | Property | Type | Default | RK macOS | RK visionOS | web |
 |---|---|---|---|---|---|
 | `opacity` | `number` 0..1 | `1` | yes | yes | yes |
-| `billboard` | `boolean` | `false` | yes | yes | yes |
+| `billboard` | `boolean` | `false` | yes (`BillboardComponent`) | yes | yes (camera-facing at render time) — the object's own `quaternion` stays authored in both dumps |
 | `groundingShadow` | `boolean` | `false` | yes (mesh) | yes (mesh) | warn once, ignored |
 | `hoverEffect` | `"highlight" \| "lift" \| "spotlight" \| null` | `null` | accepted, no visual (`capabilities.hoverEffect` is `false`) | yes — but `"lift"` warns once and renders as `"highlight"`, since the SDK has spotlight, highlight and shader only | accepted, no visual |
 | `manipulable` | `boolean` | `false` | **warn once, ignored** | yes (system gesture) | emulated with a mouse drag on the view plane |
@@ -805,8 +808,11 @@ All geometry runs in the core. RealityKit regenerates `BoxGeometry`,
 `TextGeometry` with native generators from `parameters`, and uses the vertex
 buffers for everything else. The web consumer always uses the buffers.
 
-Geometry instances are cached by `uuid` on both backends: 1500 meshes sharing
-one `BoxGeometry` instance produce one native mesh resource. **Share geometry.**
+Both consumers cache native mesh resources, so 1500 meshes sharing one
+`BoxGeometry` **or** one hand-built `BufferGeometry` give `meshBuilds: 1`,
+`meshHits: 1499`. **Share geometry.** The two key on slightly different things,
+which matters only when you build many identical geometries instead of sharing
+one — see [Geometry caching](#geometry-caching) below.
 
 ### BufferGeometry
 
@@ -839,29 +845,51 @@ one `BoxGeometry` instance produce one native mesh resource. **Share geometry.**
 
 **Mutating a geometry in place is supported.** `setAttribute`,
 `deleteAttribute`, `setIndex`, `computeVertexNormals` and `applyMatrix4` bump an
-internal revision, so the frame diff emits a fresh `geometry` command and both
-consumers rebuild the native mesh and its bounds. Every mesh sharing that
-geometry instance updates.
+internal revision, so the frame diff emits a fresh `geometry` command and every
+mesh sharing that geometry instance updates. That works on the web today; on
+RealityKit it does not — see [Geometry caching](#geometry-caching).
 
-**`uuid` plus `revision` is the cache key.** Each `geometry` command carries
-`{ type, uuid, parameters, revision }`. `uuid` is stable for the life of the
-geometry object and shared by every mesh using that instance; `revision` is an
-**opaque token** — compare it for equality, never order or parse it — that
-changes on every mutation. Consumers cache the native mesh
-resource by the pair, which is why 1500 meshes sharing one `BoxGeometry` build
-one native mesh.
+#### Geometry caching
 
-That also decides whether the vertex buffers travel:
+Each `geometry` command carries `{ type, uuid, parameters, revision }`. `uuid`
+is stable for the life of the geometry object and shared by every mesh using
+that instance; `revision` is an **opaque token** — compare it for equality,
+never order or parse it — that changes on every mutation.
+
+The command decides whether the vertex buffers travel:
 
 | Geometry | Second and later meshes at the same `uuid` + `revision` |
 |---|---|
 | a **parametric** geometry (`BoxGeometry`, `SphereGeometry`, …, `TextGeometry`) | buffers are `null`; the consumer reuses the resource it already has |
-| a plain **`BufferGeometry`** | **always carries its buffers** — the core cannot regenerate it from parameters, so it re-sends them |
+| a plain **`BufferGeometry`** | buffers are `null` too — the vertices cross the boundary once per `uuid` + `revision`. Editing an attribute is a new revision and carries them again, and a geometry whose last mesh is destroyed is described in full the next time it is used |
 
-The practical consequence: a hand-built `BufferGeometry` shared by many meshes
-re-uploads its vertices once per mesh, while a parametric geometry does not.
-For a large repeated shape, prefer a parametric geometry, or accept the upload
-cost once and never mutate it.
+What each consumer keys the native mesh on:
+
+| Geometry | RealityKit key | web key |
+|---|---|---|
+| a **parametric** geometry | type + parameters + `revision` | `uuid` + `revision` |
+| a plain **`BufferGeometry`** | `uuid` + `revision` | `uuid` + `revision` |
+
+Measured on the running macOS host through `/stats`'s `resourceCache`:
+
+| What you write | RealityKit | web |
+|---|---|---|
+| 1500 meshes sharing one `BoxGeometry` instance | `meshBuilds 1`, `meshHits 1499` | one native mesh |
+| 1500 meshes sharing one hand-built `BufferGeometry` | `meshBuilds 1`, `meshHits 1499` | one native mesh |
+| 1500 meshes each with their **own** `BoxGeometry` of identical parameters | `meshBuilds 1` — parameters, not identity, are the key | 1500 native meshes |
+| 1500 meshes each with their **own** `BufferGeometry` | 1500 | 1500 |
+
+**Share the instance.** It is the one habit that is right on both backends. The
+third row is a RealityKit-only saving the web does not give you, so a scene that
+leans on it is 1500 native meshes in the browser. `geometry.clone()` mints a new
+`uuid`, and so a new resource on the web — clone only when you need to diverge.
+
+`revision` is in the key on both sides, so an in-place edit rebuilds the native
+mesh rather than returning the pre-edit one: set `attribute.needsUpdate = true`
+after editing a buffer and the next flush carries the new vertices to both
+backends (measured on the macOS host: `meshBuilds` 1 → 2 for a `BufferGeometry`
+grown in place). Assigning `mesh.geometry` a fresh geometry works the same and
+is the clearer choice when the shape changes wholesale.
 
 Editing the numbers **inside** an existing attribute array is the one case the
 revision cannot see. Set `attribute.needsUpdate = true` after such an edit, or
@@ -1165,7 +1193,8 @@ and the sampler state; the consumer decodes.
 |---|---|---|---|
 | Property | Type | Default | RK macOS / visionOS | web |
 |---|---|---|---|---|
-| `url` | `string \| null` | the constructor argument | resolved against the asset root at flush time | same |
+| `url` | `string \| null` | the constructor argument | resolved against the asset root at flush time; set to `null` on the script's own object when containment refuses it | same |
+| `requestedUrl` | `string \| null` | `null` | read-only; what the script asked for when `url` was refused, else `null` | same |
 | `repeat` | `Vector2` | `(1, 1)` | texture transform scale | `texture.repeat` |
 | `offset` | `Vector2` | `(0, 0)` | texture transform offset | `texture.offset` |
 | `wrapS` | `number` | `ClampToEdgeWrapping` | sampler `sAddressMode` | `texture.wrapS` |
@@ -1239,8 +1268,14 @@ the material changes`).
 | `load(url, onLoad?, onProgress?, onError?): Texture` | the `Texture` **immediately** | it resolves later; `onProgress` is accepted for signature parity and never called |
 | `loadAsync(url, onProgress?): Promise<Texture>` | | rejects with an `Error` carrying the consumer's message |
 
-Backend support: all three. A failure dispatches `error` on the texture, calls
-`onError`, and logs; the material stays usable and renders untextured.
+Backend support: all three. On the first successful load the consumer sets
+`texture.loaded`, calls `onLoad`, resolves `loadAsync`, and dispatches the
+`load` event — on both backends, including for a texture that was already in
+flight when a second material asked for it. A failure sets `texture.error` to
+the platform's message, dispatches `error` on the texture, calls `onError`, and
+warns once from the core with the backend-neutral line `Texture "<url>" failed
+to load` (no consumer adds a warning of its own, so the warning list is the same
+on every backend); the material stays usable and renders untextured.
 
 ```js runnable
 const Spatial = require("spatial");
@@ -1296,7 +1331,7 @@ stream is reached through a single check rather than three.
 
 | Where | What a refused url does |
 |---|---|
-| a `Texture` | the texture carries `url: null`; the material stays usable and renders untextured |
+| a `Texture` | the texture carries `url: null` on the script's own object (so `if (texture.url === null)` fires after the next flush), `requestedUrl` keeps what you wrote, and the material stays usable and renders untextured |
 | `Spatial.loadAsset({ usdz, glb, … })` | that **key** is dropped. If the backend still has a usable key the load proceeds on it; if not the promise rejects with `SpatialUnsupportedError` (`feature: "loadAsset"`), message `loadAsset refused usdz and glb: the url leaves the asset root or uses a scheme that is not allowed` |
 | `Spatial.environment` | **no environment is installed**, with a second warning: `Spatial.environment was dropped because its url was refused`. `dump().environment` is `null` |
 
@@ -1504,9 +1539,9 @@ Read-only state, refreshed by the consumer every frame:
 
 | Property | Type | Notes |
 |---|---|---|
-| `linearVelocity` | `Vector3` | derived by the consumer; do not write it, use `setLinearVelocity` |
-| `angularVelocity` | `Vector3` | |
-| `isSleeping` | `boolean` | a resting body sleeps and stops syncing |
+| `linearVelocity` | `Vector3` | derived by the consumer. **Read-only**: assigning warns and is ignored (`RigidBody.linearVelocity is read-only and the assignment was ignored; use setLinearVelocity(vector)`) — scripts run in sloppy mode, so the warning is what stops it failing in silence |
+| `angularVelocity` | `Vector3` | same, pointing at `setAngularVelocity` |
+| `isSleeping` | `boolean` | a resting body sleeps and stops syncing. Read-only; assigning warns |
 | `object` | `Object3D \| null` | the mesh this body is attached to; assigned by the runtime, one body per object |
 
 **Triggers are never simulated.** A body with `isTrigger: true` has no mass,
@@ -1515,7 +1550,9 @@ transform exactly as a static or kinematic collider would, and its `type` is
 ignored — you may leave `type` at its `"dynamic"` default and it still will not
 move. `mass` and `gravity` are ignored too. It emits `collisionstart` and
 `collisionend` for every body that overlaps it. Note that `dump()` echoes the
-`type` and `mass` you set, not the ignored effective values.
+`type` and `mass` you set, not the ignored effective values. On the wire the
+core normalizes a trigger to `type: "static"` and `mass: 0`, so a native dump
+(and the web consumer's Rapier body) always shows a trigger as static.
 
 | Backend | Trigger implementation |
 |---|---|
@@ -1531,8 +1568,8 @@ dynamic body throws `SpatialUnsupportedError` with `feature`
 | Method | Notes |
 |---|---|
 | `applyImpulse(impulse: Vector3, atWorldPoint?: Vector3): this` | instantaneous; omit the point for a central impulse |
-| `applyForce(force: Vector3): this` | applied for one frame |
-| `applyTorque(torque: Vector3): this` | |
+| `applyForce(force: Vector3): this` | applied for one simulation step, then cleared on both backends; call it every frame for a sustained push |
+| `applyTorque(torque: Vector3): this` | same one-step rule |
 | `setLinearVelocity(v: Vector3): this` | |
 | `setAngularVelocity(v: Vector3): this` | |
 
@@ -1739,8 +1776,10 @@ collide with physics bodies.
 3. the first `Spatial.raycast` of the scene runs — which materialises a shape
    for **every** mesh, permanently.
 
-This is what keeps 1500 moving meshes at frame rate: an eager collider costs
-about 10 µs per moved entity per frame. Two consequences for verification:
+This is what keeps 1500 moving meshes at frame rate: RealityKit charges every
+entity that carries a collider on every frame it moves, so a scene that gives
+all 1500 a collider spends its budget in the physics scheduler before a single
+triangle is drawn. Two consequences for verification:
 
 - `nativeDump()` lists `CollisionComponent` only where one actually exists, so
   a mesh with no listener and no body legitimately has none. That is not a
@@ -2107,21 +2146,31 @@ An emitter's `Object3D.opacity` is reported as `1` in `dump()` regardless of the
 `opacity` option, because the emitter reuses that name for the particle start
 opacity — read `dump().objects[i].particles.opacity` for what you set.
 
+**Presets resolve in the core**, so a preset's real values are readable straight
+off the emitter and appear in `dump().objects[i].particles`:
+
+```js
+const rain = new ParticleEmitter({ preset: "rain" });
+rain.birthRate;   // 700, not the 100 default
+rain.loops;       // true
+```
+
+A preset replaces **every other field except `isEmitting`** — passing
+`{ preset: "rain", birthRate: 5 }` gives you 700, silently, because that is what
+the preset says. Set `preset: null` (the default) to use your own fields.
+
 **What each preset looks like.** The web set is hand-tuned against the Mac
-app's renders, so the two agree by eye rather than by parameter. A preset
-replaces every other field except `isEmitting`.
+app's renders, so the two agree by eye rather than by parameter.
 
 | Preset | Look | Direction and fall |
 |---|---|---|
 | `fireworks` | a bright warm shell that cools to red | every direction, falls away |
-| `impact` | a short sharp burst of pale debris | hemisphere, falls hard; **does not loop** |
+| `impact` | a short sharp burst of pale debris | hemisphere, falls hard; **`loops` is `false`** — the one preset that stops after a lifetime |
 | `magic` | slow blue motes drifting up and shifting to violet | every direction, rises gently |
 | `rain` | fine pale drops across a wide sheet | straight down, accelerating |
 | `snow` | large soft white flakes | every direction, drifts down slowly |
 | `sparks` | a wide spray of hot embers cooling to red | every direction, falls |
 | `smoke` | big translucent grey puffs thinning out | narrow, rises. RealityKit has no native smoke preset, so this one is a hand-tuned equivalent on both backends |
-
-Set `preset: null` (the default) to use your own fields.
 
 ```js runnable
 const Spatial = require("spatial");
@@ -2299,7 +2348,9 @@ Resolves to an `AssetGroup` (a `Group`). The RealityKit consumer loads `usdz`
 or `reality`; the web consumer loads `glb` or `gltf`. Each ignores the other's
 keys. **Supply both** so one script runs on both backends. If the key the
 backend needs is missing the promise rejects immediately with
-`SpatialUnsupportedError` (`feature` `"loadAsset"`).
+`SpatialUnsupportedError` (`feature` `"loadAsset"`). A load the backend attempts
+and cannot complete rejects with the platform's message, and the core warns
+once `Asset "<url>" failed to load` — the same line on every backend.
 
 Every url goes through [containment](#url-forms) first: an accepted relative
 path is joined onto the asset root, and a refused one has **that key** dropped.
@@ -2479,8 +2530,9 @@ discovering them. Crossing one is always reported — through `dump().warnings` 
 | `MAX_ID` | `16777216` (2²⁴) | the object, texture and joint id space. Ids are recycled on destroy; exhausting it records an error and stops tracking new objects |
 | `MAX_RECORDED_ERRORS` | `200` | `dump().errors` keeps the most recent; older entries drop and `dump().droppedErrors` counts how many times |
 | `MAX_RECORDED_WARNINGS` | `500` | further warnings are not recorded |
+| `MAX_ERROR_MESSAGES_PER_SECOND` | `20` | distinct error messages reported in one second. Past it the rest of that second is dropped and one line says so — see [Runtime errors](#runtime-errors) |
 
-All eleven are on the frozen object, so a generator can size a scene against
+All twelve are on the frozen object, so a generator can size a scene against
 them directly rather than hard-coding numbers.
 
 Geometry `parameters` are sanitised on the way out with their own bounds: a
@@ -2623,8 +2675,13 @@ The top-level fields are always present, so `errors`, `warnings` and
 `droppedErrors` survive every option — which is what makes
 `dump({ objects: false })` the cheapest health check there is.
 
-Roughly what they cost, on a small scene: full 3658 bytes of JSON, compact 703.
-The gap widens with the scene.
+What they cost depends entirely on what the scene carries, so measure rather
+than assume — the runnable snippet below prints the four sizes for its own scene
+into `userData`, and [the README](../README.md#get-dump-options-and-the-cheap-poll)
+has the one-liner that times the same four over HTTP. As a shape: `objects:
+false` is a few hundred bytes whatever the scene; `compact` saves whatever the
+scene's `userData` and geometry parameters weigh, which on a scene that stores
+little of either is not much.
 
 **Combine them.** `dump({ names: ["cube"], fields: ["position", "visible"] })`
 is the shape to poll when you are watching one object move.
@@ -2844,14 +2901,26 @@ Line numbers are 1-based against your source.
 
 ### Runtime errors
 
-Each unique message is reported at most **once per second** to stop a
-per-frame throw from flooding the channel. Entries are strings, deduplicated by
-message, in `dump().errors`.
+The error channel is rate limited twice over, so neither a per-frame throw nor a
+script that never repeats itself can flood it:
+
+| Limit | Effect |
+|---|---|
+| once per second per **exact message** | a throw on every frame is reported once a second; the message text is the key, so varying it defeats this one |
+| `MAX_ERROR_MESSAGES_PER_SECOND` = **20 distinct messages per second** | past 20, the rest of that second is dropped and a single line records it: `More than 20 distinct errors in one second; the rest of this second was dropped` |
+
+Entries are strings, deduplicated by message, in `dump().errors`.
 
 `dump().errors` keeps the **most recent 200** entries. Once that cap is reached
 older entries are dropped and `dump().droppedErrors` counts how many times that
 happened — so a non-zero `droppedErrors` means the visible list is not the whole
 story, and the earliest failure is no longer in it.
+
+Reading a truncated channel: the dropped-count line tells you the second was
+noisy, `droppedErrors` tells you the list has rolled, and a script that varies
+its message text — `throw new Error("frame " + n)` — will hit the 20-per-second
+limit rather than the once-per-message one. Throw a constant message and put the
+varying part in `userData`.
 
 Core-raised runtime errors (each reported once per object, and again only after
 the value has become valid in between):
@@ -2888,7 +2957,7 @@ and recorded in `dump().warnings`.
 | `PointLight properties were clamped: intensity -5 -> 0, ...` | an out-of-range light scalar |
 | `MeshStandardMaterial.wireframe is unsupported in RealityKit` | the mesh renders solid |
 | `AdditiveBlending is unsupported in RealityKit; the material renders as transparent` | |
-| `PointLight shadows are unsupported; castShadow is ignored` | |
+| `PointLight shadows are unsupported in RealityKit; castShadow is ignored` | RealityKit only; the web renders point-light shadows |
 | `Object3D.groundingShadow is unsupported on the three.js backend` | |
 | `Object3D.manipulable is unsupported on macOS; ManipulationComponent is visionOS only` | RK macOS |
 | `Object3D.renderOrder is unsupported on macOS; ModelSortGroupComponent is visionOS only` | RK macOS |
@@ -2905,6 +2974,10 @@ and recorded in `dump().warnings`.
 | `RigidBody.applyImpulse on "x" was dropped: the object is not in the mounted scene` | the object was destroyed or never added; also covers `burst`, `playAnimation` and the other imperative calls |
 | `texture N was released while a material still references it; it is kept until the material changes` | web; repoint the material before disposing |
 | `the scene has no lights; meshes with lit materials render black` | neither consumer adds a light of its own, so the backends agree. Add one |
+| `Texture "asset://missing.png" failed to load` / `Asset "asset://missing.glb" failed to load` | from the core, identical on every backend; the platform's own message is in `texture.error` or the rejection |
+| `Mesh "x" has a BufferGeometry with no vertices and draws nothing` | a hand-built geometry with no `position` attribute |
+| `TextGeometry parameter text was longer than 256 characters and was truncated on the wire` | `MAX_PARAMETER_STRING`; the script keeps its full string, the consumer sees 256 characters |
+| `OrthographicCamera asks for a visible width of 0.600 but the viewport shows 0.888 at that height; the height is kept and the width follows the viewport` | one string on both backends; `left`/`right` disagree with the viewport aspect |
 | `A name of 400 characters was truncated to 256` | the command stream carries at most `MAX_NAME_LENGTH`; the object keeps the full name |
 | `The url scheme "ftp:" is not allowed; "ftp://x/a.png" was dropped` | texture url containment |
 | `"../../etc/passwd" escapes the asset root and was dropped` | texture url containment |
@@ -3013,10 +3086,23 @@ Top level:
 | `objects` | `DumpObject[]` | depth-first, parents before children |
 | `joints` | `object[]` | `{ id, type, bodyA, bodyB, anchorA, anchorB, axis, limits }` |
 | `gravity` | `[x, y, z]` | |
-| `environment` | `{ url, intensity } \| null` | |
+| `environment` | `{ url, intensity } \| null` | the image-based light — see [ImageBasedLight](#imagebasedlight) |
+| `isActive` | `boolean` | `false` between `willDeactivate` and `didActivate`; ticks pause — [Activation](#activation) |
+| `audioMixer` | `{ masterVolume, groups, state }` | the listener and bus — [Spatial.audio](#spatialaudio) |
+| `camera` | `object \| null` | the active camera's parameters, `null` for the consumer's built-in one. The **pose is not here**: a camera is an `Object3D` and appears in `objects` — [Spatial.camera](#spatialcamera) |
+| `sceneUnderstanding` | `{ collision, occlusion, physics, shadows }` | [Scene understanding](#24-scene-understanding) |
+| `render` | `{ adaptiveResolution }` | visionOS only — [Small components](#28-small-components-and-multi-material-meshes) |
+| `environmentLighting` | `{ intensityExponent }` | scales the environment light — same section |
+| `debug` | `{ modelView }` | the debug material override — same section |
+| `hostFunctions` | `string[]` | the `Module.function` names the app registered — [Spatial.host](#spatialhost) |
+| `controllers` | `object[]` | connected game controllers and their button state — [Game controllers](#25-game-controllers) |
 | `warnings` | `string[]` | capped at 500 |
 | `errors` | `string[]` | the most recent 200 |
 | `droppedErrors` | `number` | how many times the `errors` cap dropped older entries; non-zero means the first failure is no longer listed |
+
+That is the whole top level: **22 fields**, always present in that order, whether
+or not the scene uses the feature. Nine of them are phase 2 and each links to the
+section that explains it.
 
 Each entry of `objects`:
 
@@ -3031,7 +3117,7 @@ Each entry of `objects`:
 | `geometry` | `{ type, uuid, parameters } \| null` | |
 | `material` | material snapshot `\| null` | `{ type, uuid, color, opacity, transparent, side, wireframe, metalness, roughness, emissive, emissiveIntensity, clearcoat, clearcoatRoughness, depthWrite, depthTest, blending, maps }` |
 | `light` | light snapshot `\| null` | `{ type, color, intensity, distance, decay, angle, penumbra, castShadow, direction }` |
-| `rigidBody` | body JSON `\| null` | `{ type, mass, shape, requestedShape, friction, restitution, linearDamping, angularDamping, isTrigger, gravity }` — `shape` is the **resolved** shape, `requestedShape` is what you asked for. `type` and `mass` are echoed as written even on a trigger, where both are ignored |
+| `rigidBody` | body JSON `\| null` | `{ type, requestedType, mass, shape, requestedShape, friction, restitution, linearDamping, angularDamping, isTrigger, gravity }` — `shape` is the **resolved** shape and `requestedShape` what you asked for; likewise `type` is the resolved type (`"static"` for a trigger, with `mass` 0) and `requestedType` what you wrote |
 | `opacity` | `number` | the whole-object opacity. Always `1` on a `ParticleEmitter`, which reuses the name for the particle start opacity |
 | `billboard`, `groundingShadow`, `hoverEffect`, `manipulable` | | the SpatialScript flags, as written — including on backends that ignore them |
 | `castShadow`, `receiveShadow`, `renderOrder` | | |
@@ -3085,10 +3171,13 @@ Check [`Spatial.env.capabilities`](#spatialenv) before relying on any of it.
 **(ours, three.js-shaped.)** The script says what should sound, where it is and
 how loud. The consumer owns decoding and playback.
 
-**Playback state is native-driven.** `isPlaying`, `currentTime` and `duration`
-are whatever the consumer last reported through its `syncAudio` channel, so
-`isPlaying` is **still `false` on the frame you call `play()`**. Never branch on
-it immediately; read it next frame, or track your own intent.
+**`isPlaying` is your intent; `currentTime` and `duration` are the consumer's.**
+`play()`, `pause()` and `stop()` set `isPlaying` on the calling frame, so a
+tap-to-toggle reads correctly straight away — the same rule on `Audio` and
+[`VideoScreen`](#19-video) alike. The consumer corrects it later if its engine
+refuses or the sound finishes, and it owns `currentTime` and `duration`
+outright, which stay at `0` until its first `syncAudio` — so never compute a
+progress bar from them on the first frame.
 
 ### Spatial.audio
 
@@ -3137,9 +3226,9 @@ still reaches the consumer.
 | Property | Type | Default | Notes |
 |---|---|---|---|
 | `buffer` | `AudioBuffer \| null` | `null` | read-only; set with `setBuffer` |
-| `isPlaying` | `boolean` | `false` | **read-only, native-driven** |
-| `currentTime` | `number` (seconds) | `0` | native-driven; **assigning seeks** |
-| `duration` | `number` (seconds) | `0` | read-only, native-driven |
+| `isPlaying` | `boolean` | `false` | read-only. Set by `play()`/`pause()`/`stop()` on the calling frame once the sound **has a buffer**, then corrected by the consumer. Before `setBuffer` (or before an `AudioLoader` result has arrived) `play()` is refused and `isPlaying` stays `false`: intent needs something to play |
+| `currentTime` | `number` (seconds) | `0` | native-driven, `0` until the first sync; **assigning seeks** |
+| `duration` | `number` (seconds) | `0` | read-only, native-driven, `0` until the first sync |
 | `loop` | `boolean` | `false` | |
 | `volume` | `number` 0..1 | `1` | |
 | `playbackRate` | `number` | `1` | |
@@ -3198,12 +3287,18 @@ Spatial.mount(scene);
 should be heard: it is an `Object3D`, so it rides its parent's transform and its
 cone turns with it.
 
+**Cone angles are in degrees.** `setDirectionalCone` keeps three.js's
+`PannerNode` units, so it is the one place in SpatialScript where an angle is
+not radians — `setDirectionalCone(60, 140, 0.25)` is a 60° inner cone and a
+140° outer cone, not 60 and 140 radians. `dump().objects[i].audio.cone` reports
+the same degrees.
+
 | Method | Default | Notes |
 |---|---|---|
 | `setRefDistance(m)` / `getRefDistance()` | `1` | full volume out to this distance |
 | `setRolloffFactor(f)` / `getRolloffFactor()` | `1` | how fast it falls away beyond it |
 | `setDistanceModel("inverse" \| "linear" \| "exponential")` / `getDistanceModel()` | `"inverse"` | |
-| `setDirectionalCone(innerAngle, outerAngle, outerGain)` | none | **degrees**, gain 0..1, aimed down the object's `-Z` |
+| `setDirectionalCone(innerAngle, outerAngle, outerGain)` | none | `innerAngle` and `outerAngle` are **degrees**, like three.js's `PannerNode` cone and unlike every other angle in the namespace, which is radians. `outerGain` is 0..1. The cone points down the object's `-Z` |
 | `reverbLevel` | `0` | **decibels** of send into the room reverb, not a 0..1 mix |
 
 The defaults are tuned for metre-scale scenes. A scene that fits in 0.4 m never
@@ -3287,7 +3382,8 @@ mixer is top-level `audioMixer: { masterVolume, groups, state }`.
 | `docking` | `boolean` | `false` | **visionOS only** — adds `DockingRegionComponent`; elsewhere kept and warned |
 | `volume` | `number` 0..1 | `1` | |
 | `playbackRate` | `number` | `1` | |
-| `isPlaying`, `currentTime`, `duration` | | | native-driven, like [audio](#18-audio); `currentTime` seeks on assignment |
+| `isPlaying` | `boolean` | `false` | set by `play()`/`pause()` on the calling frame, then corrected by the consumer — the same rule as [audio](#18-audio) |
+| `currentTime`, `duration` | | | native-driven, `0` until the consumer's first `syncVideo`; `currentTime` seeks on assignment |
 | `error` | `string \| null` | `null` | the message from the last `error` event |
 
 Methods: `play()`, `pause()`.
@@ -3342,7 +3438,7 @@ screen.addEventListener("loaded", (event) => {
 });
 screen.addEventListener("error", (event) => { scene.userData.videoError = event.message; });
 
-// isPlaying is what the consumer last reported, so this toggles the real transport.
+// isPlaying is set on the calling frame, so the toggle reads correctly at once.
 screen.addEventListener("tap", () => {
   if (screen.isPlaying) screen.pause();
   else screen.play();
@@ -3510,10 +3606,40 @@ along.
 | Class | Constructor options | Meaning |
 |---|---|---|
 | `ConstantForceField` | `{ force: Vector3, radius, mask, enabled }` | a steady push, like wind |
-| `RadialForceField` | `{ strength, minimumDistance, falloff: "none" \| "linear" \| "inverseSquare", radius, mask, enabled }` | out from the centre; `minimumDistance` is what stops the force going to infinity at the centre |
+| `RadialForceField` | `{ strength, minimumDistance, falloff: "none" \| "linear" \| "inverseSquare", radius, mask, enabled }` | out from the centre; below `minimumDistance` the force is held at its value there, which is what stops it going to infinity |
 | `VortexForceField` | `{ strength, axis: Vector3, radius, mask, enabled }` | a swirl about `axis` |
 | `DragForceField` | `{ coefficient, radius, mask, enabled }` | slows bodies down |
 | `TurbulenceForceField` | `{ strength, noiseScale, radius, mask, enabled }` | noise-driven jitter |
+
+**Units, and why they bite at this scale.**
+
+| Field | Unit |
+|---|---|
+| `force` | **newtons** |
+| `strength` | **newtons at one metre** from the effect; the falloff applies beyond that |
+| `coefficient` | dimensionless, applied to velocity |
+| `noiseScale`, `radius`, `minimumDistance` | metres |
+
+A newton on a 0.25 kg pebble is 4 m/s². Because `strength` is quoted **at one
+metre** and a SpatialScript scene lives inside half a metre, an
+`inverseSquare` field is far stronger than its number suggests: at 0.1 m the
+force is 100× `strength`, so `strength: 0.6` is 240 m/s² on that pebble and the
+scene explodes. Do the arithmetic before choosing a number:
+
+```
+inverseSquare:  F = strength / max(d, minimumDistance)²        newtons
+acceleration :  a = F / mass                                    m/s²
+```
+
+For a gentle drift — say 2 m/s² on a 0.25 kg body sitting 0.15 m out —
+`strength = a · mass · d² = 2 × 0.25 × 0.0225 ≈ 0.011` N at one metre.
+
+Both consumers **clamp the acceleration a field imparts to 1000 m/s² per step**
+and warn once naming the field when the clamp engages, so a mis-scaled recipe
+cannot launch a body to infinity — but a clamped field is still wrong, and the
+warning is the signal to re-derive the number. `falloff: "none"` is the easiest
+to reason about at small scale: the force is `strength` everywhere inside
+`radius`.
 
 Shared members: `enabled` (default `true`), `radius`, `mask` (a collision mask,
 forwarded to the consumer unchanged; the default is every group), `kind`
@@ -3553,8 +3679,10 @@ walker.characterController = new S.CharacterController({
 });
 scene.add(walker);
 
+// strength is newtons AT ONE METRE, so at 0.15 m an inverseSquare field is
+// ~44x stronger: 0.011 / 0.15^2 = 0.49 N, about 2 m/s^2 on a 0.25 kg pebble.
 const repeller = new S.RadialForceField({
-  strength: 0.6, minimumDistance: 0.04, falloff: "inverseSquare", radius: 0.3,
+  strength: 0.011, minimumDistance: 0.15, falloff: "inverseSquare", radius: 0.3,
 });
 repeller.name = "repeller";
 repeller.position.y = -0.1;
@@ -3583,7 +3711,7 @@ Spatial.onFrame((deltaTime, elapsed) => {
   step.y = verticalSpeed * deltaTime;
 
   controller.move(step);                    // one move per frame
-  repeller.strength = 0.6 + Math.sin(elapsed * 1.2) * 0.35;
+  repeller.strength = 0.011 + Math.sin(elapsed * 1.2) * 0.005;
 });
 
 Spatial.mount(scene);
@@ -3785,19 +3913,29 @@ real-world mesh:
 | `shadows` | `false` | virtual objects cast shadows on the room |
 
 Setting any of them adds a `SceneUnderstandingComponent` with those options to
-the root on visionOS. macOS and web keep the state, report it in `dump()`, and
-warn once: `Spatial.sceneUnderstanding has no effect outside visionOS; the state
-is kept and reported`. `capabilities.sceneUnderstanding` is `true` only on
-visionOS.
+the root on visionOS. `capabilities.sceneUnderstanding` is `true` only there.
+
+**Enabling a flag always warns once, on every backend** — there is no
+configuration in which the four flags are silent:
+
+| Backend | The warning you get |
+|---|---|
+| RK macOS, web | the core's: `Spatial.sceneUnderstanding has no effect outside visionOS; the state is kept and reported` |
+| RK visionOS | the consumer's: real-world hits are not reported, because RealityKit's raycast does not return the scene reconstruction mesh — so a raycast never yields the `object === null` record described below. Collision and occlusion against the mesh still work |
+
+The web consumer's own warning currently says only that scene understanding is
+visionOS-only and does not mention raycasts, so on the web the raycast half of
+the contract is warned about by the core's line rather than the consumer's.
 
 Every [`Spatial.raycast`](#spatialraycast) hit carries a `sceneUnderstanding`
 boolean, and a hit against the real-world mesh has `object === null` with
 `sceneUnderstanding: true`.
 
-**Known limit:** the RealityKit consumer does not currently report real-world
-raycast hits, so `sceneUnderstanding` is `false` on every hit you will see today
-and `object` is never `null`. Write the check anyway — it is the contract — but
-do not build a scene that depends on it.
+**Known limit:** no consumer reports real-world raycast hits today, so
+`sceneUnderstanding` is `false` on every hit you will see and `object` is never
+`null`. RealityKit says so in the warning above; that is the one to look for.
+Write the check anyway — it is the contract — but do not build a scene that
+depends on it.
 
 ```js runnable
 const Spatial = require("spatial");
@@ -4227,7 +4365,7 @@ shared core (JS)                     core/dist/spatial-core.js
     |  flush() -> Command[]  (one array per tick)
     |
     +--> RealityKit consumer (Swift, JavaScriptCore) -- entities, RK physics
-    +--> three.js consumer (web/) -- WebGLRenderer, Rapier physics
+    +--> three.js consumer (consumers/web/) -- WebGLRenderer, Rapier physics
 ```
 
 - The core owns the scene graph. Transforms, hierarchy, materials, geometry,

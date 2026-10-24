@@ -8,18 +8,28 @@ build:
 
 ```
 curl -s 'http://127.0.0.1:8787/dump?objects=0' | jq '{frame, errors, droppedErrors, warnings}'
-curl -s  http://127.0.0.1:8787/logs           | jq -r '.logs[] | "\(.level): \(.message)"'
-curl -s  http://127.0.0.1:8787/stats          | jq '{framesPerSecond, commandCount, entityCount, pushToFirstFrameMs}'
+curl -s  http://127.0.0.1:8787/logs          | jq -r '.logs[] | "\(.level): \(.message)"'
+curl -s  http://127.0.0.1:8787/stats         | jq '{framesPerSecond, commandCount, entityCount, pushToFirstFrameMs}'
 ```
 
-`?objects=0` gives you every top-level field and no object list, which is both
-the cheapest poll and the fastest way to see `errors`. Add
-`?compact=1`, `?names=…` or `?fields=…` when you need objects too — a full dump
-of a large scene is expensive enough to stall the render loop.
+`?objects=0` gives you every top-level field and no object list — a few hundred
+bytes whatever the scene, which makes it both the cheapest poll and the fastest
+way to see `errors`. Add `?names=cube`, `?fields=position` or `?compact=1` when
+you need objects too; a full dump of a large scene is expensive enough to stall
+the render loop. [The README](../README.md#get-dump-options-and-the-cheap-poll)
+has the one-liner that times each route on your own machine.
 
-A non-empty `errors` array is the answer to most of this page. `errors` keeps
-the most recent 200 entries; if `droppedErrors` is non-zero the **first**
-failure is no longer in the list, so fix what you can see and re-push.
+A non-empty `errors` array is the answer to most of this page, but read it
+knowing it is rate limited two ways: the same **exact message** is reported at
+most once per second, and at most **20 distinct messages** get through in one
+second — past that you get one `More than 20 distinct errors in one second; the
+rest of this second was dropped` line instead. `errors` then keeps only the most
+recent 200 entries; if `droppedErrors` is non-zero the **first** failure is no
+longer in the list. Fix what you can see and re-push.
+
+A script that varies its message text (`throw new Error("frame " + n)`) trips
+the 20-per-second limit rather than the once-per-message one, and hides itself.
+Throw a constant message and put the varying part in `userData`.
 
 If the answer is "it works on one backend and not the other", skip to
 [the parity gate](../README.md#the-parity-gate) — it diffs both dumps, both
@@ -177,7 +187,7 @@ Warnings never stop anything. They appear once per key per scene, in
 | `PointLight properties were clamped: intensity -5 -> 0` | negative intensity/distance/decay, or `angle` above π/2 | |
 | `MeshStandardMaterial.wireframe is unsupported in RealityKit` | renders solid | use thin boxes if you need visible edges |
 | `AdditiveBlending is unsupported in RealityKit; the material renders as transparent` | RealityKit blending is opaque or transparent only | accept it, or use emissive for a glow |
-| `PointLight shadows are unsupported; castShadow is ignored` | | cast shadows from a directional or spot light |
+| `PointLight shadows are unsupported in RealityKit; castShadow is ignored` | RealityKit only | cast shadows from a directional or spot light, or accept the difference on the web |
 | `Object3D.groundingShadow is unsupported on the three.js backend` | | expected when running the web harness |
 | `Object3D.manipulable is unsupported on macOS; ManipulationComponent is visionOS only` | macOS has no system manipulation | branch on `Spatial.env.capabilities.manipulation`; implement a drag instead |
 | `Object3D.renderOrder is unsupported on macOS; ModelSortGroupComponent is visionOS only` | | order by depth, or accept it |
@@ -248,6 +258,7 @@ reported once in `dump().errors`:
 | the world gravity is zero | `dump().gravity` | `Spatial.physics.gravity.set(0, -9.81, 0)` |
 | the body went to sleep | `dump().objects[i].isSleeping === true`, `velocity` near zero | expected once it rests; an impulse or a collision wakes it |
 | you moved it by writing `position` | it snaps and stops | writing `position`/`quaternion`/`scale` on a dynamic body is a **teleport** that zeroes velocity. Use `applyImpulse`, `applyForce` or `setLinearVelocity` |
+| you assigned `body.linearVelocity` | `warnings` names it | the velocity accessors are read-only and the assignment is ignored with a warning; call `setLinearVelocity(vector)` / `setAngularVelocity(vector)` |
 | the shape is wrong | `rigidBody.shape` is the *resolved* shape | `"auto"` gives `box`/`sphere`/`capsule` for those geometries and `convex` otherwise; pass an explicit shape if that is wrong |
 | it is a trigger | `rigidBody.isTrigger === true` | **a trigger is never simulated**: no mass, no falling, never pushed, and its `type`, `mass` and `gravity` are all ignored. If you wanted a moving body, drop `isTrigger` |
 | the body is on a `Group` | warning `RigidBody on "x" was ignored: the object has no geometry to build a collision shape from` | bodies go on meshes |
@@ -341,10 +352,31 @@ fire: begin, one per transform update, end.
 never moves the object for you. If you only registered `dragstart`, or your
 `drag` handler does not write `position`, nothing moves.
 
-```js
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, BoxGeometry, MeshStandardMaterial, AmbientLight, Vector3 } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+const box = new Mesh(new BoxGeometry(0.12, 0.12, 0.12), new MeshStandardMaterial());
+box.name = "box";
+scene.add(box);
+
 const origin = new Vector3();
 box.addEventListener("dragstart", () => origin.copy(box.position));
 box.addEventListener("drag", (event) => box.position.copy(origin).add(event.translation));
+
+Spatial.mount(scene);
+
+Spatial.onFrame(() => {
+  if (Spatial.time.frame === 5) Spatial.inject.drag("box", new Vector3(0.1, 0, 0), { steps: 4 });
+  if (Spatial.time.frame === 20) {
+    // 0.1 — the total displacement. Adding `translation` to the *current*
+    // position each event would give 0.25 and keep accelerating.
+    scene.userData.movedX = box.position.x;
+    scene.userData.interactive = Spatial.dump().objects.find((o) => o.name === "box").interactive.drag;
+  }
+});
 ```
 
 **`translation` is measured from `dragstart`, not from the previous event.**
@@ -467,13 +499,44 @@ at it, or repointed to a texture that had already been disposed. Repoint first,
 then dispose. The web consumer warns: `texture N was released while a material
 still references it; it is kept until the material changes`.
 
+**The `onLoad` callback never ran.** It should: on the first successful load the
+consumer sets `texture.loaded`, calls `onLoad`, resolves `loadAsync` and
+dispatches `load`, on both backends — including for a texture that was already
+in flight when a second material asked for it. If none of that happened, the
+load failed; pass an `onError` and read it.
+
 **The texture failed.** A failed texture dispatches `error` on the `Texture`,
 calls the `onError` callback, and sets `texture.error`; the material stays
 usable and renders untextured. Pass an `onError` and log it:
 
-```js
-const map = new TextureLoader().load("asset://grid.png", undefined, undefined,
-  (error) => console.warn("texture failed:", error.message));
+<!-- expect-warning: is not allowed -->
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, PlaneGeometry, MeshStandardMaterial, AmbientLight, TextureLoader } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+
+// A url containment refuses never becomes a playable texture: onError runs and
+// the command carries url: null, while the material stays usable.
+const map = new TextureLoader().load(
+  "ftp://example.com/grid.png",
+  () => { scene.userData.loaded = true; },
+  undefined,
+  (error) => { scene.userData.textureError = error.message; },
+);
+
+const panel = new Mesh(new PlaneGeometry(0.3, 0.3), new MeshStandardMaterial({ map }));
+panel.name = "panel";
+scene.add(panel);
+
+Spatial.mount(scene);
+
+Spatial.onFrame(() => {
+  if (Spatial.time.frame !== 5) return;
+  // The warning names the url; the panel still renders, untextured.
+  scene.userData.warnings = Spatial.dump().warnings.length;
+});
 ```
 
 **The asset loaded but is the wrong size.** Assets arrive at their authored
@@ -523,10 +586,41 @@ You set `matrixAutoUpdate = false` — the static hint — and now writing
 the core follows them: the **matrix** is authoritative, and the core stops
 reading the TRS entirely.
 
-```js
-tower.position.y += 0.05;
-tower.updateMatrix();        // required, or nothing happens
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, BoxGeometry, MeshStandardMaterial, AmbientLight } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+
+const tower = new Mesh(new BoxGeometry(0.1, 0.2, 0.1), new MeshStandardMaterial());
+tower.name = "tower";
+tower.position.set(0, -0.1, 0);
+tower.updateMatrix();          // bake it, THEN turn the flag off
+tower.matrixAutoUpdate = false;
+scene.add(tower);
+
+Spatial.mount(scene);
+
+Spatial.onFrame(() => {
+  const frame = Spatial.time.frame;
+  // Writing position alone moves nothing on screen: the matrix is authoritative
+  // and no transform command is emitted for it.
+  if (frame === 5) { tower.position.y += 0.05; }
+  // updateMatrix() folds the write into the matrix, and that is the frame the
+  // transform actually reaches the consumer.
+  if (frame === 10) { tower.updateMatrix(); scene.userData.committedAtFrame = frame; }
+  if (frame === 13) {
+    scene.userData.y = Spatial.dump().objects.find((o) => o.name === "tower").position[1];
+  }
+});
 ```
+
+**Careful reading `dump()` here.** The dump reports the script-side `position`,
+so your write shows up in it **immediately** — at frame 5 in that snippet — even
+though no transform command is emitted until frame 10. The dump is not the
+witness for this one; the screen and the command stream are. If a static object
+looks stale on screen while `dump()` says it moved, this is why.
 
 Or write the matrix directly: `tower.matrix.makeTranslation(x, y, z)`.
 
@@ -619,6 +713,7 @@ look here first.
 | `add`/`attach` refused | `MAX_DEPTH` 1024 | a `depth-limit` error |
 | new objects stop rendering | id ceiling 2²⁴ | `The scene has used every object id below 16777216; new objects are not tracked` |
 | the earliest error is missing | `errors` cap 200 | `dump().droppedErrors` is non-zero |
+| errors stop appearing mid-second | `MAX_ERROR_MESSAGES_PER_SECOND` 20 | `More than 20 distinct errors in one second; the rest of this second was dropped` |
 
 Read the numbers from `Spatial.limits` rather than hard-coding them, and size
 generated scenes against them.
@@ -647,16 +742,45 @@ root before suspecting the script.
 
 Calling a geometry **method** re-emits the geometry: `setAttribute`,
 `deleteAttribute`, `setIndex`, `computeVertexNormals`, `applyMatrix4`, and the
-`translate`/`rotate`/`scale`/`center` helpers that go through it. Both consumers
-rebuild the native mesh and its bounds, for every mesh sharing that geometry.
+`translate`/`rotate`/`scale`/`center` helpers that go through it. The web
+consumer rebuilds the native mesh and its bounds for every mesh sharing that
+geometry.
+
+**RealityKit does too.** `revision` is part of its cache key and the consumer
+reads it as the opaque token it is, so an edited geometry rebuilds its native
+mesh on the next flush exactly as the browser does. If a geometry edit shows in
+neither, the missing step is `attribute.needsUpdate = true` (or a fresh
+`mesh.geometry`), which is what bumps the revision.
 
 Editing the numbers **inside** an existing attribute array is the case the
 revision cannot see:
 
-```js
-const position = geometry.getAttribute("position");
-position.setXYZ(0, x, y, z);
-position.needsUpdate = true;      // without this the edit never leaves the core
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, BufferGeometry, Float32BufferAttribute, MeshStandardMaterial, AmbientLight } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+
+const geometry = new BufferGeometry();
+geometry.setAttribute("position", new Float32BufferAttribute([0, 0, 0, 0.1, 0, 0, 0, 0.1, 0], 3));
+const quad = new Mesh(geometry, new MeshStandardMaterial());
+quad.name = "quad";
+scene.add(quad);
+
+Spatial.mount(scene);
+
+Spatial.onFrame(() => {
+  const position = geometry.getAttribute("position");
+  // Edited in place, with no needsUpdate: the core cannot see it.
+  if (Spatial.time.frame === 5) position.setXYZ(1, 0.3, 0, 0);
+  // The same edit, committed.
+  if (Spatial.time.frame === 10) {
+    position.setXYZ(1, 0.5, 0, 0);
+    position.needsUpdate = true;      // without this the edit never leaves the core
+    scene.userData.committed = true;
+  }
+});
 ```
 
 Other reasons a geometry change does not appear:
@@ -675,13 +799,13 @@ Re-emitting sends the whole vertex payload, so a large buffer rewritten every
 frame will show up as a fat `applyMs` in `/stats`. Prefer swapping
 `mesh.geometry` between prebuilt geometries.
 
-**A shared plain `BufferGeometry` re-uploads once per mesh.** The command
-carries `uuid` plus a `revision` token, and for a *parametric* geometry the
-second and later meshes at the same pair get `null` buffers — the consumer
-reuses the resource it already built. A hand-built `BufferGeometry` cannot be
-regenerated from parameters, so it always carries its buffers. Sharing one
-across a thousand meshes is a thousand uploads at load. Use a parametric
-geometry for a large repeated shape.
+**A shared geometry uploads once, whatever kind it is.** The command carries
+`uuid` plus a `revision` token, and the second and later meshes at the same
+pair get `null` buffers — the consumer reuses the resource it already built.
+That holds for a hand-built `BufferGeometry` as much as for a parametric one:
+1500 meshes sharing one 20,000-vertex `BufferGeometry` move **0.6 MB** across
+the boundary, not 916 MB. Editing an attribute is a new revision and carries
+the buffers again, so animate vertices on one mesh, not on a shared geometry.
 
 ---
 
@@ -741,12 +865,19 @@ load time, and the capability is what the consumer actually honours.
 | the buffer never arrived | `onLoad` never ran | `AudioLoader.load` calls `onLoad` on the next microtask; if it never fires, the url was refused and `onError` ran instead |
 | `masterVolume` or the group volume is 0 | `dump().audioMixer` | a group volume multiplies every source in it |
 | the sound was disposed | `dump().warnings` for `Audio.play on "x" was dropped: the object was destroyed` | `dispose()` is final; build a new `Audio` |
-| nothing is wrong | | headless runs have no audio engine at all. `audio.playing` stays `false` in a Node or harness dump; verify audibly in the macOS host or in the browser harness with its fake audio device |
+| nothing is wrong | | headless runs have no audio engine at all. Verify audibly in the macOS host or in the browser harness with its fake audio device |
 
-**`isPlaying` is false right after `play()`.** Correct and expected: playback
-state is **native-driven**. `isPlaying`, `currentTime` and `duration` are what
-the consumer last reported through `syncAudio`, so they lag your call by a frame
-at least. Toggle against them next frame, or keep your own intent flag.
+**`currentTime` and `duration` are `0`.** Expected until the consumer's first
+`syncAudio`: those two are native-driven, so a progress readout computed on the
+first frame divides by zero. `isPlaying` is different — it is **your intent**,
+set by `play()`/`pause()`/`stop()` on the calling frame, so a tap-to-toggle
+reads correctly straight away. The consumer corrects it later if its engine
+refuses or the sound ends.
+
+**My cone is the wrong width.** `setDirectionalCone(inner, outer, outerGain)`
+takes **degrees**, keeping three.js's `PannerNode` units — it is the one angle
+in the namespace that is not radians. `setDirectionalCone(1, 2.4, 0.25)`
+intending radians gives a 1°/2.4° pencil beam.
 
 **My spatial sound ignores `setVolume`, or the cone does nothing.** Check
 `dump().objects[i].audio` first — if the values are there, the core did its job
@@ -909,60 +1040,168 @@ process.
 
 ## Memory and performance
 
-Measured on the development Mac, with the macOS host in a DEBUG build:
+Every figure here was measured with `verification/perf/measure.sh` and
+`verification/perf/check.mjs` against the running macOS host,
+DEBUG build, **JIT on**, unless a row says otherwise. `fps` is taken from the
+`/dump` frame counter over 2–3 s; the millisecond columns are `/stats` medians
+over the last 120 frames. Change the scene shape or the engine mode and every
+number moves, so each one is quoted with both.
 
-| Scene | Result |
-|---|---|
-| 1500 independently moving meshes, one shared geometry and one shared material | **120 fps** |
-| moving meshes, same sharing | 60 fps holds to roughly **4000** |
-| 1500 meshes, shared geometry and material | **0.2 s** from script push to first frame |
-| 1500 meshes, a unique geometry and material each | **1.1 s** — five times slower, for the same picture |
-| steady state of a moving scene | **1 command per frame** (the packed `transforms` array) |
+Every row but the last two is one `verification/perf/measure.sh` invocation, so
+you can reproduce it; the flags are in the right-hand column.
 
-**Share geometry.** Both consumers cache native mesh resources by the
-geometry's `uuid`, so 1500 meshes referencing one `BoxGeometry` **instance**
-create exactly one native mesh — `/stats` shows `meshBuilds: 1` against
-`meshHits: 1499`. Creating a new `BoxGeometry(0.1, 0.1, 0.1)` per mesh creates
-1500. `geometry.clone()` produces a new `uuid` and therefore a new resource —
-clone only when you need to diverge.
+| Scene (JIT on) | fps | core tick | apply | push → first frame | `measure.sh` flags |
+|---|---|---|---|---|---|
+| 500 moving, shared geometry + material | 121.5 | 0.168 ms | 0.856 ms | 120 ms | `--count 500 --shared-geometry --shared-material` |
+| **1500 moving, shared geometry + material** | **121.5** | **0.40 ms** | **~2 ms** (2.13–2.28) | **293–305 ms** | `--count 1500 --shared-geometry --shared-material` |
+| 1500 **static**, shared | 120.5 | 0.264 ms | 0.065 ms | 332 ms | add `--static` |
+| 3000 moving, shared | 68.0 | 0.750 ms | 4.640 ms | 546 ms | `--count 3000 …` |
+| 5000 moving, shared | 41.5 | 1.374 ms | 8.896 ms | 934 ms | `--count 5000 …` |
+| 1500 moving, shared geometry, **unique material each** | 117.5 | 1.078 ms | 2.364 ms | **364 ms** | drop `--shared-material` |
+| 1500 moving, **unique geometry and material** | 93.5 | 1.733 ms | 2.538 ms | **540 ms** | `--count 1500` alone |
+| 1500 **dynamic physics bodies** + a static floor | **6.5** ⚠️ | 1.939 ms | 4.655 ms | 729 ms | `--count 1500 --physics …` |
+| 10 000 static objects | ~39 | 1.972 ms | 0.750 ms | 1.69 s | `--count 10000 --static …` |
+| **1000 tweening materials** (colour, roughness, metalness every frame) | **12.3** ⚠️ | 2.391 ms | **74.18 ms** | 291 ms | **no generator flag** — hand-written scene |
 
-```js
+The static row's push time sits within noise of the moving row on purpose:
+load cost is resource building and the first flush, not motion, so the static
+hint buys frame time (the apply column), not load time.
+
+The last row has no `gen-stress` flag, so it came from a hand-written scene and
+cannot be reproduced from the repository as it stands.
+
+Reading the table: the steady state of a moving scene is **1 command per
+frame**, and the SPEC 12 one-second load target is met with and without shared
+resources since the material prototype landed (the unshared rows were 1.18 to
+1.26 s before it). **60 fps holds to roughly 4000 moving meshes** — that
+one is an interpolation between the measured 3000 and 5000 rows in frame-time
+space, not a measurement of its own; run `measure.sh --count 4000
+--shared-geometry --shared-material` if the exact crossover matters to you.
+
+Every row moves by 10–15 % between passes, so treat them as the shape of the
+curve rather than as constants, and re-measure before acting on a small
+difference. `verification/perf/check.mjs` **replaces the running scene** with
+its own and leaves the last one mounted; re-push your script afterwards.
+
+**Share geometry — sharing is by instance.** Both consumers cache native mesh
+resources by the geometry's `uuid` and revision, so 1500 meshes referencing one
+geometry **instance** build exactly one native mesh, parametric or hand-built
+alike.
+
+| What you write | RealityKit | web |
+|---|---|---|
+| 1500 meshes sharing one `BoxGeometry` instance | `meshBuilds 1`, `meshHits 1499` | one mesh |
+| 1500 meshes sharing one hand-built `BufferGeometry` | `meshBuilds 1`, `meshHits 1499` | one mesh |
+| 1500 meshes each with their **own** `BoxGeometry` of identical parameters | `meshBuilds 1` — it keys parametric geometry on the parameters | 1500 meshes |
+| 1500 meshes each with their **own** `BufferGeometry` | 1500 | 1500 |
+
+RealityKit keys a parametric geometry on its type, parameters and revision, and
+a `BufferGeometry` on `uuid` and revision; the web keys everything on `uuid` and
+revision. So the third row is a RealityKit-only saving — build the geometry once
+and share the instance, which is right on both. `geometry.clone()` mints a new
+`uuid` and therefore a new resource on the web; clone only when you need to
+diverge.
+
+**An in-place geometry edit reaches both backends.** `revision` is in both cache
+keys, so an edit with `attribute.needsUpdate = true` rebuilds the native mesh on
+RealityKit and on the web alike. Assigning `mesh.geometry` a fresh geometry is
+the other portable route.
+
+Sharing saves the wire too: a shared `BufferGeometry`'s vertices cross the
+boundary **once per `uuid` and revision** rather than once per mesh. The
+arithmetic, not a measurement: 20 000 vertices × 32 bytes of position, normal
+and uv is about 0.6 MB, so 1500 sharers send 0.6 MB once instead of 1500 × 0.6 MB.
+
+```js runnable
+const Spatial = require("spatial");
+const { Scene, Mesh, BoxGeometry, MeshStandardMaterial, AmbientLight, MathUtils } = Spatial;
+
+const scene = new Scene();
+scene.add(new AmbientLight(0xffffff, 1));
+
 const geometry = new BoxGeometry(0.05, 0.05, 0.05);   // once
 const material = new MeshStandardMaterial({ color: 0x6699ff });
-for (let i = 0; i < 1500; i += 1) scene.add(new Mesh(geometry, material));
+for (let i = 0; i < 200; i += 1) {
+  const cube = new Mesh(geometry, material);
+  cube.name = `cube-${i}`;
+  cube.position.set(MathUtils.randFloatSpread(0.5), MathUtils.randFloatSpread(0.3), 0);
+  scene.add(cube);
+}
+
+Spatial.mount(scene);
+
+Spatial.onFrame(() => {
+  if (Spatial.time.frame !== 3) return;
+  // One geometry uuid and one material uuid across every mesh: that is what the
+  // consumers' caches key on, and why this is one native mesh and one material.
+  const cubes = Spatial.dump().objects.filter((o) => o.name.startsWith("cube-"));
+  scene.userData.meshes = cubes.length;
+  scene.userData.geometryUuids = new Set(cubes.map((o) => o.geometry.uuid)).size;   // 1
+  scene.userData.materialUuids = new Set(cubes.map((o) => o.material.uuid)).size;   // 1
+});
 ```
 
-**Share materials too.** Materials are cached by `uuid` the same way, and the
-difference is the 0.2 s versus 1.1 s row above: unique geometries and materials
-are what make a large scene slow to load, not the object count. A material
-change re-emits the full material state to every user, so a per-frame tweak on
-a shared material is cheap in commands but touches every mesh that uses it —
-give an object its own material only when it genuinely needs to differ.
+**Share materials anyway.** The 293 ms versus 364 ms rows above are the same 1500
+meshes and the same picture; the only difference is a unique material each, and
+the gap was 1 s before the consumer learned to clone a warmed material. Unique
+resources are still what makes a large scene slower to load, not the object count.
 
 **Mark static scenery static.** `matrixAutoUpdate = false` after one
 `updateMatrix()` turns an object into sixteen array compares per frame with no
-property reads at all. Measured on the development Mac in the interpreter (the
-visionOS execution mode), 8000 static objects cost **22 ms per frame** without
-the hint and **8.4 ms** with it. Set the transform, bake it, turn the flag off —
-and remember that writing `position` afterwards does nothing until the next
-`updateMatrix()`. See [recipe 20](./COOKBOOK.md#20-static-scenery-with-the-matrixautoupdate-hint).
+property reads at all. On the 1500-mesh scene above, static against moving is
+**0.260 ms versus 0.381 ms** of core tick and **0.059 ms versus ~2 ms** of
+apply, JIT on, against 0.381 ms and about 2 ms for the same 1500 moving; in the
+no-JIT JavaScriptCore driver, where the interpreter makes the core tick the
+visible cost, it is **1.7 ms versus 3.8 ms**. Set the
+transform, bake it, turn the flag off — and remember that writing `position`
+afterwards does nothing until the next `updateMatrix()`. See
+[recipe 20](./COOKBOOK.md#20-static-scenery-with-the-matrixautoupdate-hint).
 
-**Tweening many separate materials is the expensive shape.** Sharing is what the
-caches are built for; the opposite case is not. A thousand meshes each with its
-own material, all animating colour, re-sends a full material payload per mesh
-per frame — cheap in the browser and very expensive on RealityKit, where each
-one rebuilds a native material. If a crowd has to shimmer, animate one shared
-material and let every mesh follow it, or animate `Object3D.opacity` (a single
-scalar) instead of a colour.
+**The idle cost is per object, not per change.** The diff walks every object
+every frame and asks whether anything moved, so a scene that is doing nothing
+still costs time proportional to its size. Nothing is emitted for any of it —
+the dirty gating works — but the walk is not free, so budget the **object
+count**, not just the moving count.
+
+Measure it for your own object count with the JavaScriptCore driver, which
+prints a static row beside the moving one:
+
+```bash
+corepack pnpm --filter @spatialscript/core test:jsc
+# tick 1500 moving meshes - median 3.78 ms, worst 4.17 ms
+# tick 1500 static meshes - median 1.74 ms      <- ~1.2 us per object, no JIT
+# tick 2000 moving meshes - median 4.99 ms, worst 5.35 ms
+# tick 2000 static meshes - median 2.37 ms
+```
+
+Those are no-JIT medians, so they are the visionOS-shaped number; with the JIT
+the same walk is roughly an order of magnitude cheaper.
+
+**Tweening many separate materials is the most expensive shape there is.** The
+1000-tweening-materials row above is the measurement: **12.5 fps**, with
+**73 ms per frame** in apply alone. The native material cache holds 512 entries,
+so at that size it never hits and every update rebuilds. If a crowd has to
+shimmer, animate **one shared material** and let every mesh follow it, or
+animate `Object3D.opacity`, which is a single scalar per object rather than a
+full material payload.
+
+**Physics has an undocumented cliff.** 1500 dynamic bodies runs at **7.5 fps**
+with the core tick still at 1.45 ms — the cost is RealityKit's solver, not
+SpatialScript. Budget hundreds of dynamic bodies, not thousands.
 
 **`Spatial.dump()` is not free, and `nativeDump()` is much less so.** Both run
-on the same thread as the frame. An unfiltered `GET /dump` is serialised inside
-JavaScriptCore in one pass, so a 10 000-object scene costs about **90 ms**; the
-same scene through `GET /native-dump`, which is rebuilt value by value from the
-live entities, costs about **0.6 s**. Never call either every frame. Poll
+on the same thread as the frame. Measured on a 10 000-object scene: an
+unfiltered `GET /dump` cost about **50 ms** (it is serialised inside
+JavaScriptCore in one pass) and `GET /native-dump` about **620 ms**, because it
+is rebuilt value by value from the live entities; `?objects=0` was ~14 ms and a
+few hundred bytes. Those are one run — the
+[README's timing one-liner](../README.md#get-dump-options-and-the-cheap-poll)
+re-measures them on your machine, and nothing in `verification/perf` does it for
+you. What is durable is the ordering: never call an unfiltered dump every
+frame, and never poll the native one. Poll
 `dump({ objects: false })` for health, `dump({ names, fields })` for one object,
-`dump({ compact: true })` for all the transforms; over HTTP the same narrowing
-is available as query parameters on **both** routes, and identical requests are
+and `dump({ compact: true })` when you want every object cheaply — the same four
+options work as query parameters on both routes, and identical requests are
 answered from a 100 ms cache. Save the full native dump for a one-shot
 comparison.
 
@@ -970,10 +1209,11 @@ comparison.
 collision shapes are built lazily: a mesh gets a `CollisionComponent` only when
 it becomes an input target, when it gets a `rigidBody`, or the first time
 `Spatial.raycast` runs — and that one call materialises a shape for **every**
-mesh in the scene, permanently. An eager collider costs about 10 µs per moved
-entity per frame, so a tap listener on a thousand moving meshes is a real cost.
-Put the listener on the few objects that need it, or on an ancestor plus a
-`raycast` when a tap actually happens.
+mesh in the scene, permanently. Each collider then costs per-frame work on every
+entity that moves, so a tap listener on a thousand moving meshes is a real cost
+— that is why the shapes are lazy in the first place. Put the listener on the
+few objects that need it, or on an ancestor plus a `raycast` when a tap actually
+happens.
 
 **Batch changes inside one `onFrame`.** The diff runs once per frame no matter
 how many times you touched a property, so there is nothing to gain from
@@ -993,12 +1233,22 @@ something is spawning without destroying.
 builds run JavaScriptCore with the JIT enabled; visionOS never allows it, so the
 core tick is interpreted there. Measure it locally rather than guessing: launch
 the macOS host with `SPATIAL_INTERPRETER=1` (or `--interpreter`) and it runs
-interpreted too. Measured here, 1500 independently moving meshes:
+interpreted too.
 
-| Mode | Frame rate | Core tick |
+The size of the gap, from the no-JIT JavaScriptCore driver
+(`corepack pnpm --filter @spatialscript/core test:jsc`) against the `/stats`
+medians for the same scene with the JIT on:
+
+| 1500 meshes, one shared geometry and material | core tick, no JIT | core tick, JIT on |
 |---|---|---|
-| JIT (the default) | 120 fps | a fraction of a millisecond |
-| interpreter (`SPATIAL_INTERPRETER=1`, and visionOS) | ~83 fps | ~3.7 ms |
+| moving every frame | **3.8 ms** | 0.381 ms |
+| static (`matrixAutoUpdate = false`) | **1.7 ms** | 0.260 ms |
+| 2000 moving, worst frame | **5.3–6.5 ms** | — |
+
+Roughly an order of magnitude, and 3.8 ms of an 8.3 ms frame is nearly half a
+120 Hz budget spent before the renderer starts (a quarter of a 60 Hz one). An end-to-end frame rate for the
+app in interpreter mode has not been re-measured on this machine — do not quote
+one until it has been.
 
 `GET /stats` reports `jit`, so a saved measurement always says which mode
 produced it — never compare across the two. What this means in practice: the
@@ -1016,9 +1266,10 @@ geometries rather than rewriting a vertex buffer every frame.
 **Measure, do not guess.**
 
 ```bash
-node perf/check.mjs                                  # asserts the SPEC 12 targets
-perf/measure.sh --count 1500 --shared-geometry       # one ad-hoc measurement
-node perf/gen-stress.mjs --count 1500 --shared-geometry --shared-material > stress.js
+node verification/perf/check.mjs                                  # asserts the SPEC 12 targets;
+                                                                 # replaces the running scene
+verification/perf/measure.sh --count 1500 --shared-geometry       # one ad-hoc measurement
+node verification/perf/gen-stress.mjs --count 1500 --shared-geometry --shared-material > stress.js
 ```
 
 `gen-stress.mjs` flags: `--count N`, `--shared-geometry`, `--shared-material`,
@@ -1038,12 +1289,15 @@ two authoring choices is one `measure.sh` run each.
 | `frameIntervalMs` | 8.3 ms is 120 Hz, 16.7 ms is 60 Hz. If `coreTickMs + applyMs` is far below the interval, the renderer is the limit, not the script |
 | `commandCount` | should be **1** in the steady state of a moving scene. A steady 2+ means something is re-emitting every frame — a material tweaked in `onFrame`, a geometry mutated, a body respecced |
 | `entityCount` | should track `dump().objects.length`. Growing without bound means missing `destroy` calls |
-| `pushToFirstFrameMs` | unique geometries and materials. Under 1000 ms for 1500 meshes is the target; 0.2 s is what sharing gets you |
+| `pushToFirstFrameMs` | unique geometries and materials. Under 1000 ms for 1500 meshes is the target; measured **289–305 ms** sharing one geometry and material, **337–364 ms** with a unique material each |
 | `resourceCache.meshBuilds` / `materialBuilds` | climbing every frame means you are constructing geometries or materials in a loop. With sharing they should stop at 1 |
 
 If `frameIntervalMs` spikes exactly when you poll, you are polling a full
-`/dump`. Add `?objects=0`, `?compact=1` or `?names=…`; identical requests are
-served from a 100 ms cache, so a tight loop then costs one build per 100 ms.
+`/dump` — tens of milliseconds on a 10 000-object scene, and an order of
+magnitude more through `/native-dump`. Add `?objects=0`, `?names=…` or
+`?fields=…`; identical requests
+are served from a 100 ms cache, so a tight loop then costs one build per
+100 ms.
 
 ---
 
@@ -1062,14 +1316,15 @@ served from a 100 ms cache, so a tight loop then costs one build per 100 ms.
 | `.exr` environment ignored in the browser | expected; `.exr` is RealityKit only. Warned once |
 | `Portal.crossing` ignored in the browser | expected. Warned once |
 | a `Group` or plain mesh has no `CollisionComponent` in the native dump | expected; RealityKit builds shapes lazily. One `Spatial.raycast` materialises them all |
-| `audio.playing` never becomes `true` in a headless dump | expected; playback state is native-driven and there is no engine. Verify in the macOS host or the browser harness |
+| `audio.currentTime` stays `0` in a headless dump | expected; it is native-driven and there is no engine to sync it. Verify in the macOS host or the browser harness |
 | a spatial sound's cone sounds broader on RealityKit | expected; RealityKit directivity is a single beam, so the three-part cone collapses to it |
 | a scripted camera does nothing on visionOS | expected; `capabilities.camera` is `false` there. Warned once |
 | `hit.sceneUnderstanding` is always `false` | expected today: RealityKit does not report real-world raycast hits yet |
 | `Spatial.host.functions` is empty | the app registered none; `capabilities.hostFunctions` can still read `true` |
 | a portal on the web shows the world from your own viewpoint, not mirrored | expected, and deliberate: a portal is a window on both backends. An earlier build used a mirrored camera and disagreed with RealityKit |
 | a particle preset looks different in detail between backends | expected; the web presets are hand-tuned to match the RealityKit ones by eye, not by parameter |
-| `dump()` is slower than you expected | expected on a large scene; narrow it with `compact`, `names`, `fields` or `objects: false`. `native-dump` is roughly seven times dearer again — never poll it unfiltered |
+| `dump()` is slower than you expected | expected on a large scene — tens of milliseconds at 10 000 objects. Narrow it with `objects: false` (a few hundred bytes), `names`, `fields` or `compact`. `native-dump` is an **order of magnitude dearer** — never poll it unfiltered |
+| `?compact=1` is barely smaller than the full dump | expected on a scene that carries little `userData`: `compact` drops `userData` and geometry parameters and rounds transforms, but keeps every object and its material and light. Use `?objects=0` or `?names=` when you want a genuinely small answer |
 | the macOS host is much slower than usual and `/stats` says `"jit": false` | expected: it was launched in interpreter mode, which is the visionOS-like measurement |
 | `groundingShadow` warns in the browser harness | expected; RealityKit only |
 | a wireframe material renders solid on RealityKit | expected; warned once |
