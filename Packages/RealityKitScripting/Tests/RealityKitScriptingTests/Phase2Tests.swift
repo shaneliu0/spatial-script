@@ -71,7 +71,7 @@ struct Phase2Tests {
               "url": "asset://spatial-tone.wav", "spatial": true, "ambient": false,
               "loop": false, "volume": 0.5, "rate": 1, "group": "sfx",
               "refDistance": 1, "rolloff": 2, "distanceModel": "inverse",
-              "cone": [0.5, 1.2, 0.2], "reverbLevel": -6
+              "cone": [30, 90, 0.2], "reverbLevel": -6
             }]]
             """)
         let target = try entity(scene, 1)
@@ -79,6 +79,14 @@ struct Phase2Tests {
         // 0.5 is -6.02 dB.
         #expect(abs(component.gain - (-6.0206)) < 0.01)
         #expect(component.reverbLevel == -6)
+        // SPEC 14.1 sends the cone in degrees: a 30 degree inner angle is a real
+        // beam, where reading it as radians collapsed every realistic cone to no
+        // directivity at all.
+        if case let .beam(focus) = component.directivity {
+            #expect(focus > 0.8, "a 30 degree cone must focus")
+        } else {
+            Issue.record("no beam directivity")
+        }
         let state = try #require(scene.commandApplier.records[1]?.extras?.audio)
         #expect(state.resource != nil, "the bundled tone must load from the asset root")
         #expect(state.duration > 0.9 && state.duration < 1.1)
@@ -203,14 +211,15 @@ struct Phase2Tests {
     @Test
     func anUnresolvableAudioURLReportsAnErrorRatherThanFailingQuietly() throws {
         let (_, scene) = try makeSceneWithMesh()
-        nonisolated(unsafe) var errors: [String] = []
-        scene.commandApplier.emitLog = { level, message in
-            if level == .error { errors.append(message) }
-        }
+        nonisolated(unsafe) var events: [(String, Int, [String: Any]?)] = []
+        scene.commandApplier.dispatch = { type, id, payload in events.append((type, id, payload)) }
         scene.applyCommands(javaScript: """
             [["audio", 1, { "url": "asset://not-a-real-sound.wav" }]]
             """)
-        #expect(errors.contains { $0.contains("not-a-real-sound") })
+        // SPEC 3.5: the failure reaches the script through the `error` event,
+        // and the core writes the one console line. This consumer writes none.
+        let message = events.first { $0.0 == "error" }?.2?["message"] as? String ?? ""
+        #expect(message.contains("not-a-real-sound"), "\(events.map(\.0))")
         #expect(scene.commandApplier.records[1]?.extras?.audio?.loadFailed == true)
         scene.dispose()
     }
@@ -284,16 +293,16 @@ struct Phase2Tests {
     }
 
     @Test
-    func dockingWarnsOnMacOSRatherThanFailing() throws {
+    func dockingIsKeptAndTheVideoStillPlaysOnItsPlane() throws {
         let (_, scene) = try makeSceneWithMesh()
         scene.applyCommands(javaScript: """
             [["video", 1, { "url": "asset://spatial-bars.mp4", "width": 1, "docking": true }]]
             """)
-#if os(visionOS)
-        #expect(scene.commandApplier.warnings.warnings.isEmpty)
-#else
-        #expect(scene.commandApplier.warnings.warnings.contains { $0.contains("docking is visionOS only") })
-#endif
+        // AR-36: that docking is visionOS only is the core's line
+        // (`core/src/media/video.js:117`); this consumer neither repeats it nor
+        // fails, and the state stays in the dump.
+        #expect(!scene.commandApplier.warnings.warnings.contains { $0.contains("docking") })
+        #expect(scene.commandApplier.records[1]?.extras?.video?.docking == true)
         // The video still plays on its plane either way.
         #expect(scene.commandApplier.records[1]?.extras?.video?.surface != nil)
         scene.dispose()
@@ -422,11 +431,17 @@ struct Phase2Tests {
         // The height still rules: 2 units tall, 4 wide on this viewport, not
         // the 2 the script asked for. Nothing is stretched to fit.
         #expect(component.scale == 2)
+        // SPEC 14.3 fixes the wording, to three decimals, on both backends.
         let matching = scene.commandApplier.warnings.warnings.filter {
-            $0.contains("orthographic camera asks for a visible width")
+            $0.contains("OrthographicCamera asks for a visible width")
         }
         #expect(matching.count == 1, "the mismatch warns exactly once")
-        #expect(matching.first?.contains("aspect 2") == true)
+        #expect(
+            matching.first == "OrthographicCamera asks for a visible width of 2.000 but the "
+                + "viewport shows 4.000 at that height; the height is kept and the width "
+                + "follows the viewport",
+            "\(matching)"
+        )
         // The dump keeps what the script asked for either way.
         let spec = try #require(scene.commandApplier.cameraSpec)
         #expect(spec["left"] as? Double == -1)
@@ -793,7 +808,7 @@ struct Phase2Tests {
     // MARK: - 14.7 Scene understanding
 
     @Test
-    func sceneUnderstandingIsKeptAndWarnsOnMacOS() throws {
+    func sceneUnderstandingIsKeptAndWarnsAboutRaycastsOnMacOS() throws {
         let (root, scene) = try makeScene()
         scene.applyCommands(javaScript: """
             [["sceneUnderstanding", 0, { "collision": true, "occlusion": false, "physics": true, "shadows": false }]]
@@ -803,8 +818,15 @@ struct Phase2Tests {
         #expect(root.components[SceneUnderstandingComponent.self] != nil)
 #else
         _ = root
+        let warnings = scene.commandApplier.warnings.warnings
+        // AR-36: that scene understanding is visionOS only is the core's line,
+        // so the only thing this consumer says is the half only it knows.
         #expect(
-            scene.commandApplier.warnings.warnings.contains { $0.contains("Scene understanding is visionOS only") }
+            warnings.contains(
+                "Raycasts will not see the real world here: RealityKit has no scene "
+                    + "reconstruction mesh on macOS, so no hit carries sceneUnderstanding."
+            ),
+            "\(warnings)"
         )
 #endif
         scene.dispose()
@@ -859,6 +881,9 @@ struct Phase2Tests {
     func mouseButtonsCarryEdgesAndClickCounts() throws {
         let router = ScriptingInputRouter.shared
         let (_, scene) = try makeScene()
+        // The router is process wide and a click count spans frames, so the
+        // test starts from a known pointer state.
+        router.resetPointerButtons()
         router.beginFrame()
         router.setMouseButton(0, down: true)
         var state = router.inputState(for: scene.sceneID)
@@ -1201,7 +1226,9 @@ struct Phase2Tests {
         let entry = try #require(objects.first { $0["id"] as? Int == 1 })
         let accessibility = try #require(entry["accessibility"] as? [String: Any])
         #expect(accessibility["label"] as? String == "Play")
-        #expect(accessibility["component"] as? Bool == true)
+        // The component itself is asserted on the entity above; SPEC 8 keeps
+        // native facts out of the payload and in `components`.
+        #expect(entry["components"] as? [String] != nil)
 
         scene.applyCommands(javaScript: """
             [["accessibility", 1, null]]
@@ -1232,18 +1259,16 @@ struct Phase2Tests {
     }
 
     @Test
-    func adaptiveResolutionWarnsOnMacOSAndEnvironmentLightingScalesInstead() throws {
+    func adaptiveResolutionIsKeptAndEnvironmentLightingScalesInstead() throws {
         let (_, scene) = try makeScene()
         scene.applyCommands(javaScript: """
             [["renderOptions", 0, { "adaptiveResolution": true, "environmentIntensityExponent": 1 }]]
             """)
         #expect(scene.commandApplier.renderOptions["adaptiveResolution"] as? Bool == true)
-#if os(visionOS)
+        // AR-36: the core warns that adaptive resolution is visionOS only, so
+        // this consumer is silent and simply keeps the flag.
         #expect(scene.commandApplier.warnings.warnings.isEmpty)
-#else
-        #expect(
-            scene.commandApplier.warnings.warnings.contains { $0.contains("Adaptive resolution is visionOS only") }
-        )
+#if !os(visionOS)
         #expect(scene.commandApplier.environmentIntensityExponent == 1)
 #endif
         scene.dispose()
@@ -1265,10 +1290,12 @@ struct Phase2Tests {
         #expect(model.model?.materials.count == 3)
         #expect(scene.commandApplier.records[1]?.materialSpecs?.count == 3)
 
+        // SPEC 8's shape rule leaves no room for a `materialCount` key: how
+        // many slots are drawn is visible in `material`, which is an array.
         let dump = scene.nativeDump()
         let objects = try #require(dump["objects"] as? [[String: Any]])
         let entry = try #require(objects.first { $0["id"] as? Int == 1 })
-        #expect(entry["materialCount"] as? Int == 3)
+        #expect((entry["material"] as? [Any])?.count == 3)
 
         // A single material afterwards goes back to one slot.
         scene.applyCommands(javaScript: """
@@ -1315,10 +1342,19 @@ struct Phase2Tests {
         let dump = scene.nativeDump()
         let mixer = try #require(dump["audioMixer"] as? [String: Any])
         #expect(mixer["masterVolume"] as? Double == 0.5)
-        #expect(mixer["component"] as? Bool == true)
-        #expect((dump["sceneUnderstanding"] as? [String: Any])?["collision"] as? Bool == true)
-        // SPEC 14.13 names this `render`, as the core dump does.
-        #expect((dump["render"] as? [String: Any])?["debugModelView"] as? String == "uv")
+        // SPEC 8: the mixer group component is a native fact, not a dump key;
+        // it is asserted where it lives.
+        #expect(scene.commandApplier.root.components[AudioMixGroupsComponent.self] != nil)
+        let understanding = try #require(dump["sceneUnderstanding"] as? [String: Any])
+        #expect(understanding["collision"] as? Bool == true)
+        // All four flags are always present, as booleans, like the core's.
+        #expect(understanding["occlusion"] as? Bool == false)
+        #expect(understanding["physics"] as? Bool == false)
+        #expect(understanding["shadows"] as? Bool == false)
+        // SPEC 8: `render` carries the stored flag and the debug mode is its
+        // own top-level section, exactly as the core dump has it.
+        #expect((dump["render"] as? [String: Any])?["adaptiveResolution"] as? Bool == false)
+        #expect((dump["debug"] as? [String: Any])?["modelView"] as? String == "uv")
         #expect(dump["isActive"] as? Bool == true)
         #expect(dump["environmentLighting"] != nil)
         #expect(dump["debug"] != nil)
@@ -1328,7 +1364,9 @@ struct Phase2Tests {
         let objects = try #require(dump["objects"] as? [[String: Any]])
         let entry = try #require(objects.first { $0["id"] as? Int == 1 })
         let audio = try #require(entry["audio"] as? [String: Any])
-        #expect(audio["component"] as? String == "SpatialAudioComponent")
+        // The RealityKit component is reported in `components`, never as an
+        // extra key inside a payload the core also carries (SPEC 8).
+        #expect((entry["components"] as? [String])?.contains("SpatialAudioComponent") == true)
         #expect(audio["url"] as? String == "asset://spatial-tone.wav")
         #expect(audio["spatial"] as? Bool == true)
         scene.dispose()
