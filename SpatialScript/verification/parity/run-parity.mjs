@@ -27,8 +27,23 @@ async function mac(pathname, body) {
   const res = await fetch(MAC + pathname, body === undefined ? {} : { method: "POST", body: typeof body === "string" ? body : JSON.stringify(body) });
   return res.json();
 }
+// The app owns three on-screen windows now — the scene, the control panel and the console — and
+// CGWindowListCopyWindowInfo returns them front to back, so "the first one" is whichever the user
+// last focused. The scene window is the one that is not a named UI window; picking it by exclusion
+// keeps the screenshot pointed at the RealityView no matter what has focus.
+const UI_WINDOW_TITLES = (process.env.SPATIAL_HOST_UI_WINDOWS ?? "").split(",").filter(Boolean);
 function windowId() {
-  return execFileSync("python3", ["-c", `import Quartz\nfor w in Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID):\n    if w.get('kCGWindowOwnerName')=='SpatialHost' and w.get('kCGWindowLayer')==0: print(w['kCGWindowNumber']); break`]).toString().trim();
+  const script = [
+    "import Quartz",
+    `skip = ${JSON.stringify(UI_WINDOW_TITLES)}`,
+    "for w in Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID):",
+    "    if w.get('kCGWindowOwnerName') != 'SpatialHost' or w.get('kCGWindowLayer') != 0: continue",
+    "    if (w.get('kCGWindowName') or '') in skip: continue",
+    "    print(w['kCGWindowNumber']); break",
+  ].join("\n");
+  const id = execFileSync("python3", ["-c", script]).toString().trim();
+  if (!id) throw new Error("the macOS host's scene window was not found on screen; is the app running with its scene window open?");
+  return id;
 }
 
 // ---- Mac run: the app executes the whole plan deterministically (fixed dt, injects at exact
