@@ -14,7 +14,10 @@ let package = Package(
     targets: [
         .target(
             name: "RealityKitScripting",
-            resources: [.copy("Resources/spatial-core.js")],
+            resources: [
+                .copy("Resources/spatial-core.js"),
+                .copy("Resources/agent-prompt.md"),
+            ],
             // Xcode does not pass its own DEBUG condition down to a package
             // target, so the DEBUG-only dev transport support and the script
             // execution watchdog would be compiled out of the app.
