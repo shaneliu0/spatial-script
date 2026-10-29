@@ -7,7 +7,8 @@
     "build": "node harness/build.mjs",
     "test": "node --test \"test/**/*.test.js\"",
     "harness": "node harness/run.mjs",
-    "screenshot": "node harness/screenshot.mjs"
+    "screenshot": "node harness/screenshot.mjs",
+    "dev": "node harness/dev.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.14.0",

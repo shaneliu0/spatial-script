@@ -30,7 +30,7 @@ const MIME = {
   '.md': 'text/markdown; charset=utf-8',
 };
 
-export async function startServer(root = SPATIAL_ROOT) {
+export async function startServer(root = SPATIAL_ROOT, port = 0) {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost');
     let pathname = decodeURIComponent(url.pathname);
@@ -54,10 +54,13 @@ export async function startServer(root = SPATIAL_ROOT) {
     });
   });
 
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const { port } = server.address();
+  // Port 0 by default so concurrent harness runs never collide; the dev
+  // entry point asks for a fixed one so a browser keeps the same address.
+  await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
+  // Named apart from the `port` parameter: with 0 the bound port is assigned.
+  const { port: bound } = server.address();
   return {
-    url: `http://127.0.0.1:${port}`,
+    url: `http://127.0.0.1:${bound}`,
     root,
     close: () => new Promise((resolve) => server.close(resolve)),
   };
