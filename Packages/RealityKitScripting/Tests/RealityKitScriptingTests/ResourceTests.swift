@@ -20,6 +20,26 @@ struct ResourceTests {
         try ScriptingTestScene.make(body)
     }
 
+    /// The authoring prompt is a packaged resource, and the one failure that
+    /// would reach a user silently is the bundle not carrying it: the accessor
+    /// falls back to a short note, and the app would copy that note to the
+    /// clipboard instead of the prompt. Assert the real document loads.
+    @Test
+    func theAuthoringPromptShipsInTheResourceBundle() throws {
+        #expect(SpatialAgentPrompt.isAvailable, "agent-prompt.md is missing from the bundle")
+
+        let text = SpatialAgentPrompt.text
+        #expect(text != SpatialAgentPrompt.missingResourceNote, "the accessor returned its fallback note")
+
+        // Markers that only the real, complete document carries: the framing,
+        // the mandatory call, the embedded declarations, and a class from the
+        // far end of them.
+        for marker in ["# Hard rules", "Spatial.mount(scene)", "# The complete API", "class TurbulenceForceField"] {
+            #expect(text.contains(marker), "the packaged prompt is missing \(marker)")
+        }
+        #expect(text.count > 50_000, "the packaged prompt is truncated at \(text.count) characters")
+    }
+
     /// FA-06 and FA-07: SPEC 5 keys a mesh by uuid and revision, so sharers
     /// build once and an edit of the same instance rebuilds.
     ///
