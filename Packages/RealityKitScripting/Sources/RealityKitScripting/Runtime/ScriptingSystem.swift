@@ -37,6 +37,8 @@ final class ScriptingSystem: System {
     }
 
     func update(context: SceneUpdateContext) {
+        // The one place in the app that knows a frame was rendered.
+        ScriptingFrameRate.shared.record(deltaTime: context.deltaTime)
         // Retires entities whose joints were cleared on an earlier frame.
         ScriptingPhysicsGraveyard.shared.advance()
         ScriptingInputRouter.shared.beginFrame()
