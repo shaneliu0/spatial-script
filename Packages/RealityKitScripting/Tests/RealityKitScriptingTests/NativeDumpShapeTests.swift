@@ -8,7 +8,7 @@
 import Foundation
 import RealityKit
 import Testing
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 /// SPEC 8's native dump shape rule, held by one fixture scene that exercises
 /// every object kind: a native dump has exactly the core dump's key set at

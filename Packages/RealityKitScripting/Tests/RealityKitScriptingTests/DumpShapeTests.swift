@@ -9,7 +9,7 @@ import AVFoundation
 import Foundation
 import RealityKit
 import Testing
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 /// SPEC 8 and 3.11: what the native dump reports for an object, and what it
 /// must not claim on a platform that cannot do it.

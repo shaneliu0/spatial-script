@@ -3,17 +3,18 @@
 import PackageDescription
 
 let package = Package(
-    name: "RealityKitScripting",
+    name: "SpatialScriptRuntime",
     platforms: [
         .macOS(.v26),
         .visionOS(.v26),
     ],
     products: [
-        .library(name: "RealityKitScripting", targets: ["RealityKitScripting"]),
+        .library(name: "SpatialScriptRuntime", targets: ["SpatialScriptRuntime"]),
     ],
     targets: [
         .target(
-            name: "RealityKitScripting",
+            name: "SpatialScriptRuntime",
+            path: "Sources/RealityKitScripting",
             resources: [
                 .copy("Resources/spatial-core.js"),
                 .copy("Resources/agent-prompt.md"),
@@ -25,7 +26,7 @@ let package = Package(
         ),
         .testTarget(
             name: "RealityKitScriptingTests",
-            dependencies: ["RealityKitScripting"],
+            dependencies: ["SpatialScriptRuntime"],
             // The matcher fixtures and their node driver are read from the
             // source tree by path, not from the test bundle: `match.mjs` lives
             // beside them in the repository and both matchers must see the same

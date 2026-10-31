@@ -8,7 +8,7 @@
 import Foundation
 import RealityKit
 import Testing
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 @MainActor
 struct RealityKitScriptingPackageTests {

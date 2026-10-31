@@ -9,7 +9,7 @@ import AVFoundation
 import Foundation
 import RealityKit
 import Testing
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 /// SPEC 11, 14.3, 14.8, 14.10 and 14.13a: the camera a script owns, the host
 /// channel, the console stream, and what a parity plan is allowed to see.

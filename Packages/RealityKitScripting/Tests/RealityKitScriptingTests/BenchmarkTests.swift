@@ -8,7 +8,7 @@
 import Foundation
 import RealityKit
 import Testing
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 /// SPEC section 12 requires a tick of 2000 transform changes to apply within
 /// 8 ms on this machine.

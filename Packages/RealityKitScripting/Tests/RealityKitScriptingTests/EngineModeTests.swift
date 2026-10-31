@@ -8,7 +8,7 @@
 import Foundation
 import RealityKit
 import Testing
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 /// Round 8: the JavaScriptCore engine mode reported to a harness, and the
 /// in-context dump serialisation that replaced the per-value boundary crossing.

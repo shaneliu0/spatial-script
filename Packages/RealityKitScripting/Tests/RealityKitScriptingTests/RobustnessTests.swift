@@ -8,7 +8,7 @@
 import Foundation
 import RealityKit
 import Testing
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 /// SPEC 2's robustness rule: a malformed command is ignored or warned about,
 /// never fatal. Every case here traps or corrupts the mirror without the fixes.

@@ -8,7 +8,7 @@
 import Foundation
 import RealityKit
 import Testing
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 /// Runs every case in `SpatialScript/verification/conformance/cases` through the RealityKit
 /// consumer and compares both `dump()` and `nativeDump()` to `expected.json`,

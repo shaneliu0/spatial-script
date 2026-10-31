@@ -9,7 +9,7 @@ import AVFoundation
 import Foundation
 import RealityKit
 import Testing
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 /// SPEC 3.4, 14.6 and 14.12: how a material payload becomes a native
 /// material, how textures bind to it, and how a mesh with a material per part

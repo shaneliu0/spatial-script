@@ -8,7 +8,7 @@
 import Foundation
 import RealityKit
 import Testing
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 /// Exercises every opcode in SPEC section 5 with hand built command arrays, so
 /// the applier is covered without depending on what the core happens to emit.

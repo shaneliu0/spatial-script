@@ -9,7 +9,7 @@ import AVFoundation
 import Foundation
 import RealityKit
 import Testing
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 /// SPEC 3.7, 6 and 14.4: rigid bodies and their shapes, collisions, raycasts,
 /// and the character controllers and force fields that move things natively.

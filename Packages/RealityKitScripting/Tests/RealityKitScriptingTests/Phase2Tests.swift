@@ -9,7 +9,7 @@ import AVFoundation
 import Foundation
 import RealityKit
 import Testing
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 /// SPEC section 14: parity with Apple's RealityKitScripting.
 ///

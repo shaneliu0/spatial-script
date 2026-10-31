@@ -7,7 +7,7 @@
 
 import Foundation
 import RealityKit
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 /// One mounted scene, the way every suite here starts: the core loaded with a
 /// script that mounts an empty Scene, reading assets from SPEC 3.5's shared

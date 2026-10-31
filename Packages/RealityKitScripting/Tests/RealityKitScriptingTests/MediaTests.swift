@@ -9,7 +9,7 @@ import AVFoundation
 import Foundation
 import RealityKit
 import Testing
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 /// SPEC 14.1 and 14.2: the audio and video a script attaches to an object,
 /// and what becomes of them when it changes or goes away.

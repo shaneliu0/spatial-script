@@ -8,7 +8,7 @@
 import Foundation
 import RealityKit
 import Testing
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 /// Round 7: prototype pollution, the execution watchdog, material write cost,
 /// dump filtering and the previously untested public surface.

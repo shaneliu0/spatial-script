@@ -9,7 +9,7 @@ import AVFoundation
 import Foundation
 import RealityKit
 import Testing
-@testable import RealityKitScripting
+@testable import SpatialScriptRuntime
 
 /// SPEC 5 and 14.5: the mesh and material caches, where this consumer reads
 /// bytes from, the loads it is still waiting on, and the rig an asset arrives
