@@ -754,6 +754,22 @@ export class SpatialConsumer extends withCommands(
     this.camera.updateProjectionMatrix();
   }
 
+  /**
+   * Renders at `ratio` device pixels per CSS pixel. The default is 1, because
+   * the headless harness and the parity screenshots require the drawing buffer
+   * to equal the size they asked for; an interactive page on a high density
+   * display opts in to get a sharp image. `setSize` is told not to touch the
+   * element's style, so the CSS box is the caller's to control.
+   */
+  setPixelRatio(ratio) {
+    if (!this.renderer) return;
+    const clamped = Math.max(1, Math.min(Number(ratio) || 1, 3));
+    if (clamped === this.renderer.getPixelRatio()) return;
+    this.renderer.setPixelRatio(clamped);
+    const size = this.renderer.getSize(new THREE.Vector2());
+    this.renderer.setSize(size.x, size.y, false);
+  }
+
   // ------------------------------------------------------------------- dump
 
   /**

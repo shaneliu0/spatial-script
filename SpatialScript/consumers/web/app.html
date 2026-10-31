@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpatialScript</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0d0f12;
+    --panel: #14171c;
+    --line: #23262c;
+    --text: #d7dbe0;
+    --dim: #8b939e;
+    --accent: #2c6cf6;
+    --ok: #55c27e;
+    --bad: #f2777a;
+    --warn: #e0a458;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  button {
+    background: #232830; color: var(--text); border: 1px solid #2f353e;
+    border-radius: 6px; padding: 7px 13px; font: inherit; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+  }
+  button:hover:not(:disabled) { background: #2b313a; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: #4a83f8; }
+
+  /* Only one view is in the document flow at a time. */
+  .view { display: none; height: 100%; }
+  .view.active { display: grid; }
+
+  /* ---------------------------------------------------------- editor view */
+  #editor-view { grid-template-rows: 1fr; place-items: center; overflow: auto; padding: 32px 20px; }
+  #editor-card { width: min(900px, 100%); display: grid; gap: 14px; }
+  h1 { margin: 0; font-size: 20px; letter-spacing: .01em; }
+  .lede { margin: 0; color: var(--dim); }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  #source {
+    width: 100%; min-height: 46vh; resize: vertical; padding: 14px;
+    background: #101317; color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; font: inherit; outline: none; tab-size: 2;
+  }
+  #source:focus { border-color: #35507f; }
+  .banner {
+    display: none; padding: 11px 13px; border-radius: 8px; white-space: pre-wrap;
+    border: 1px solid transparent;
+  }
+  .banner.show { display: block; }
+  .banner.bad { background: rgba(242,119,122,.12); border-color: rgba(242,119,122,.4); color: #ffc8c9; }
+
+  /* ----------------------------------------------------------- scene view */
+  #scene-view { grid-template-rows: auto 1fr; }
+  #toolbar {
+    display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+    background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap;
+  }
+  #toolbar .spacer { flex: 1 1 auto; }
+  #scene-status { color: var(--dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+  #fps { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 66px; text-align: right; }
+  #stage.grabbing { cursor: grabbing; }
+  #stage { cursor: grab; }
+  #scene-status.ok { color: var(--ok); }
+  #scene-status.bad { color: var(--bad); }
+  /* The stage takes every pixel the toolbar leaves, and the canvas fills it. */
+  #stage { position: relative; min-height: 0; background: #15171b; }
+  #view { display: block; width: 100%; height: 100%; }
+
+  #console {
+    display: none; position: absolute; left: 0; right: 0; bottom: 0; height: 42%;
+    background: rgba(13,15,18,.96); border-top: 1px solid var(--line);
+    grid-template-rows: auto 1fr; backdrop-filter: blur(6px);
+  }
+  #console.show { display: grid; }
+  #console-head {
+    display: flex; align-items: center; gap: 10px; padding: 7px 12px;
+    border-bottom: 1px solid var(--line); color: var(--dim); font-size: 12px;
+  }
+  #console-lines { overflow-y: auto; padding: 10px 12px; }
+  .line { display: grid; grid-template-columns: 52px 1fr; gap: 10px; padding: 1px 0; }
+  .line .lvl { color: var(--dim); text-transform: uppercase; font-size: 11px; }
+  .line.error .lvl, .line.error .msg { color: var(--bad); }
+  .line.warn .lvl, .line.warn .msg { color: var(--warn); }
+  .msg { white-space: pre-wrap; word-break: break-word; }
+  .empty { color: var(--dim); }
+
+  /* ------------------------------------------------------------ prompt modal */
+  #prompt-modal {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.62);
+    place-items: center; padding: 28px; z-index: 10;
+  }
+  #prompt-modal.show { display: grid; }
+  #prompt-box {
+    width: min(1000px, 100%); height: min(82vh, 100%); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 10px; display: grid;
+    grid-template-rows: auto 1fr; overflow: hidden;
+  }
+  #prompt-head { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+  #prompt-text { margin: 0; overflow: auto; padding: 14px; white-space: pre-wrap; font-size: 12px; color: #c3cad3; }
+</style>
+</head>
+<body>
+
+<!-- The paste page. -->
+<section id="editor-view" class="view active">
+  <div id="editor-card">
+    <h1>SpatialScript</h1>
+    <p class="lede">
+      Copy the scene generation prompt, paste the script it produces below, then run it.
+      The scene renders with three.js and Rapier, the same script the visionOS host runs.
+      Drag the scene to orbit and scroll to zoom.
+    </p>
+    <div class="row">
+      <button id="copy-prompt">Copy Prompt</button>
+      <button id="view-prompt">View Prompt</button>
+      <button id="paste">Paste from Clipboard</button>
+      <button id="paste-run">Paste and Run</button>
+    </div>
+    <textarea id="source" spellcheck="false" placeholder="const Spatial = require(&quot;spatial&quot;);"></textarea>
+    <div id="editor-banner" class="banner bad"></div>
+    <div class="row">
+      <button id="run-scene" class="primary">Run Scene</button>
+      <span class="lede" id="boot-status">starting the renderer...</span>
+    </div>
+  </div>
+</section>
+
+<!-- The scene page: toolbar on top, scene fills the rest. -->
+<section id="scene-view" class="view">
+  <div id="toolbar">
+    <button id="back">Edit Script</button>
+    <button id="rerun">Re-run</button>
+    <button id="toggle-console">Console</button>
+    <button id="copy-prompt-2">Copy Prompt</button>
+    <button id="reset-view">Reset View</button>
+    <span class="spacer"></span>
+    <span id="fps">-- fps</span>
+    <span id="scene-status">idle</span>
+  </div>
+  <div id="stage">
+    <canvas id="view"></canvas>
+    <div id="console">
+      <div id="console-head">
+        <span id="console-summary">no output</span>
+        <span class="spacer" style="flex:1"></span>
+        <button id="clear-console">Clear</button>
+        <button id="close-console">Close</button>
+      </div>
+      <div id="console-lines"><div class="empty">Nothing logged yet. console.log, console.warn and console.error from the script appear here.</div></div>
+    </div>
+  </div>
+</section>
+
+<div id="prompt-modal">
+  <div id="prompt-box">
+    <div id="prompt-head">
+      <strong>Scene generation prompt</strong>
+      <span class="spacer" style="flex:1"></span>
+      <button id="copy-prompt-3">Copy</button>
+      <button id="close-prompt">Close</button>
+    </div>
+    <pre id="prompt-text">loading...</pre>
+  </div>
+</div>
+
+<script>
+  // The core replaces globalThis.console when it loads a script (SPEC 3.13), so
+  // the page bundle is built against this copy taken first. Matches index.html.
+  window.__spatialConsole = ['log', 'warn', 'error', 'info', 'debug']
+    .reduce((out, level) => { out[level] = console[level].bind(console); return out; }, {});
+</script>
+<!-- The bundle reads its options from the page url, and its default mode is
+     `auto`: a render loop plus a resize listener, which is what this layout
+     wants. Its dev-panel wiring looks for an `#editor` element, which this page
+     does not have, so it binds nothing here. -->
+<script src="/consumers/web/dist/page.js"></script>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const PROMPT_URL = '/docs/AGENT-PROMPT.md';
+
+  const editorView = $('editor-view');
+  const sceneView = $('scene-view');
+  const source = $('source');
+  const banner = $('editor-banner');
+  const status = $('scene-status');
+  const consoleEl = $('console');
+  const lines = $('console-lines');
+  const summary = $('console-summary');
+
+  let promptText = null;
+  let consoleShown = 0;   // how many entries of window.spatialConsole are drawn
+
+  // ------------------------------------------------------------- navigation
+
+  function showScene() {
+    editorView.classList.remove('active');
+    sceneView.classList.add('active');
+    // The canvas only knows its size once its container is laid out.
+    requestAnimationFrame(fitCanvas);
+  }
+
+  function showEditor() {
+    sceneView.classList.remove('active');
+    editorView.classList.add('active');
+  }
+
+  /**
+   * The page bundle pins the canvas to a fixed backing size at boot, which a
+   * headless capture wants and a full-bleed page does not. Releasing the CSS
+   * box and telling the consumer the element's real size is all it takes; the
+   * bundle's own resize listener keeps it in step from there.
+   */
+  function fitCanvas() {
+    const canvas = $('view');
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    if (width > 0 && height > 0 && window.spatialConsumer) {
+      // The consumer renders one device pixel per CSS pixel by default, which a
+      // headless capture wants and a retina display does not: it is what makes
+      // the scene look soft. Capped at 2 because a third pixel of detail costs
+      // another 125% of fill rate and is not visible at arm's length.
+      window.spatialConsumer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      window.spatialConsumer.resize(width, height);
+    }
+  }
+  window.addEventListener('resize', () => { if (sceneView.classList.contains('active')) fitCanvas(); });
+
+  // ----------------------------------------------------------------- running
+
+  function setBanner(message) {
+    banner.textContent = message || '';
+    banner.classList.toggle('show', Boolean(message));
+  }
+
+  async function run(text) {
+    const script = (text ?? source.value).trim();
+    if (!script) { setBanner('There is no script to run.'); return; }
+    setBanner('');
+    source.value = script;
+
+    await window.spatialReady;
+    const result = window.spatialLoad(script);
+    if (!result.ok) {
+      const where = result.error.line === null || result.error.line === undefined
+        ? ''
+        : ` (line ${result.error.line}${result.error.column === null || result.error.column === undefined ? '' : `, column ${result.error.column}`})`;
+      // A load error keeps you on the editor, where the script is.
+      setBanner(`${result.error.name || 'Error'}: ${result.error.message}${where}`);
+      status.textContent = 'load failed';
+      status.className = 'bad';
+      return;
+    }
+    status.textContent = 'running';
+    status.className = 'ok';
+    showScene();
+    // A new scene starts from the default vantage point.
+    resetView();
+  }
+
+  $('run-scene').addEventListener('click', () => run());
+  $('rerun').addEventListener('click', () => run());
+  $('back').addEventListener('click', showEditor);
+  // Cmd/Ctrl+Enter runs, the way the editor in the apps does.
+  source.addEventListener('keydown', (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); run(); }
+  });
+
+  // --------------------------------------------------------------- clipboard
+
+  async function readClipboard() {
+    try {
+      return await navigator.clipboard.readText();
+    } catch {
+      setBanner('The browser would not hand over the clipboard. Paste into the box with Cmd-V instead.');
+      return null;
+    }
+  }
+
+  $('paste').addEventListener('click', async () => {
+    const text = await readClipboard();
+    if (text !== null) { source.value = text; setBanner(''); }
+  });
+
+  $('paste-run').addEventListener('click', async () => {
+    const text = await readClipboard();
+    if (text !== null) run(text);
+  });
+
+  // ------------------------------------------------------------------ prompt
+
+  async function loadPrompt() {
+    if (promptText !== null) return promptText;
+    const response = await fetch(PROMPT_URL);
+    if (!response.ok) throw new Error(`could not read ${PROMPT_URL}: ${response.status}`);
+    promptText = await response.text();
+    return promptText;
+  }
+
+  async function copyPrompt(button) {
+    const label = button.textContent;
+    try {
+      const text = await loadPrompt();
+      await navigator.clipboard.writeText(text);
+      button.textContent = 'Copied';
+    } catch (err) {
+      button.textContent = 'Copy failed';
+      setBanner(String(err.message || err));
+    }
+    setTimeout(() => { button.textContent = label; }, 1600);
+  }
+
+  for (const id of ['copy-prompt', 'copy-prompt-2', 'copy-prompt-3']) {
+    $(id).addEventListener('click', (event) => copyPrompt(event.currentTarget));
+  }
+
+  $('view-prompt').addEventListener('click', async () => {
+    $('prompt-modal').classList.add('show');
+    try {
+      $('prompt-text').textContent = await loadPrompt();
+    } catch (err) {
+      $('prompt-text').textContent = String(err.message || err);
+    }
+  });
+  const closePrompt = () => $('prompt-modal').classList.remove('show');
+  $('close-prompt').addEventListener('click', closePrompt);
+  $('prompt-modal').addEventListener('click', (event) => { if (event.target.id === 'prompt-modal') closePrompt(); });
+  window.addEventListener('keydown', (event) => { if (event.key === 'Escape') closePrompt(); });
+
+  // ----------------------------------------------------------------- console
+
+  $('toggle-console').addEventListener('click', () => {
+    consoleEl.classList.toggle('show');
+    if (consoleEl.classList.contains('show')) lines.scrollTop = lines.scrollHeight;
+  });
+  $('close-console').addEventListener('click', () => consoleEl.classList.remove('show'));
+  $('clear-console').addEventListener('click', () => {
+    window.spatialConsole.length = 0;
+    consoleShown = 0;
+    lines.replaceChildren(Object.assign(document.createElement('div'), { className: 'empty', textContent: 'Cleared.' }));
+    summary.textContent = 'no output';
+  });
+
+  /**
+   * Appends only what is new and keeps the view pinned to the newest line, so
+   * it reads like a terminal rather than re-rendering the whole buffer.
+   */
+  function drainConsole() {
+    const buffer = window.spatialConsole || [];
+    // `spatialConsole` drops its oldest entry at the cap, so a shrunken buffer
+    // means the window moved and the drawn count no longer lines up.
+    if (buffer.length < consoleShown) consoleShown = 0;
+    if (consoleShown === 0) lines.replaceChildren();
+    const atBottom = lines.scrollHeight - lines.scrollTop - lines.clientHeight < 40;
+
+    for (let i = consoleShown; i < buffer.length; i += 1) {
+      const entry = buffer[i];
+      const row = document.createElement('div');
+      row.className = `line ${entry.level}`;
+      const level = document.createElement('span');
+      level.className = 'lvl';
+      level.textContent = entry.level;
+      const message = document.createElement('span');
+      message.className = 'msg';
+      message.textContent = entry.message;
+      row.append(level, message);
+      lines.append(row);
+    }
+    if (buffer.length !== consoleShown) {
+      consoleShown = buffer.length;
+      if (atBottom) lines.scrollTop = lines.scrollHeight;
+    }
+
+    const errors = buffer.filter((e) => e.level === 'error').length;
+    const warnings = buffer.filter((e) => e.level === 'warn').length;
+    summary.textContent = buffer.length === 0
+      ? 'no output'
+      : `${buffer.length} line${buffer.length === 1 ? '' : 's'} · ${errors} error${errors === 1 ? '' : 's'} · ${warnings} warning${warnings === 1 ? '' : 's'}`;
+    if (errors > 0) { status.textContent = `running, ${errors} error${errors === 1 ? '' : 's'}`; status.className = 'bad'; }
+  }
+  setInterval(drainConsole, 400);
+
+  // ------------------------------------------------------- orbit and zoom
+
+  // A spherical camera around the origin, which is where the consumer's
+  // built-in camera already looks. `setCameraPosition` re-aims at the origin
+  // for us, so orbiting is only ever a position.
+  const DEFAULT_VIEW = { radius: Math.hypot(0.25, 1.4), theta: 0, phi: Math.acos(0.25 / Math.hypot(0.25, 1.4)) };
+  const view = { ...DEFAULT_VIEW };
+  const MIN_RADIUS = 0.15;
+  const MAX_RADIUS = 12;
+  const MIN_PHI = 0.05;           // never quite the pole, where the up vector flips
+  const MAX_PHI = Math.PI - 0.05;
+  let dragging = null;
+
+  function applyView() {
+    const consumer = window.spatialConsumer;
+    // A script that sets `Spatial.camera` owns the camera (SPEC 14.3); the
+    // viewer must not fight it.
+    if (!consumer || consumer.scriptCamera) return;
+    const sinPhi = Math.sin(view.phi);
+    consumer.setCameraPosition(
+      view.radius * sinPhi * Math.sin(view.theta),
+      view.radius * Math.cos(view.phi),
+      view.radius * sinPhi * Math.cos(view.theta),
+    );
+  }
+
+  function resetView() {
+    Object.assign(view, DEFAULT_VIEW);
+    applyView();
+  }
+  $('reset-view').addEventListener('click', resetView);
+
+  const stage = $('stage');
+  const canvas = $('view');
+
+  // Whether the consumer claimed this press for a script drag cannot be read at
+  // pointerdown: the consumer attaches its own listeners inside an async boot,
+  // so this page's are registered first and run first. The claim is checked on
+  // the first move instead, by which point both pointerdown handlers have run.
+  canvas.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    if (window.spatialConsumer && window.spatialConsumer.scriptCamera) return;
+    dragging = { x: event.clientX, y: event.clientY, claimed: false };
+  });
+
+  window.addEventListener('pointermove', (event) => {
+    if (!dragging) return;
+    if (!dragging.claimed) {
+      dragging.claimed = true;
+      const input = window.spatialConsumer && window.spatialConsumer.input;
+      // The script is dragging or manipulating an object: that gesture is its
+      // own, and the camera stays where it is.
+      if (!input || input.drag || input.manipulation) { dragging = null; return; }
+      stage.classList.add('grabbing');
+    }
+    const dx = event.clientX - dragging.x;
+    const dy = event.clientY - dragging.y;
+    dragging.x = event.clientX;
+    dragging.y = event.clientY;
+    // A full window width is about one turn, which feels right at this scale.
+    view.theta -= dx * 0.008;
+    view.phi = Math.min(MAX_PHI, Math.max(MIN_PHI, view.phi - dy * 0.008));
+    applyView();
+  });
+
+  const endDrag = () => { dragging = null; stage.classList.remove('grabbing'); };
+  window.addEventListener('pointerup', endDrag);
+  window.addEventListener('pointercancel', endDrag);
+
+  canvas.addEventListener('wheel', (event) => {
+    if (window.spatialConsumer && window.spatialConsumer.scriptCamera) return;
+    event.preventDefault();
+    // Multiplicative so each notch feels the same at any distance.
+    view.radius = Math.min(MAX_RADIUS, Math.max(MIN_RADIUS, view.radius * Math.exp(event.deltaY * 0.0012)));
+    applyView();
+  }, { passive: false });
+
+  // ----------------------------------------------------------------- fps
+
+  // Counted on the browser's own frame callback, which is the same clock the
+  // consumer renders on, and published four times a second so the toolbar is
+  // not re-rendered every frame.
+  let frames = 0;
+  let fpsWindowStart = performance.now();
+  const fpsLabel = $('fps');
+  function countFrame(now) {
+    frames += 1;
+    const elapsed = now - fpsWindowStart;
+    if (elapsed >= 250) {
+      if (sceneView.classList.contains('active')) {
+        fpsLabel.textContent = `${Math.round((frames * 1000) / elapsed)} fps`;
+      }
+      frames = 0;
+      fpsWindowStart = now;
+    }
+    requestAnimationFrame(countFrame);
+  }
+  requestAnimationFrame(countFrame);
+
+  // -------------------------------------------------------------------- boot
+
+  window.spatialReady
+    .then(() => { $('boot-status').textContent = 'renderer ready'; })
+    .catch((err) => {
+      $('boot-status').textContent = `renderer failed: ${err.message}`;
+      setBanner(`The renderer failed to start: ${err.message}`);
+    });
+})();
+</script>
+</body>
+</html>

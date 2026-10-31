@@ -11,6 +11,7 @@
     "test": "pnpm -r test",
     "conformance:node": "node verification/conformance/run-node.mjs",
     "conformance:web": "node consumers/web/harness/run.mjs",
+    "dev": "node consumers/web/harness/dev.mjs",
     "conformance:jsc": "pnpm --filter @spatialscript/core test:jsc",
     "robustness": "node verification/scenarios/run-robustness.mjs",
     "scenarios": "node verification/scenarios/run-node.mjs",
