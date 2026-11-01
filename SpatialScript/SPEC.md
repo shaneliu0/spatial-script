@@ -800,7 +800,7 @@ unless expected lists the error.
     tools/                        one-off generators (make-rig-usdz.py)
     docs/                         API.md, COOKBOOK.md, DIFFERENCES.md,
                                   TROUBLESHOOTING.md, check-snippets.mjs
-  Packages/RealityKitScripting/   Swift package: JavaScriptCore host and RealityKit consumer
+  Packages/SpatialScriptRuntime/   Swift package: JavaScriptCore host and RealityKit consumer
     Sources/RealityKitScripting/  grouped by responsibility; SwiftPM picks up nested
                                   sources automatically
       Host/                       JavaScriptScene, the value reader, log levels

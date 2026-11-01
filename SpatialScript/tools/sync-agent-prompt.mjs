@@ -19,7 +19,7 @@ const repoRoot = path.resolve(root, "..");
 const sourceFile = path.join(root, "docs/AGENT-PROMPT.md");
 const destFile = path.join(
   repoRoot,
-  "Packages/RealityKitScripting/Sources/RealityKitScripting/Resources/agent-prompt.md",
+  "Packages/SpatialScriptRuntime/Sources/RealityKitScripting/Resources/agent-prompt.md",
 );
 
 function main() {

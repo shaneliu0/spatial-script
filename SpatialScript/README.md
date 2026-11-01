@@ -556,7 +556,7 @@ node docs/check-snippets.mjs
 node docs/check-snippets.mjs --verbose
 
 # the RealityKit consumer
-cd ../Packages/RealityKitScripting && swift test
+cd ../Packages/SpatialScriptRuntime && swift test
 ```
 
 `node docs/check-snippets.mjs` loads each runnable snippet, ticks it 120 times,
@@ -621,7 +621,7 @@ and fails if it throws at load, throws out of a tick, or leaves anything in
         measure.sh                one ad-hoc measurement against the macOS host
         gen-stress.mjs            prints a stress scene
     tools/make-rig-usdz.py        authors assets/rig.usdz
-  Packages/RealityKitScripting/   Swift package: JavaScriptCore host, RealityKit consumer
+  Packages/SpatialScriptRuntime/   Swift package: JavaScriptCore host, RealityKit consumer
     Sources/RealityKitScripting/  Host/, Runtime/, Applier/, Geometry/, Materials/,
                                   Physics/, Media/, Input/, Camera/, Dump/, Parity/,
                                   DevTransport/

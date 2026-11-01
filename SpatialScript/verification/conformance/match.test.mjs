@@ -12,7 +12,7 @@ import { matchDump } from "./match.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixturesPath = path.resolve(
   here,
-  "../../../Packages/RealityKitScripting/Tests/RealityKitScriptingTests/Fixtures/matcher-fixtures.json",
+  "../../../Packages/SpatialScriptRuntime/Tests/RealityKitScriptingTests/Fixtures/matcher-fixtures.json",
 );
 const { fixtures } = JSON.parse(fs.readFileSync(fixturesPath, "utf8"));
 let failed = 0;

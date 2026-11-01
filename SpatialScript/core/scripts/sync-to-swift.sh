@@ -7,7 +7,7 @@ core_root="$(cd "$here/.." && pwd)"
 repo_root="$(cd "$core_root/../.." && pwd)"
 
 source_file="$core_root/dist/spatial-core.js"
-dest_dir="$repo_root/Packages/RealityKitScripting/Sources/RealityKitScripting/Resources"
+dest_dir="$repo_root/Packages/SpatialScriptRuntime/Sources/RealityKitScripting/Resources"
 dest_file="$dest_dir/spatial-core.js"
 
 if [ ! -f "$source_file" ]; then

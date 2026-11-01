@@ -177,7 +177,7 @@ test('a full command batch applies in order without errors', async () => {
 /**
  * SPEC 8's native dump shape rule. The key sets below are the core dump's, which
  * both consumers mirror; they were cross-checked against
- * `Packages/RealityKitScripting/Sources/RealityKitScripting/Dump/ScriptingNativeDump.swift`
+ * `Packages/SpatialScriptRuntime/Sources/RealityKitScripting/Dump/ScriptingNativeDump.swift`
  * (`nativeDump` top level, `describe` per object) and
  * `Dump/ScriptingNativeDump+Phase2.swift` (`phase2SceneDump`, `phase2Dump`).
  * The web dump must carry the same keys under the same conditions, or a field

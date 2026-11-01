@@ -36,7 +36,7 @@ await build({
 // core change reaches the app on the next build without a manual step.
 const swiftCopy = path.resolve(
   root,
-  "../../Packages/RealityKitScripting/Sources/RealityKitScripting/Resources/spatial-core.js",
+  "../../Packages/SpatialScriptRuntime/Sources/RealityKitScripting/Resources/spatial-core.js",
 );
 if (fs.existsSync(path.dirname(swiftCopy))) {
   fs.copyFileSync(path.join(root, "dist/spatial-core.js"), swiftCopy);
