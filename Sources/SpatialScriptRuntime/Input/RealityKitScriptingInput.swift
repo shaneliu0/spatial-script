@@ -14,11 +14,6 @@ public extension View {
     func enableRealityKitScriptingInput() -> some View {
         modifier(RealityKitScriptingInputModifier())
     }
-
-    @available(*, deprecated, renamed: "enableRealityKitScriptingInput()")
-    func realityScripting() -> some View {
-        enableRealityKitScriptingInput()
-    }
 }
 
 struct RealityKitScriptingInputModifier: ViewModifier {

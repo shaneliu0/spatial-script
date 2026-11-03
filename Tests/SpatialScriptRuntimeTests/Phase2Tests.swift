@@ -13,12 +13,12 @@ import Testing
 
 /// SPEC section 14: parity with Apple's RealityKitScripting.
 ///
-/// The core is still growing the emitting side, so every case here drives the
-/// consumer with hand-built commands exactly as SPEC 14.13 defines them.
+/// Every case here drives the consumer with hand-built commands exactly as
+/// SPEC 14.13 defines them.
 @MainActor
 struct Phase2Tests {
-    /// Media fixtures live with the macOS host, which is the target that ships
-    /// them; the tests read them from there rather than keeping a second copy.
+    /// Media fixtures live in the shared asset root; the tests read them from
+    /// there rather than keeping a second copy.
     static var assetRoot: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // SpatialScriptRuntimeTests

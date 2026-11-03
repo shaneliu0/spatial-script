@@ -21,9 +21,4 @@ public struct ScriptingComponent: Component, Identifiable {
         self.source = source
         self.previousState = previousState
     }
-
-    @available(*, deprecated, renamed: "init(javaScript:)")
-    public init(source: String) {
-        self.init(javaScript: source)
-    }
 }
