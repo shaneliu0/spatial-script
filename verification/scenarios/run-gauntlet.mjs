@@ -180,14 +180,14 @@ async function main() {
   }
   console.log(`hostile scripts pushed: ${Object.keys(hostileScripts).length}`);
 
-  // A known-good scene between payload rounds, so a payload that breaks the
+  // A known-good scene before the payloads, so a payload that breaks the
   // scene shows up as the next /script failing rather than as silence.
   const good = "const S = require('spatial'); const scene = new S.Scene(); const m = new S.Mesh(new S.BoxGeometry(0.1,0.1,0.1), new S.MeshStandardMaterial()); m.name = 'cube'; m.addEventListener('tap', () => {}); scene.add(m); S.mount(scene);";
   await push("known-good scene before payloads", good);
-  for (const [route, body, raw] of hostilePayloads) {
+  for (const [route, body] of hostilePayloads) {
     const label = `payload ${route} ${String(body).slice(0, 40)}`;
     try {
-      const result = await post(route, body, { raw: raw === true || typeof body === "string" && raw });
+      const result = await post(route, body, { raw: true, timeout: route === "/parity" ? 150000 : 15000 });
       if (result.status >= 500) failures.push(`${label}: answered ${result.status}`);
     } catch (error) {
       failures.push(`${label}: request failed (${error.message})`);
@@ -197,8 +197,8 @@ async function main() {
   console.log(`hostile payloads sent: ${hostilePayloads.length}`);
 
   // The scene must still load a normal script after all of that.
-  const final = await post("/script", { source: fs.readFileSync(path.join(root, "examples/basics.js"), "utf8") });
-  if (final.status !== 200) failures.push(`final basics load answered ${final.status}: ${final.text.slice(0, 160)}`);
+  const final = await post("/script", fs.readFileSync(path.join(root, "examples/basics.js"), "utf8"), { raw: true });
+  if (final.status !== 200 || !JSON.parse(final.text).ok) failures.push(`final basics load answered ${final.status}: ${final.text.slice(0, 160)}`);
   await new Promise((r) => setTimeout(r, 500));
   try {
     const dump = await (await fetch(`${BASE}/dump?names=`)).json();
@@ -221,6 +221,7 @@ async function main() {
 }
 
 main().catch((error) => {
+  for (const f of failures) console.log(`FAIL ${f}`);
   console.log(`gauntlet aborted: ${error.message}`);
   process.exit(1);
 });
