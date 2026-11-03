@@ -822,6 +822,9 @@ Tests/
 
 ## 11. Dev transport (DEBUG builds only)
 
+"The macOS host" in this spec means a macOS app that embeds the runtime. It is not part of this
+repository, and neither is this server: the host app implements the transport.
+
 The macOS host starts an HTTP server on `127.0.0.1:8787` inside `#if DEBUG`. Routes:
 
 - `POST /script` body is JavaScript; the app replaces the scene's script. Response is

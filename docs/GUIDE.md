@@ -95,7 +95,10 @@ a generated scene can stay inside them. The rest is in
 "The macOS host" in this guide means a macOS app that embeds `SpatialScriptRuntime`
 and serves the dev transport described in [SPEC 11](../SPEC.md#11-dev-transport-debug-builds-only).
 The transport is implemented by the host app and is not part of the Swift package.
-With such a host running, it listens on `127.0.0.1:8787` in DEBUG builds only:
+With such a host running, it listens on `127.0.0.1:8787` in DEBUG builds only. The
+verification tools find the app by process name: set `SPATIAL_HOST_APP` if yours
+isn't called `SpatialHost`, and list any windows that aren't the scene in
+`SPATIAL_HOST_UI_WINDOWS`, separated by commas.
 
 ```bash
 # is it up?

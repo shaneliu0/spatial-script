@@ -32,12 +32,13 @@ async function mac(pathname, body) {
 // last focused. The scene window is the one that is not a named UI window; picking it by exclusion
 // keeps the screenshot pointed at the RealityView no matter what has focus.
 const UI_WINDOW_TITLES = (process.env.SPATIAL_HOST_UI_WINDOWS ?? "").split(",").filter(Boolean);
+const HOST_APP = process.env.SPATIAL_HOST_APP ?? "SpatialHost";
 function windowId() {
   const script = [
     "import Quartz",
     `skip = ${JSON.stringify(UI_WINDOW_TITLES)}`,
     "for w in Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID):",
-    "    if w.get('kCGWindowOwnerName') != 'SpatialHost' or w.get('kCGWindowLayer') != 0: continue",
+    `    if w.get('kCGWindowOwnerName') != ${JSON.stringify(HOST_APP)} or w.get('kCGWindowLayer') != 0: continue`,
     "    if (w.get('kCGWindowName') or '') in skip: continue",
     "    print(w['kCGWindowNumber']); break",
   ].join("\n");

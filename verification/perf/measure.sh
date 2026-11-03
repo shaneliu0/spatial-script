@@ -20,5 +20,5 @@ fps=(d2["frame"]-f0)/2
 ct=st.get('coreTickMs',{}); ap=st.get('applyMs',{}); fi=st.get('frameIntervalMs',{}); rc=st.get('resourceCache',{})
 print(f"[{label}] jit={st.get('jit','?')} push round trip {t1-t0:.2f}s (server push-to-first-frame {st.get('pushToFirstFrameMs','?')} ms) | measured fps {fps:.1f} | interval {fi.get('median','?')} ms | core tick {ct.get('median','?')} ms | apply {ap.get('median','?')} ms | objects {len(d['objects'])} | errors {d['errors']} | mesh builds {rc.get('meshBuilds')} material builds {rc.get('materialBuilds')} shape builds {rc.get('shapeBuilds')}")
 PY
-ps -o rss=,%cpu= -p $(pgrep -x SpatialHost) | awk '{print "    process: rss MB",$1/1024,"cpu%",$2}'
+ps -o rss=,%cpu= -p "$(pgrep -x "${SPATIAL_HOST_APP:-SpatialHost}")" | awk '{print "    process: rss MB",$1/1024,"cpu%",$2}'
 rm -f "$SCRIPT"

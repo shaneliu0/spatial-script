@@ -23,9 +23,11 @@ const REPORTS = path.join(os.homedir(), "Library/Logs/DiagnosticReports");
 const failures = [];
 let steps = 0;
 
+const HOST_APP = process.env.SPATIAL_HOST_APP ?? "SpatialHost";
+
 function crashReports() {
   try {
-    return fs.readdirSync(REPORTS).filter((f) => f.startsWith("SpatialHost")).length;
+    return fs.readdirSync(REPORTS).filter((f) => f.startsWith(HOST_APP)).length;
   } catch {
     return 0;
   }
