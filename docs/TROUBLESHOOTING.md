@@ -1081,7 +1081,7 @@ space, not a measurement of its own; run `measure.sh --count 4000
 Every row moves by 10–15 % between passes, so treat them as the shape of the
 curve rather than as constants, and re-measure before acting on a small
 difference. `verification/perf/check.mjs` **replaces the running scene** with
-its own and leaves the last one mounted; re-push your script afterwards.
+its own and restores `examples/basics.js` when it finishes; re-push your script afterwards.
 
 **Share geometry — sharing is by instance.** Both consumers cache native mesh
 resources by the geometry's `uuid` and revision, so 1500 meshes referencing one

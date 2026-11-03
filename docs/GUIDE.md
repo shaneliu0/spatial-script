@@ -5,7 +5,7 @@ render in RealityKit (macOS and visionOS) and in three.js (a browser), from one
 unchanged script. It follows three.js class names, constructor signatures,
 property names and method names wherever a three.js equivalent exists, so
 three.js knowledge transfers directly. It is not three.js: there is no
-renderer, no camera the script controls, no custom shaders and no
+renderer, no custom shaders and no
 post-processing — you build a scene and call `Spatial.mount(scene)`, and the
 host renders it. It adds what a spatial runtime needs and three.js lacks:
 physics bodies and joints, tap/hover/drag/manipulation events with bubbling,
@@ -253,7 +253,7 @@ them with `ScriptingRuntime.register(module:function:)`, the web page with
 Launch the macOS host with the JavaScriptCore JIT off:
 
 ```bash
-SPATIAL_INTERPRETER=1 open -a YourHostApp
+open --env SPATIAL_INTERPRETER=1 -a YourHostApp
 # or, from Xcode: add --interpreter to the scheme's arguments
 ```
 
@@ -407,7 +407,7 @@ parity gate).
 
 ## Verifying a scene
 
-Three tools, in increasing order of what they prove.
+These tools are listed in increasing order of what they prove.
 
 | Tool | Proves |
 |---|---|
@@ -423,9 +423,10 @@ deterministic tick plan, then diffs the core dumps, the native dumps and the
 console output, and leaves the two screenshots side by side.
 
 ```bash
-# the macOS host must be running with its dev server up
+# the macOS host must be running with its dev server up, and python3 needs the Quartz bindings
+# (pip install pyobjc-framework-Quartz) to capture its window
 node verification/parity/run-parity.mjs examples/basics.js --steps verification/parity/steps/basics.json --label basics
-verification/parity/run-all.sh        # every example and scenario that has a steps file
+verification/parity/run-all.sh        # every example and scenario
 ```
 
 A steps file is a JSON array in the conformance format:
@@ -486,7 +487,7 @@ mesh), which takes 1.2 s — see the table in
 [TROUBLESHOOTING](TROUBLESHOOTING.md#memory-and-performance).
 
 **`check.mjs` replaces whatever scene is running** — it pushes its own stress
-scenes and leaves the last one mounted. Re-push your script when it finishes.
+scenes and restores `examples/basics.js` when it finishes. Re-push your script afterwards.
 
 `measure.sh` pushes one generated scene and prints load time, measured frame
 rate, the `/stats` medians, the resource-cache build counts, and the process's
@@ -495,7 +496,7 @@ RSS and CPU — the quickest way to compare two authoring choices.
 ## The shared asset root
 
 `assets` is the one asset root both backends resolve `asset://`
-against, and the only part of the repository a Release build bundles — examples,
+against, and the only part of the repository a host app needs in a Release build — examples,
 scenarios and conformance cases are DEBUG-only.
 
 | File | Used by |
