@@ -2,6 +2,7 @@
   "name": "spatialscript",
   "private": true,
   "description": "One JavaScript scene API that renders in RealityKit and in three.js.",
+  "license": "MIT",
   "repository": "github:shaneliu0/spatial-script",
   "version": "0.1.0",
   "packageManager": "pnpm@11.21.0",
